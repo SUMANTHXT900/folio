@@ -1,7 +1,46 @@
-node_modules
-dist
-dist-ssr
-*.local
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Production builds
+dist/
+frontend/dist/
+dist-ssr/
 *.tsbuildinfo
+
+# Rust build artifacts
+target/
+wasm/target/
+
+# Generated WASM package (reproduced via `npm run build:wasm` in frontend/)
+wasm/pkg/
+
+# Local PDF corpora and personal test documents (never commit)
+test pdfs
+test-pdfs
+test pdfs/
+test-pdfs/
+*.pdf
+
+# E2E run artifacts (screenshots, downloads, baselines)
+frontend/e2e/after/
+frontend/e2e/baseline/
+frontend/e2e/downloads/
+frontend/e2e/screenshots/
 qa-shots/
+
+# Environment and secrets
+.env
+.env.*
+*.local
+
+# Logs and coverage
 *.log
+coverage/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,17 @@
+@import 'tailwindcss';
+@import './studio/studio-theme.css';
+
+/*
+ * Developer Console (testbench) overrides. The production Studio theme
+ * above owns the default look; `body.testbench` (set by the dev-only
+ * `src/testbench/main.tsx` entry) restores the console's dark slate base.
+ */
+body.testbench {
+  background-color: #0b0e14;
+  color: #e6e9f0;
+  background-image: none;
+}
+
+body.testbench::before {
+  display: none;
+}
