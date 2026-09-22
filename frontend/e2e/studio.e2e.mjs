@@ -1,7 +1,7 @@
 /**
  * Phase 1B production UI E2E (real headless Chrome, real Folio engine).
  *
- * Drives the integrated PDF Studio UI end to end through REAL user
+ * Drives the integrated Folio UI end to end through REAL user
  * flows: file upload via <input type=file>, thumbnail grid, merge /
  * split / rearrange / rotate / metadata / images operations, progress,
  * cancellation, structured errors, downloads, and the large-file

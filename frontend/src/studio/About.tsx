@@ -190,7 +190,7 @@ export default function About() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.45, delay: 0.14, ease }}
-            href="https://github.com/SUMANTHXT900/pdf-studio"
+            href="https://github.com/SUMANTHXT900/folio"
             target="_blank"
             rel="noopener noreferrer"
             whileHover={{ y: -2 }}

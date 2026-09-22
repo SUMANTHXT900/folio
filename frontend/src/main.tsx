@@ -6,10 +6,9 @@ import './index.css';
 import StudioApp from './studio/StudioApp';
 
 /**
- * Production entry: the PDF Studio experience backed by the Folio
- * engine. This bundle contains Studio only — the Developer Testbench
- * lives in top-level `testbench/` with its own dev server and is never
- * imported here, so production builds cannot ship testbench code.
+ * Production entry: the Folio experience backed by the Folio
+ * engine. This bundle contains the app only — no developer tooling
+ * is imported here, so production builds cannot ship it.
  */
 function getRoot(): HTMLElement {
   const root = document.getElementById('root');

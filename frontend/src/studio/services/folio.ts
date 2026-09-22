@@ -1,6 +1,6 @@
 /**
  * Folio application PDF service — the single integration boundary
- * between the PDF Studio UI and the frozen Folio engine.
+ * between the Folio UI and the frozen Folio engine.
  *
  * ```text
  * Studio UI (tools/hooks)

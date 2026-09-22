@@ -417,7 +417,7 @@ function Footer() {
             LinkedIn
           </a>
           <a
-            href="https://github.com/SUMANTHXT900/pdf-studio"
+            href="https://github.com/SUMANTHXT900/folio"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-ink-900 dark:hover:text-paper-100 transition-colors"

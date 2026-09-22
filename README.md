@@ -25,7 +25,7 @@
 
 ## New architecture (v1.7.0)
 
-This repository is the single source of truth for **both** the PDF Studio production
+This repository is the single source of truth for **both** the Folio production
 application **and** the complete Folio PDF engine: the Rust source (`src/`), the
 WASM bridge (`wasm/`), engine tests (`tests/`), CLI examples (`examples/`), and the
 React frontend (`frontend/`) all live here. No separate engine repository is required.
@@ -88,7 +88,7 @@ Every tool reports real engine progress (stage + percentage), honest cancellatio
 ## Repository layout
 
 ```text
-pdf-studio/
+folio/
 ├── frontend/     Production Studio (React + TS + Vite)
 ├── src/          Folio Rust PDF engine
 ├── wasm/         Rust → WASM bridge (wasm-pack)

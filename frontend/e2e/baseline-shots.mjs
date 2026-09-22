@@ -1,4 +1,4 @@
-/** Baseline screenshots of the pristine PDF Studio dev UI (light theme). */
+/** Baseline screenshots of the Folio dev UI (light theme). */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
