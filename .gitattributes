@@ -1,0 +1,4 @@
+# Normalize line endings to LF on checkout so Prettier (endOfLine: lf),
+# Rust fmt, and editor tooling agree on every platform. History is
+# untouched; this only governs working-copy conversion going forward.
+* text=auto eol=lf
