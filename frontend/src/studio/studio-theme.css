@@ -1,0 +1,255 @@
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Paper & ink editorial palette */
+  --color-paper-50: #fdfbf7;
+  --color-paper-100: #f7f3eb;
+  --color-paper-200: #efe8da;
+  --color-paper-300: #e2d7c2;
+  --color-paper-400: #d4c5a8;
+
+  --color-ink-950: #17130e;
+  --color-ink-900: #1e1913;
+  --color-ink-800: #2a2319;
+  --color-ink-700: #3a3126;
+  --color-ink-600: #4a4033;
+  --color-ink-500: #64594a;
+  --color-ink-400: #8a7d6a;
+  --color-ink-300: #c3b69e;
+
+  /* Rust / brass accent */
+  --color-brass-200: #f4c98a;
+  --color-brass-300: #eec176;
+  --color-brass-400: #d9902d;
+  --color-brass-500: #c97a1f;
+  --color-brass-600: #a45e16;
+
+  /* Deep forest secondary */
+  --color-forest-300: #7fa084;
+  --color-forest-400: #5f7d63;
+  --color-forest-500: #43614b;
+  --color-forest-600: #2e4534;
+
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-paper-100 text-ink-900 antialiased;
+  font-family: var(--font-sans);
+  background-image:
+    radial-gradient(
+      60rem 60rem at 85% -10%,
+      color-mix(in srgb, var(--color-brass-400) 9%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      50rem 50rem at -10% 110%,
+      color-mix(in srgb, var(--color-forest-500) 7%, transparent),
+      transparent 55%
+    );
+  background-attachment: fixed;
+  overflow-x: hidden;
+}
+
+.dark body {
+  @apply bg-ink-950 text-paper-100;
+  background-image:
+    radial-gradient(
+      60rem 60rem at 85% -10%,
+      color-mix(in srgb, var(--color-brass-500) 12%, transparent),
+      transparent 60%
+    ),
+    radial-gradient(
+      50rem 50rem at -10% 110%,
+      color-mix(in srgb, var(--color-forest-600) 12%, transparent),
+      transparent 55%
+    );
+}
+
+/* Subtle paper grain — fixed layer, no layout cost */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+}
+
+/* Ambient blobs — GPU-only (transform), slow drift.
+   #24: reduced blur + hidden on small screens / low-power devices. */
+.blob {
+  position: fixed;
+  border-radius: 9999px;
+  filter: blur(42px);
+  pointer-events: none;
+  z-index: -1;
+  will-change: transform;
+  transform: translateZ(0);
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .blob {
+    filter: blur(28px);
+    opacity: 0.7;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .blob {
+    display: none;
+  }
+}
+.blob-a {
+  width: 42rem;
+  height: 28rem;
+  top: -8rem;
+  right: -6rem;
+  background: color-mix(in srgb, var(--color-brass-400) 10%, transparent);
+  animation: drift-a 22s ease-in-out infinite alternate;
+}
+.blob-b {
+  width: 36rem;
+  height: 30rem;
+  bottom: -10rem;
+  left: -8rem;
+  background: color-mix(in srgb, var(--color-forest-500) 8%, transparent);
+  animation: drift-b 26s ease-in-out infinite alternate;
+}
+@keyframes drift-a {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(-14px, 18px, 0) scale(1.06);
+  }
+}
+@keyframes drift-b {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(18px, -16px, 0) scale(1.05);
+  }
+}
+
+/* Tap target */
+@layer base {
+  button,
+  a,
+  [role='button'] {
+    min-height: var(--tap, 0px);
+  }
+  @media (pointer: coarse) {
+    :root {
+      --tap: 44px;
+    }
+  }
+}
+
+@layer utilities {
+  .shadow-soft {
+    box-shadow:
+      0 1px 2px rgba(23, 19, 14, 0.04),
+      0 8px 24px -12px rgba(23, 19, 14, 0.12);
+  }
+  .dark .shadow-soft {
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 10px 30px -14px rgba(0, 0, 0, 0.55);
+  }
+  .glass {
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  /* #23: lighter blur on coarse-pointer / small screens (mobile GPUs) */
+  @media (max-width: 640px), (pointer: coarse) {
+    .glass {
+      backdrop-filter: blur(9px);
+      -webkit-backdrop-filter: blur(9px);
+    }
+  }
+  .shimmer {
+    position: relative;
+    overflow: hidden;
+  }
+  .shimmer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.55) 50%,
+      transparent 70%
+    );
+    transform: translateX(-100%);
+    animation: shimmer-slide 2.2s ease-in-out infinite;
+  }
+  .dark .shimmer::after {
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.08) 50%,
+      transparent 70%
+    );
+  }
+}
+@keyframes shimmer-slide {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+::selection {
+  background-color: color-mix(in srgb, var(--color-brass-400) 40%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-paper-300 rounded-full;
+}
+.dark ::-webkit-scrollbar-thumb {
+  @apply bg-ink-700;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+}
+
+/* Focus ring polish */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-brass-400) 60%, transparent);
+  outline-offset: 2px;
+}
+
+/* Reduced motion — keep it calm; also guard shimmer/blobs */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .blob-a,
+  .blob-b {
+    animation: none !important;
+    display: none;
+  }
+  .shimmer::after {
+    animation: none !important;
+  }
+}

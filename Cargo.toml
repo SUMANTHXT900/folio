@@ -1,0 +1,50 @@
+[package]
+name = "folio-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Local, offline document-processing core (Lesson 0 foundation)"
+license = "MIT"
+
+[lib]
+name = "folio_engine"
+path = "src/lib.rs"
+
+[dependencies]
+# PDF parsing/manipulation. Default features are disabled for a
+# WASM-friendly footprint: no rayon (threading) and no chrono-clock
+# (timezone database chain). PDF dates are fixed-offset, so the full
+# clock backend is unnecessary; date parsing is deferred anyway.
+lopdf = { version = "0.45", default-features = false }
+# Image decoding for `pdf.images_to_pdf` (Lesson 11). Pure-Rust, offline,
+# no filesystem/OS/process access: JPEG via `zune-jpeg`, PNG via `png` +
+# `miniz_oxide`/`crc32fast` — all WASM-compatible. Only the two required
+# formats are enabled; other formats decode as unsupported rather than
+# pulling in extra codecs. No rayon (default-features off) to keep the
+# sequential baseline and WASM single-threaded execution.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Minimal EXIF orientation/DPI reader for Lesson 11. Pure-Rust, std-only,
+# no filesystem/network — safe on `wasm32-unknown-unknown`. The crate is
+# published as `kamadak-exif` (lib name `exif`) to avoid a registry conflict.
+exif = { package = "kamadak-exif", version = "0.6" }
+
+# WASM-only dependencies (never built, downloaded, or linked natively):
+#
+# - `lopdf/wasm_js`: gives `getrandom` (via lopdf's `rand`) a JS-backed
+#   RNG on `wasm32-unknown-unknown`, where the default backend does not
+#   exist. Without it the crate cannot compile for WASM at all.
+# - `js-sys`: minimal JS bindings for the platform clock (`core::clock`,
+#   `observability::timing`). `std::time::{SystemTime, Instant}` PANIC on
+#   wasm32-unknown-unknown (verified in toolchain `sys/pal/wasm`), so the
+#   engine's timestamps and monotonic durations need JS clocks there.
+#   Native builds see zero new dependencies from this section.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+lopdf = { version = "0.45", default-features = false, features = ["wasm_js"] }
+js-sys = "0.3"
+
+[dev-dependencies]
+# Same crate for building deterministic in-memory test fixtures only.
+# Never used by the processing core itself.
+lopdf = { version = "0.45", default-features = false }
+
+[profile.release]
+opt-level = 3
