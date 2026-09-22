@@ -8,7 +8,13 @@ Actual commands for this repository. Run Rust commands in `engine/`; frontend co
 - **Rust toolchain** with the `wasm32-unknown-unknown` target (engine builds, tests).
 - **`wasm-pack`** (WASM bridge builds).
 - **Headless Chrome** for E2E (the suite uses `puppeteer-core` with a local Chrome install; see `app/e2e/*.mjs` headers for the expected binary path).
-- **Local PDF corpus** (gitignored): a `test pdfs/` directory at the repo root containing the E2E fixtures (`1.2.pdf` and the large ~514 MB / 2585-page file). Provided via a gitignored symlink for local runs only; never committed. Small synthetic fixtures can be generated with `app/e2e/make-fixtures.mjs`. Rust examples that discover the corpus default to `../test pdfs` when run from `engine/` (overridable with `--dir`).
+- **No private PDF corpus required.** A fresh clone runs the full canonical suite with only the dependencies above. Large external PDFs are optional developer-owned benchmark inputs (see "Optional large-file testing" below), never committed.
+
+## Testing policy: canonical vs optional
+
+**Canonical tests** must be reproducible from the repository alone: Rust unit + integration tests, deterministic fixtures, frontend unit tests, the canonical E2E suite (`app/e2e/studio.e2e.mjs`), and build/typecheck/lint/format validation. A fresh clone runs all of these with no private corpus.
+
+**Optional large-file / performance validation** uses developer-supplied PDFs (hundred-megabyte / thousand-page real-world files) for stress testing, memory testing, benchmark runs, and large-document QA. It is never required for `npm test`, canonical E2E, fresh-clone validation, CI, production builds, or normal development. Previously verified results (e.g. the ~514 MB / 2585-page runs from engine development) remain historical benchmark evidence, not repository fixtures.
 
 ## Setup (fresh clone)
 
@@ -65,17 +71,58 @@ npm run build              # tsc + vite build + PWA service worker (precaches WA
 cd app
 # terminal 1: serve the app (use a fixed, verified port)
 npx vite --port 5199 --strictPort
-# terminal 2:
-node e2e/studio.e2e.mjs --dev http://localhost:5199   # 25/25: home, tools, errors, large file, cancellation
+# terminal 2: canonical suite — passes from a fresh clone, no corpus needed
+node e2e/studio.e2e.mjs --dev http://localhost:5199
 ```
 
-Additional suites: `e2e/thumbnail.e2e.mjs`, `e2e/metadata.e2e.mjs`, `e2e/large-files.e2e.mjs`. Helpers: `e2e/make-fixtures.mjs` (synthetic fixtures), `e2e/baseline-shots.mjs` (UI screenshots).
+`studio.e2e.mjs` is the canonical suite (home, tools, errors, cancellation where
+reproducible). When the optional local corpus exists it uses the real fixtures;
+otherwise it generates deterministic synthetic PDFs (same page shapes, ASCII
+metadata — see `e2e/corpus.mjs`) to an OS temp dir and runs the same flows.
+Only the large-file sections need the real corpus: when `test pdfs/merged.pdf`
+is absent they print `SKIP` with the reason and the suite still passes.
+
+Optional suites (require the local corpus; SKIP cleanly with exit 0 when it is
+absent — never wait on, never fail for, a missing optional file):
+
+- `e2e/large-files.e2e.mjs` — rendering/thumbnail stress matrix over the corpus
+- `e2e/thumbnail.e2e.mjs` — thumbnail engine matrix incl. large-doc stress
+- `e2e/metadata.e2e.mjs` — engine metadata matrix incl. large-file read/write
+
+Helpers: `e2e/make-fixtures.mjs` (committed `pixel.png`/`pixel.jpg` used by the
+Images → PDF flow), `e2e/baseline-shots.mjs` (manual screenshots; needs the
+corpus `1.2.pdf`, exits 2 with a clear message when absent), `e2e/corpus.mjs`
+(shared corpus policy + synthetic-PDF writer).
 
 **Port discipline (hard-won — see `docs/LESSONS.md` L-8):** before trusting an E2E run, confirm exactly one server process serves the port and that its path is the worktree you intend (stale servers from prior sessions silently serve old code). Kill strays by PID, start fresh with `--strictPort` (fails loudly instead of shifting ports), verify, then run.
 
-## Large-file testing
+## Optional large-file testing
 
-The large corpus file (~514 MB / 2585 pages) lives only in the local `test pdfs/` directory. E2E asserts: full page count loads, thumbnail DOM stays bounded (24 images), zero console errors, cancellation works. Do not commit the file or any `test pdfs/` content (`*.pdf` is gitignored).
+Large PDFs are developer-owned benchmark/stress-test inputs, never repository
+fixtures. To run the optional suites, place your own files in a local-only
+`test pdfs/` directory at the repo root (explicitly OPTIONAL / GITIGNORED / NOT
+REQUIRED FOR NORMAL TESTING — see `.gitignore`; never commit the PDFs):
+
+```text
+folio/
+└── test pdfs/            # gitignored; create locally only for stress runs
+    ├── 1.2.pdf
+    ├── 2. EWTL-Uniform Plane Wave.pdf
+    ├── generated.pdf
+    └── merged.pdf        # large file for the bounded-thumbnail + cancel runs
+```
+
+With the corpus present, `studio.e2e.mjs` runs its large-file sections for real
+(full page count, bounded 24-image DOM, zero console errors, honest merge
+cancellation) and the three optional suites run their full matrices. Without
+it, canonical validation still passes and the optional parts SKIP with an
+explicit message.
+
+Historical note: during engine development Folio was validated against a
+~514 MB / 2585-page file (bounded thumbnails, cancellation, large-document
+processing). That result is preserved as benchmark evidence in `docs/WORKLOG.md`
+and the root `ARCHITECTURE.md` log — it does not imply the file ships with the
+repository.
 
 ## Benchmark workflow
 
@@ -83,7 +130,7 @@ Benchmark records from engine development live with the engine code where legiti
 
 ## Debugging
 
-- Engine logic: reproduce natively first (from `engine/`: `cargo test` with a focused filter, CLI examples in `engine/examples/` against the local corpus via `--dir ../test pdfs`) — native iteration is faster than the WASM loop.
+- Engine logic: reproduce natively first (from `engine/`: `cargo test` with a focused filter, CLI examples in `engine/examples/` against the local corpus via `--dir ../test pdfs` when you have one) — native iteration is faster than the WASM loop.
 - Browser behavior: dev server + browser console; the WASM glue installs `console_error_panic_hook`, so Rust panics surface as readable console messages instead of bare `unreachable`.
 - Rendering/thumbnails: `app/src/rendering/devHook.ts` and `memory.ts` support inspection; unit tests in `rendering/*.test.ts` cover geometry, windows, and error mapping.
 

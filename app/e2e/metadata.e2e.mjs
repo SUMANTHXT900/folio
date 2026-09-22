@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
+import { missingFiles, reportOptionalSkip } from './corpus.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PDF_DIR = path.resolve(__dirname, '../../test pdfs');
@@ -38,6 +39,14 @@ const FILE_NAMES = {
   empty: 'AI_ML vs. Software-Defined Vehicles_ Course and Career Comparison.pdf',
   large: 'merged.pdf',
 };
+
+// Optional suite: asserts corpus-specific metadata (private titles, authors,
+// dates, 80/2585 page counts) that cannot be synthesized honestly — SKIP
+// cleanly when the corpus is absent.
+{
+  const missing = missingFiles(Object.values(FILE_NAMES));
+  if (missing.length > 0) reportOptionalSkip('metadata.e2e.mjs', missing);
+}
 
 const CHUNK_BYTES = 6 * 1024 * 1024;
 

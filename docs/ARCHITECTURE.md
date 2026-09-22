@@ -108,9 +108,9 @@ Everything PDF-related executes in one of three places: the main thread (UI + re
 
 ## Large-file handling
 
-- Verified target: ~514 MB / 2585 pages (E2E `large-files.e2e.mjs` + `studio.e2e.mjs` large-file section): full page count loads (2585/2585), thumbnail DOM stays bounded (24 images, not 2585), zero console errors.
+- Design target: hundred-megabyte / thousand-page documents (historically verified against a ~514 MB / 2585-page file: full page count loads (2585/2585), thumbnail DOM stays bounded (24 images, not 2585), zero console errors — see `docs/WORKLOG.md` and the root `ARCHITECTURE.md` log for the benchmark evidence).
 - Mechanisms: windowed page processing, bounded concurrency, binary ownership (no copies, no base64), no full-document thumbnail materialization, no unbounded event retention, no React-state binaries, document close/release.
-- `test pdfs/` corpus (including the large file) is gitignored local-only infrastructure, served via a symlink at the repo root for E2E runs. Never committed.
+- Testing split (see `docs/DEVELOPMENT.md`): the canonical E2E suite (`app/e2e/studio.e2e.mjs`) runs from a fresh clone without any private corpus (deterministic synthetic small fixtures when needed; large-file sections SKIP explicitly). The `test pdfs/` corpus (including any large file) is gitignored, developer-owned, optional benchmark infrastructure — never committed, never required for canonical validation. `e2e/large-files.e2e.mjs`, `e2e/thumbnail.e2e.mjs`, and `e2e/metadata.e2e.mjs` are optional suites that run only when the corpus is present.
 
 ## Concurrency and caching
 

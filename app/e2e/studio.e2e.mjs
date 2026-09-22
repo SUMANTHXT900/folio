@@ -1,5 +1,13 @@
 /**
- * Phase 1B production UI E2E (real headless Chrome, real Folio engine).
+ * Canonical production UI E2E (real headless Chrome, real Folio engine).
+ *
+ * Fresh-clone reproducible: the small fixtures (`1.2.pdf`, `2. ...pdf`) are
+ * used when the optional local `test pdfs/` corpus exists, otherwise
+ * deterministic synthetic PDFs (same page shapes, ASCII metadata) are
+ * generated to an OS temp dir — the same flows run either way. Only the
+ * large-file sections require the optional ~490 MB corpus: when it is absent
+ * they SKIP cleanly (never fail, never wait on a missing file). See
+ * `e2e/corpus.mjs` and `docs/DEVELOPMENT.md`.
  *
  * Drives the integrated Folio UI end to end through REAL user
  * flows: file upload via <input type=file>, thumbnail grid, merge /
@@ -16,9 +24,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
+import { CORPUS_DIR, missingFiles, writeSyntheticPdf } from './corpus.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CORPUS = path.resolve(__dirname, '../../test pdfs');
+const CORPUS = CORPUS_DIR;
 
 const args = process.argv.slice(2);
 function flag(name, fallback) {
@@ -28,14 +37,67 @@ function flag(name, fallback) {
 const DEV_URL = flag('--dev', 'http://localhost:5199');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
-const SMALL_22 = path.join(CORPUS, '1.2.pdf');
-const RICH_80 = path.join(CORPUS, '2. EWTL-Uniform Plane Wave.pdf');
-const LARGE = path.join(CORPUS, 'merged.pdf');
+const SMALL_NAME = '1.2.pdf';
+const RICH_NAME = '2. EWTL-Uniform Plane Wave.pdf';
+const LARGE_NAME = 'merged.pdf';
+const SMALL_PAGES = 22;
+const RICH_PAGES = 80;
+const LARGE_PAGES = 2585;
+
+// Canonical fixtures: prefer the optional local corpus; otherwise generate
+// deterministic synthetics (same page shapes) so a fresh clone runs the same
+// flows. The large file has no stand-in — its sections SKIP when absent.
+let SMALL_22 = path.join(CORPUS, SMALL_NAME);
+let RICH_80 = path.join(CORPUS, RICH_NAME);
+const LARGE = path.join(CORPUS, LARGE_NAME);
+{
+  const absentSmall = missingFiles([SMALL_NAME, RICH_NAME]);
+  if (absentSmall.length > 0) {
+    console.log(`Corpus: synthetic small fixtures (absent: ${absentSmall.join(', ')})`);
+    if (!fs.existsSync(SMALL_22)) {
+      SMALL_22 = writeSyntheticPdf({ name: 'synthetic-22.pdf', pages: SMALL_PAGES });
+    }
+    if (!fs.existsSync(RICH_80)) {
+      RICH_80 = writeSyntheticPdf({
+        name: 'synthetic-80.pdf',
+        pages: RICH_PAGES,
+        info: {
+          title: 'PowerPoint Presentation',
+          author: 'synthetic',
+          creator: 'folio-e2e',
+          producer: 'folio-e2e',
+        },
+      });
+    }
+    // Self-check: the writer must produce engine-readable PDFs.
+    for (const [label, file, pages] of [
+      ['small', SMALL_22, SMALL_PAGES],
+      ['rich', RICH_80, RICH_PAGES],
+    ]) {
+      const head = fs.readFileSync(file).subarray(0, 5).toString();
+      if (head !== '%PDF-') throw new Error(`synthetic ${label} fixture invalid: ${file}`);
+      void pages;
+    }
+  } else {
+    console.log('Corpus: real `test pdfs/` fixtures');
+  }
+  console.log(
+    fs.existsSync(LARGE)
+      ? 'Corpus: large file present (large-file sections will run)'
+      : 'Corpus: large file absent (large-file sections will SKIP)',
+  );
+}
+const HAS_LARGE = fs.existsSync(LARGE);
 
 const results = [];
+const skipped = [];
 function check(name, ok, details) {
   results.push({ name, ok: Boolean(ok), details: details ?? null });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${details ? ` — ${details}` : ''}`);
+}
+function skip(name, reason) {
+  skipped.push({ name, reason });
+  console.log(`SKIP  ${name} — ${reason}`);
 }
 
 async function newPage(browser) {
@@ -180,7 +242,8 @@ async function main() {
         ?.click();
     });
     const kept = await page.evaluate(() => document.body.innerText);
-    check('split toggles to 21/22 kept', /21\/22 kept/.test(kept));
+    const keptRe = new RegExp(`${SMALL_PAGES - 1}/${SMALL_PAGES} kept`);
+    check(`split toggles to ${SMALL_PAGES - 1}/${SMALL_PAGES} kept`, keptRe.test(kept));
     const dlDir = path.join(__dirname, 'downloads');
     const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {
@@ -379,8 +442,21 @@ async function main() {
     await page.close();
   }
 
-  // ---- Large file: open 490MB, bounded thumbs, close ----
-  {
+  // ---- Large file: open 490MB, bounded thumbs, close (OPTIONAL corpus) ----
+  if (!HAS_LARGE) {
+    skip(
+      'large file opens with full page count',
+      'optional corpus unavailable (test pdfs/merged.pdf absent)',
+    );
+    skip(
+      'large file thumbnails bounded (no 2585-img DOM)',
+      'optional corpus unavailable (test pdfs/merged.pdf absent)',
+    );
+    skip(
+      'large file has zero console errors',
+      'optional corpus unavailable (test pdfs/merged.pdf absent)',
+    );
+  } else {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'split');
     await upload(page, 'input[type="file"]', [LARGE]);
@@ -389,7 +465,11 @@ async function main() {
     });
     const text = await bodyText(page);
     const m = text.match(/(\d+)\/(\d+) kept/);
-    check('large file opens with full page count', m !== null && m[2] === '2585', m?.[0]);
+    check(
+      'large file opens with full page count',
+      m !== null && m[2] === String(LARGE_PAGES),
+      m?.[0],
+    );
     const imgCount = await page.evaluate(() => document.querySelectorAll('img').length);
     check('large file thumbnails bounded (no 2585-img DOM)', imgCount < 100, `${imgCount} imgs`);
     if (consoleErrors.length > 0)
@@ -402,8 +482,13 @@ async function main() {
     );
   }
 
-  // ---- Cancellation through the UI: merge large+small, cancel mid-run ----
-  {
+  // ---- Cancellation through the UI: merge large+small, cancel mid-run (OPTIONAL corpus) ----
+  if (!HAS_LARGE) {
+    skip(
+      'merge cancellation surfaces honestly in UI',
+      'optional corpus unavailable (needs test pdfs/merged.pdf for a cancellable long run)',
+    );
+  } else {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'merge');
     await upload(page, 'input[type="file"]', [LARGE, SMALL_22]);
@@ -439,7 +524,10 @@ async function main() {
 
   await browser.close();
   const failed = results.filter((r) => !r.ok);
-  console.log(`\nE2E: ${results.length - failed.length}/${results.length} passed`);
+  const passed = results.length - failed.length;
+  const skipNote =
+    skipped.length > 0 ? `, ${skipped.length} skipped (optional corpus unavailable)` : '';
+  console.log(`\nE2E: ${passed}/${results.length} passed${skipNote}`);
   if (failed.length > 0) {
     console.log('Failed:', failed.map((f) => f.name).join(', '));
     process.exit(1);

@@ -134,13 +134,19 @@ npm run lint
 npm run format:check
 ```
 
-Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/`
-and expects a local PDF corpus in a gitignored `test pdfs/` directory at the repo root:
+Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/`.
+The canonical suite passes from a fresh clone with no private corpus:
 
 ```bash
 cd app
 node e2e/studio.e2e.mjs --dev http://localhost:5199
 ```
+
+Small fixtures fall back to deterministic synthetic PDFs when the optional local
+corpus is absent; only the large-file sections need the real corpus and SKIP
+explicitly without it. `large-files` / `thumbnail` / `metadata` E2E are optional
+suites for developer-owned stress runs (see `docs/DEVELOPMENT.md`). The
+gitignored `test pdfs/` directory at the repo root is never committed.
 
 ## Deploy
 

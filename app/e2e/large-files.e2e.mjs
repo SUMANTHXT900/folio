@@ -38,6 +38,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
+import { missingFiles, reportOptionalSkip } from './corpus.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PDF_DIR = path.resolve(__dirname, '../../test pdfs');
@@ -56,6 +57,13 @@ const FILE_NAMES = {
   medium: '1. EWTL-Time-varying fields & Maxwells equations.pdf',
   large: 'merged.pdf',
 };
+
+// Optional suite: asserts corpus-specific facts (private titles, 2585 pages)
+// that cannot be synthesized honestly — SKIP cleanly when the corpus is absent.
+{
+  const missing = missingFiles(Object.values(FILE_NAMES));
+  if (missing.length > 0) reportOptionalSkip('large-files.e2e.mjs', missing);
+}
 
 /** Raw bytes per CDP chunk: 6 MB → ~8 MB base64 per evaluate call. */
 const CHUNK_BYTES = 6 * 1024 * 1024;

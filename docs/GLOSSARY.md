@@ -31,4 +31,4 @@ Definitions follow the actual implementation. Use these meanings consistently in
 - **Local processing.** Core PDF work executing on-device in the browser via Rust/WASM with no remote PDF-processing server. The architectural privacy guarantee.
 - **PWA precache.** The service-worker asset set (Workbox, via `vite-plugin-pwa`) covering the app shell, fonts, PDF.js worker, and the WASM engine for offline use after first load.
 - **Testbench.** The removed interactive developer console (`?testbench`). Historical term only — no code, route, or bundle carries it.
-- **`test pdfs/`.** The gitignored local PDF corpus (fixtures + large file) used by E2E. Local-only infrastructure, never committed.
+- **`test pdfs/`.** The gitignored, optional, developer-owned local PDF corpus used by the optional E2E suites and CLI examples. Never committed; never required for canonical testing (the canonical E2E suite generates deterministic synthetic small fixtures when the corpus is absent — see `app/e2e/corpus.mjs`).

@@ -1,10 +1,17 @@
-/** Baseline screenshots of the Folio dev UI (light theme). */
+/** Baseline screenshots of the Folio dev UI (light theme). Manual helper, not a test. */
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CORPUS = path.resolve(__dirname, '../../test pdfs');
+
+const SMALL = path.join(CORPUS, '1.2.pdf');
+if (!fs.existsSync(SMALL)) {
+  console.error(`baseline-shots needs the optional corpus file ${SMALL} (absent on fresh clones).`);
+  process.exit(2);
+}
 
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const BASE = 'http://localhost:5201';

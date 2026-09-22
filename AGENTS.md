@@ -79,8 +79,9 @@ folio/
 
 Rust commands run in `engine/`; frontend commands run in `app/`. There is no
 Cargo workspace: `engine/` and `wasm/` keep their independent manifests and
-lockfiles (see `docs/DECISIONS.md` D12). The `test pdfs/` corpus (gitignored,
-local-only) stays at the repo root.
+lockfiles (see `docs/DECISIONS.md` D12). The `test pdfs/` directory (gitignored,
+local-only, optional benchmark corpus — never required for canonical testing,
+see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
 
 ## Documentation update rule
 
