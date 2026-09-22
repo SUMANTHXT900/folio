@@ -12,7 +12,7 @@
  * Node → page as base64 chunks over the DevTools protocol — zero HTTP
  * byte transfers, so download managers cannot intercept the harness.
  *
- * Usage (from frontend/):
+ * Usage (from app/):
  *   1. Terminal A: npx vite --port 5199   (or any free port + --dev)
  *   2. Terminal B: node e2e/metadata.e2e.mjs [--dev http://localhost:5199]
  */

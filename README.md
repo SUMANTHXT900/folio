@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/public/favicon.svg" alt="Folio" width="64" height="64" />
+  <img src="app/public/favicon.svg" alt="Folio" width="64" height="64" />
 </p>
 
 <h1 align="center">Folio</h1>
@@ -26,9 +26,9 @@
 ## New architecture (v1.7.0)
 
 This repository is the single source of truth for **both** the Folio production
-application **and** the complete Folio PDF engine: the Rust source (`src/`), the
-WASM bridge (`wasm/`), engine tests (`tests/`), CLI examples (`examples/`), and the
-React frontend (`frontend/`) all live here. No separate engine repository is required.
+application **and** the complete Folio PDF engine: the Rust source (`engine/src/`),
+the WASM bridge (`wasm/`), engine tests (`engine/tests/`), CLI examples
+(`engine/examples/`), and the React frontend (`app/`) all live here. No separate engine repository is required.
 
 ```text
 PDF manipulation          Studio → Folio service → WasmWorkerEngineAdapter
@@ -73,8 +73,8 @@ Every tool reports real engine progress (stage + percentage), honest cancellatio
 ## Tech stack
 
 - **React** + **TypeScript** + **Vite** - application UI and orchestration
-- **Rust** compiled to **WebAssembly** (`wasm/`, via `wasm-pack`) - PDF manipulation and CPU-heavy document processing (`src/`, powered by `lopdf`)
-- **Web Worker** - keeps heavy processing off the UI thread (`frontend/src/engine/engine.worker.ts`)
+- **Rust** compiled to **WebAssembly** (`wasm/`, via `wasm-pack`) - PDF manipulation and CPU-heavy document processing (`engine/src/`, powered by `lopdf`)
+- **Web Worker** - keeps heavy processing off the UI thread (`app/src/engine/engine.worker.ts`)
 - **PDF.js** - rendering, previews, thumbnails, and page-count intake only (never document mutation)
 - **Tailwind CSS** + **Framer Motion** - styling and transitions
 - **Cloudflare Pages** for hosting (hash routing, no SPA rewrite needed)
@@ -89,12 +89,11 @@ Every tool reports real engine progress (stage + percentage), honest cancellatio
 
 ```text
 folio/
-├── frontend/     Production Studio (React + TS + Vite)
-├── src/          Folio Rust PDF engine
+├── app/          Production Studio (React + TS + Vite)
+├── engine/       Folio Rust PDF engine (src, tests, examples, Cargo.toml)
 ├── wasm/         Rust → WASM bridge (wasm-pack)
-├── tests/        Rust integration tests
-├── examples/     Rust CLI examples (opt-in corpus tools)
-├── ARCHITECTURE.md
+├── docs/         Persistent project memory
+├── AGENTS.md
 └── README.md
 ```
 
@@ -104,7 +103,7 @@ Requires Node.js 18+ and a Rust toolchain with the `wasm32-unknown-unknown` targ
 
 ```bash
 # install frontend dependencies
-cd frontend
+cd app
 npm install
 
 # build the WASM engine package (generates wasm/pkg/, gitignored)
@@ -113,7 +112,7 @@ npm run build:wasm
 # run the dev server (production Studio)
 npm run dev
 
-# build for production (outputs to frontend/dist/)
+# build for production (outputs to app/dist/)
 npm run build
 
 # preview the production build locally
@@ -128,28 +127,28 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets
 
-# Frontend (unit tests, typecheck, lint, format) — run inside frontend/
+# Frontend (unit tests, typecheck, lint, format) — run inside app/
 npm test
 npm run typecheck
 npm run lint
 npm run format:check
 ```
 
-Production E2E (real headless Chrome, real engine, no mocks) lives in `frontend/e2e/`
+Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/`
 and expects a local PDF corpus in a gitignored `test pdfs/` directory at the repo root:
 
 ```bash
-cd frontend
+cd app
 node e2e/studio.e2e.mjs --dev http://localhost:5199
 ```
 
 ## Deploy
 
-Folio is a static site. Build and deploy `frontend/dist/` to any static host — Cloudflare Pages, Netlify,
+Folio is a static site. Build and deploy `app/dist/` to any static host — Cloudflare Pages, Netlify,
 GitHub Pages, or your own server.
 
 ```bash
-cd frontend
+cd app
 npm run build
 npx wrangler pages deploy dist --project-name folio-pdf --branch dev
 ```

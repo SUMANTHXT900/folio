@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 # The real engine. All PDF semantics, validation, timing, and error
 # behavior come from this crate unchanged (same ExecutionEngine, same
 # operations, same error model as native/CLI).
-folio-engine = { path = ".." }
+folio-engine = { path = "../engine" }
 # Minimal JS bindings: function calls, typed arrays, and JSON transport
 # for the glue layer only. Never used by the engine core itself.
 wasm-bindgen = "0.2"

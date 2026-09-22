@@ -8,11 +8,11 @@
 //! Run with:
 //!
 //! ```sh
-//! # Discover (default dir `test pdfs`, default cap 25 files):
+//! # Discover (default dir `../test pdfs` from `engine/`, default cap 25 files):
 //! cargo run --example corpus_inspect
-//! cargo run --example corpus_inspect -- --dir "test pdfs" --filter merged --limit 5
+//! cargo run --example corpus_inspect -- --dir "../test pdfs" --filter merged --limit 5
 //! # Explicit files (no discovery, no cap):
-//! cargo run --example corpus_inspect -- "test pdfs/a.pdf" "test pdfs/b.pdf"
+//! cargo run --example corpus_inspect -- "../test pdfs/a.pdf" "../test pdfs/b.pdf"
 //! # Benchmark: repeat each file, detailed mode, JSON output:
 //! cargo run --example corpus_inspect -- --limit 3 --repeat 3 --detailed --json
 //! ```
@@ -48,7 +48,7 @@ impl Args {
     fn parse() -> Self {
         let mut args = Args {
             files: Vec::new(),
-            dir: PathBuf::from("test pdfs"),
+            dir: PathBuf::from("../test pdfs"),
             filter: None,
             limit: DEFAULT_LIMIT,
             detailed: false,

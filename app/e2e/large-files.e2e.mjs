@@ -30,7 +30,7 @@
  * memory is invisible); the report states trends with that caveat and
  * never claims exact ownership the browser cannot prove.
  *
- * Usage (from frontend/):
+ * Usage (from app/):
  *   1. Terminal A: npx vite --port 5199   (or any free port + --dev)
  *   2. Terminal B: node e2e/large-files.e2e.mjs [--dev http://localhost:5199]
  */

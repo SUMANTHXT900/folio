@@ -15,7 +15,7 @@
  * byte length) before handing them to the render engine. The only HTTP in
  * play is the dev-server page load itself (JS/HTML, never a download).
  *
- * Usage (from frontend/):
+ * Usage (from app/):
  *   1. Terminal A: npx vite --port 5199   (or any free port + --dev)
  *   2. Terminal B: node e2e/thumbnail.e2e.mjs [--dev http://localhost:5199]
  *

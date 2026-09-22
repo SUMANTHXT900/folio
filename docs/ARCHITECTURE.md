@@ -6,10 +6,10 @@ This document describes the actual current architecture as implemented. The long
 
 ```text
 Manipulation:
-Folio App (frontend/src/studio/)
+Folio App (app/src/studio/)
     ↓  application concepts only (ids, names, progress, errors)
 studio/services/folio.ts  (single integration boundary)
-    ↓  Folio TypeScript APIs (frontend/src/engine/, frontend/src/types/engine.ts)
+    ↓  Folio TypeScript APIs (app/src/engine/, app/src/types/engine.ts)
 WasmWorkerEngineAdapter
     ↓  typed worker protocol (workerProtocol.ts), transferable Uint8Array
 Web Worker (engine.worker.ts)
@@ -119,7 +119,7 @@ Everything PDF-related executes in one of three places: the main thread (UI + re
 
 ## WASM / native distinction
 
-- One Rust core, two targets: native (CLI examples, `cargo test`) and `wasm32-unknown-unknown` (browser via `wasm-pack`, `npm run build:wasm` in `frontend/`, output to gitignored `wasm/pkg/`).
+- One Rust core, two targets: native (CLI examples, `cargo test` in `engine/`) and `wasm32-unknown-unknown` (browser via `wasm-pack`, `npm run build:wasm` in `app/`, output to gitignored `wasm/pkg/`).
 - WASM-only dependencies (`lopdf/wasm_js` for a JS-backed RNG, `js-sys` for clocks) are gated behind `target.'cfg(target_arch = "wasm32")'` — native builds see zero new dependencies.
 - `image` (JPEG/PNG) and `kamadak-exif` are pure-Rust, WASM-compatible; `default-features = false` keeps rayon (threading) out for the single-threaded baseline.
 - `wasm-pack` build requires a `LICENSE` file presence note (license key set in `Cargo.toml`); the repo root `LICENSE` (MIT) covers this.

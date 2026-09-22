@@ -1,14 +1,14 @@
 # Folio — Development Workflow
 
-Actual commands for this repository. Run Rust commands at the repo root; frontend commands inside `frontend/`. Do not invent commands — these are the ones wired in `Cargo.toml`, `frontend/package.json`, and the E2E scripts.
+Actual commands for this repository. Run Rust commands in `engine/`; frontend commands in `app/`. Do not invent commands — these are the ones wired in `engine/Cargo.toml`, `app/package.json`, and the E2E scripts.
 
 ## Prerequisites
 
 - **Node.js 18+** (frontend, E2E, tooling).
 - **Rust toolchain** with the `wasm32-unknown-unknown` target (engine builds, tests).
 - **`wasm-pack`** (WASM bridge builds).
-- **Headless Chrome** for E2E (the suite uses `puppeteer-core` with a local Chrome install; see `frontend/e2e/*.mjs` headers for the expected binary path).
-- **Local PDF corpus** (gitignored): a `test pdfs/` directory at the repo root containing the E2E fixtures (`1.2.pdf` and the large ~514 MB / 2585-page file). Provided via a gitignored symlink for local runs only; never committed. Small synthetic fixtures can be generated with `frontend/e2e/make-fixtures.mjs`.
+- **Headless Chrome** for E2E (the suite uses `puppeteer-core` with a local Chrome install; see `app/e2e/*.mjs` headers for the expected binary path).
+- **Local PDF corpus** (gitignored): a `test pdfs/` directory at the repo root containing the E2E fixtures (`1.2.pdf` and the large ~514 MB / 2585-page file). Provided via a gitignored symlink for local runs only; never committed. Small synthetic fixtures can be generated with `app/e2e/make-fixtures.mjs`. Rust examples that discover the corpus default to `../test pdfs` when run from `engine/` (overridable with `--dir`).
 
 ## Setup (fresh clone)
 
@@ -16,11 +16,12 @@ Actual commands for this repository. Run Rust commands at the repo root; fronten
 git clone -b dev https://github.com/SUMANTHXT900/folio.git folio
 cd folio
 
-# Rust: no extra step — cargo handles dependencies.
+# Rust engine (its own manifest + lockfile in engine/, no workspace):
+cd engine
 cargo test
 
 # Frontend + WASM:
-cd frontend
+cd ../app
 npm install
 npm run build:wasm   # generates ../wasm/pkg/ (gitignored) via wasm-pack
 npm run dev          # → http://localhost:5173
@@ -31,37 +32,37 @@ Line endings are normalized to LF on checkout (`.gitattributes`, `text=auto eol=
 ## Daily development
 
 ```bash
-cd frontend
+cd app
 npm run dev          # Vite dev server (production Studio, mock-free, worker engine)
 ```
 
-No backend, no proxy, no localhost bridge. The dev server serves the app; the engine runs in the Web Worker from the `wasm/pkg/` build. `vite.config.ts` `server.fs.allow: ['..']` exists so the worker can load the `wasm/pkg` output during development; production builds inline the asset into `dist/`.
+No backend, no proxy, no localhost bridge. The dev server serves the app; the engine runs in the Web Worker from the `wasm/pkg/` build. `vite.config.ts` `server.fs.allow: ['..']` exists so the worker can load the `wasm/pkg` output during development (from `app/`, `..` is still the repo root, and the worker import `../../../wasm/pkg/` is unchanged in depth); production builds inline the asset into `dist/`.
 
 ## Verification suite (run all, in this order)
 
 ```bash
-# 1. Rust engine — repo root
+# 1. Rust engine — inside engine/
 cargo test                 # 345 tests: units + integration (one file per op + lifecycle)
 cargo fmt --check          # must be clean
 cargo clippy --all-targets # must be clean (warnings fail the bar)
 
-# 2. WASM bridge — inside frontend/
+# 2. WASM bridge — inside app/
 npm run build:wasm         # wasm-pack build --target web --out-dir pkg (takes ~1 min)
 
-# 3. Frontend checks — inside frontend/
+# 3. Frontend checks — inside app/
 npm run typecheck          # tsc --noEmit (requires wasm/pkg/ present)
 npm run lint               # eslint src
 npm run format:check       # prettier --check .
 npm test                   # vitest run — 118 tests
 
-# 4. Production build — inside frontend/
+# 4. Production build — inside app/
 npm run build              # tsc + vite build + PWA service worker (precaches WASM)
 ```
 
 ## E2E (production Studio, real Chrome, real engine, no mocks)
 
 ```bash
-cd frontend
+cd app
 # terminal 1: serve the app (use a fixed, verified port)
 npx vite --port 5199 --strictPort
 # terminal 2:
@@ -78,13 +79,13 @@ The large corpus file (~514 MB / 2585 pages) lives only in the local `test pdfs/
 
 ## Benchmark workflow
 
-Benchmark records from engine development live with the engine code where legitimate (`src/observability/`, examples). There is no separate benchmark harness command in this repo; performance claims are verified through E2E completion metadata (`engineDurationMs`, output sizes) and the large-file suite. Do not present ad-hoc timings as benchmarks.
+Benchmark records from engine development live with the engine code where legitimate (`engine/src/observability/`, `engine/examples`). There is no separate benchmark harness command in this repo; performance claims are verified through E2E completion metadata (`engineDurationMs`, output sizes) and the large-file suite. Do not present ad-hoc timings as benchmarks.
 
 ## Debugging
 
-- Engine logic: reproduce natively first (`cargo test` with a focused filter, CLI examples in `examples/` against a local corpus copy) — native iteration is faster than the WASM loop.
+- Engine logic: reproduce natively first (from `engine/`: `cargo test` with a focused filter, CLI examples in `engine/examples/` against the local corpus via `--dir ../test pdfs`) — native iteration is faster than the WASM loop.
 - Browser behavior: dev server + browser console; the WASM glue installs `console_error_panic_hook`, so Rust panics surface as readable console messages instead of bare `unreachable`.
-- Rendering/thumbnails: `frontend/src/rendering/devHook.ts` and `memory.ts` support inspection; unit tests in `rendering/*.test.ts` cover geometry, windows, and error mapping.
+- Rendering/thumbnails: `app/src/rendering/devHook.ts` and `memory.ts` support inspection; unit tests in `rendering/*.test.ts` cover geometry, windows, and error mapping.
 
 ## Release workflow
 

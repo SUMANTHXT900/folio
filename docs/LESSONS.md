@@ -6,13 +6,13 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 
 - **Observation.** `std::time::{SystemTime, Instant}` panic on `wasm32-unknown-unknown` (verified against the toolchain's `sys/pal/wasm`); the engine needs wall-clock timestamps and monotonic durations on both targets.
 - **Why it matters.** Authoritative engine timing (`engineDurationMs`) is a core contract — without a WASM clock it cannot exist in the browser build.
-- **Rule.** Clock access goes through `src/core/clock.rs`; WASM builds use JS-backed clocks via the `js-sys` dependency gated behind `target.'cfg(target_arch = "wasm32")'`. Never call `std::time` directly in engine code paths that run on WASM. Evidence: `Cargo.toml` comments.
+- **Rule.** Clock access goes through `engine/src/core/clock.rs`; WASM builds use JS-backed clocks via the `js-sys` dependency gated behind `target.'cfg(target_arch = "wasm32")'`. Never call `std::time` directly in engine code paths that run on WASM. Evidence: `engine/Cargo.toml` comments.
 
 ## L-2 — PDF.js neuters input buffers; copy at the rendering boundary
 
 - **Observation.** PDF.js detaches (neuters) the `ArrayBuffer` handed to `loadDocument`. Sharing the studio store's buffer with the renderer destroys the document bytes.
 - **Why it matters.** Silent data destruction one API call away from every document open.
-- **Rule.** The rendering engine always loads from a defensive copy; the byte store keeps the original. Evidence: `frontend/src/rendering/PdfJsRenderEngine.ts` (~line 128).
+- **Rule.** The rendering engine always loads from a defensive copy; the byte store keeps the original. Evidence: `app/src/rendering/PdfJsRenderEngine.ts` (~line 128).
 
 ## L-3 — Thumbnails are in-memory liabilities; bound everything
 
@@ -42,7 +42,7 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 
 - **Observation.** The `866761f` production-only integration shipped compiled output without engine source and had to be reverted: the repository could not build or test the Rust layer from a fresh clone.
 - **Why it matters.** Artifacts rot; source builds. A repo that cannot reproduce its own engine is not a source of truth.
-- **Rule.** `wasm/pkg/` stays gitignored and reproducible via `npm run build:wasm`; `src/`, `wasm/src/`, `tests/`, `examples/` are the tracked source. Fresh-clone verification is mandatory after integration work. Evidence: `.gitignore`; `docs/DETOURS.md` T-5.
+- **Rule.** `wasm/pkg/` stays gitignored and reproducible via `npm run build:wasm`; `engine/src/`, `wasm/src/`, `engine/tests/`, `engine/examples/` are the tracked source. Fresh-clone verification is mandatory after integration work. Evidence: `.gitignore`; `docs/DETOURS.md` T-5.
 
 ## L-8 — Fresh-clone verification catches what worktree verification misses
 

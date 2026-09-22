@@ -57,22 +57,30 @@ Then inspect source code where required to verify implementation claims.
 folio/
 ├── AGENTS.md          This file — agent entry point.
 ├── docs/              Persistent project memory (13 documents).
-├── src/               Folio Rust PDF engine (core, execution, observability, processing, testing).
+├── engine/            Folio Rust PDF engine — independent of UI concerns.
+│   ├── src/           Engine source (core, execution, observability, processing, testing).
+│   ├── tests/         Rust integration tests (one file per operation + lifecycle).
+│   ├── examples/      Rust CLI examples (opt-in corpus tools).
+│   ├── Cargo.toml     Engine manifest (package `folio-engine`).
+│   └── Cargo.lock     Engine dependency lock.
 ├── wasm/              Thin Rust → WASM bridge (wasm-pack). No PDF logic here.
-├── tests/             Rust integration tests (one file per operation + lifecycle).
-├── examples/          Rust CLI examples (opt-in corpus tools).
-├── frontend/          Production web app (React + TypeScript + Vite).
+│   ├── src/           Glue crate (`folio-wasm`) over the engine.
+│   └── Cargo.toml     Bridge manifest; path-depends on `../engine`.
+├── app/               Production web app (React + TS + Vite) — engine consumer.
 │   ├── src/engine/    TypeScript engine API: adapters, worker, protocol, binary store.
 │   ├── src/rendering/ PDF.js rendering + thumbnail engines.
 │   ├── src/studio/    Application UI: shell, tools, hooks, Folio service boundary.
-│   └── e2e/           Production E2E suite (real headless Chrome, real engine, no mocks).
+│   ├── e2e/           Production E2E suite (real headless Chrome, real engine, no mocks).
+│   ├── package.json   App scripts (`dev`, `build`, `build:wasm`, `test`, E2E via node).
+│   └── vite.config.ts App build config (PWA precache incl. WASM, `fs.allow` for `../wasm/pkg`).
 ├── ARCHITECTURE.md    Long-form historical architecture log (lesson-by-lesson build record).
 └── README.md          Public project front page.
 ```
 
-> Phase note: `src/`, `tests/`, `examples/`, `frontend/`, `wasm/` keep their current
-> layout. A future filesystem restructuring (`engine/`, `app/`) is explicitly out of
-> scope until it is scheduled — do not reorganize directories preemptively.
+Rust commands run in `engine/`; frontend commands run in `app/`. There is no
+Cargo workspace: `engine/` and `wasm/` keep their independent manifests and
+lockfiles (see `docs/DECISIONS.md` D12). The `test pdfs/` corpus (gitignored,
+local-only) stays at the repo root.
 
 ## Documentation update rule
 

@@ -8,7 +8,7 @@
  * bounded-thumbnail lifecycle. No mocks, no CDP byte injection for
  * uploads — real File objects like a user would drop.
  *
- * Usage (from frontend/):
+ * Usage (from app/):
  *   1. Terminal A: npx vite --port 5199
  *   2. Terminal B: node e2e/studio.e2e.mjs [--dev http://localhost:5199]
  */

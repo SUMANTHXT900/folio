@@ -4,7 +4,7 @@ Each entry records the decision, its reason, alternatives considered where known
 
 ## D1 — Rust owns PDF manipulation
 
-- **Decision.** All document mutation (parse, copy, reorder, rotate, split, merge, metadata write, image-to-PDF construction) lives in the Rust engine (`src/processing/pdf/` on `lopdf`). TypeScript never mutates PDF bytes.
+- **Decision.** All document mutation (parse, copy, reorder, rotate, split, merge, metadata write, image-to-PDF construction) lives in the Rust engine (`engine/src/processing/pdf/` on `lopdf`). TypeScript never mutates PDF bytes.
 - **Reason.** One verified implementation shared by native tests, CLI examples, and the browser build; precise control over copies for large documents; `lopdf` is pure-Rust with no OS dependencies.
 - **Alternatives considered.** `pdf-lib` in TypeScript (used by the pre-engine app; removed — see `docs/DETOURS.md`).
 - **Consequences.** A WASM build step is mandatory for frontend work (`npm run build:wasm`); engine changes require Rust + TypeScript contract updates together.
@@ -89,3 +89,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** Separate engine repository (rejected: splits source of truth, doubles release coordination). Compiled-WASM-only integration (tried as `866761f`, reverted as `390194a`).
 - **Consequences.** Fresh-clone verification is mandatory after integration work; `wasm/pkg/` stays gitignored and reproducible.
 - **Status.** Decided, implemented, verified (fresh-clone full suite green).
+
+## D12 — Project-oriented filesystem layout without a Cargo workspace
+
+- **Decision.** The repository is organized by ownership: `engine/` (Rust engine: `src/`, `tests/`, `examples/`, `Cargo.toml`, `Cargo.lock`), `wasm/` (bridge: `src/`, `Cargo.toml`, path-dependency on `../engine`), `app/` (entire frontend tree verbatim), `docs/` (project memory), root (repository-wide files only: `README.md`, `AGENTS.md`, `ARCHITECTURE.md`, `LICENSE`, `.gitignore`, `.gitattributes`). No Cargo workspace was introduced; `engine/` and `wasm/` keep the independent manifests and lockfiles they had before the move.
+- **Reason.** Organizational clarity: the layout communicates ownership (`engine` = PDF processing, `wasm` = browser bridge, `app` = product application, `docs` = project memory) without changing the build model. A workspace was not required — nothing spans manifests — so introducing one would have been architecture churn for no benefit.
+- **Alternatives considered.** Cargo workspace root (`members = ["engine", ...]`) to preserve root-level `cargo` commands; rejected because it changes the dependency model (shared lockfile, possible `wasm` inclusion in host test scope) while the same workflow is served by documenting `cd engine` in `docs/DEVELOPMENT.md`.
+- **Consequences.** Rust commands run in `engine/`; frontend commands run in `app/`; the `wasm` bridge needed exactly one functional change (path dependency `..` → `../engine`); the corpus example's default discovery dir became `../test pdfs` (overridable with `--dir`). Relative-depth-sensitive references (`../../../wasm/pkg` worker import, `../../test pdfs` E2E corpus, `../wasm` build script, `fs.allow: ['..']`) survived unchanged because the move preserved directory depth.
+- **Status.** Decided, implemented and verified in Phase 2 (full suite green from the new structure; 25/25 E2E).

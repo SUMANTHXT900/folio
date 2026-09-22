@@ -10,15 +10,15 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 - **L1 — Compress disabled.** The Studio action stays disabled; no engine or UI implementation exists yet. See `docs/ROADMAP.md`.
 - **L2 — Password-protected PDFs unsupported.** Reported as `UNSUPPORTED_FORMAT`, never attempted. UI copy: "This PDF needs a password, which is not supported yet."
-- **L3 — Metadata empty-string set rejected.** Reading preserves `Some("")` distinctly from absent; *setting* `""` is rejected — use `Clear` (engine rule, `src/processing/pdf/metadata/`).
-- **L4 — Inspect is structural only.** No text extraction, rendering, or image extraction (`src/processing/pdf/inspect/mod.rs`).
+- **L3 — Metadata empty-string set rejected.** Reading preserves `Some("")` distinctly from absent; *setting* `""` is rejected — use `Clear` (engine rule, `engine/src/processing/pdf/metadata/`).
+- **L4 — Inspect is structural only.** No text extraction, rendering, or image extraction (`engine/src/processing/pdf/inspect/mod.rs`).
 - **L5 — Images → PDF is JPEG/PNG only.** Other formats fail as `UNSUPPORTED_FORMAT` (engine rule, `image` crate features `jpeg`+`png`).
 
 ## Resolved
 
 ### F-1 — WASM wall-clock panic (`std::time` on `wasm32-unknown-unknown`)
 
-- **Status.** Resolved. **Area.** Engine timing (`src/core/clock.rs`, `src/observability/timing.rs`). **Severity.** High (every timed WASM execution would panic).
+- **Status.** Resolved. **Area.** Engine timing (`engine/src/core/clock.rs`, `engine/src/observability/timing.rs`). **Severity.** High (every timed WASM execution would panic).
 - **Symptoms.** `std::time::{SystemTime, Instant}` panic on the WASM target (verified against the toolchain's `sys/pal/wasm`).
 - **Root cause.** The WASM target has no OS clock backend for Rust `std::time`.
 - **Fix.** Platform clock abstraction: native uses `std::time`, WASM uses JS-backed clocks via `js-sys` (WASM-only dependency, gated by target cfg). Documented in `Cargo.toml` comments.
@@ -27,7 +27,7 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 ### F-2 — PDF.js ArrayBuffer detachment neutering engine bytes
 
-- **Status.** Resolved. **Area.** Rendering intake (`frontend/src/rendering/PdfJsRenderEngine.ts`). **Severity.** High (data corruption vector).
+- **Status.** Resolved. **Area.** Rendering intake (`app/src/rendering/PdfJsRenderEngine.ts`). **Severity.** High (data corruption vector).
 - **Symptoms.** PDF.js detaches (neuters) the buffer handed to `loadDocument`; sharing the studio store's buffer would destroy the document bytes.
 - **Root cause.** Transfer semantics of the PDF.js loading API.
 - **Fix.** Defensive copy at the rendering boundary; the studio store keeps the original.
@@ -36,7 +36,7 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 ### F-3 — Unbounded thumbnail canvas / object-URL retention
 
-- **Status.** Resolved. **Area.** Studio thumbnails (`frontend/src/studio/services/folio.ts`). **Severity.** High (tab memory growth, fatal on large files).
+- **Status.** Resolved. **Area.** Studio thumbnails (`app/src/studio/services/folio.ts`). **Severity.** High (tab memory growth, fatal on large files).
 - **Symptoms.** Canvases and object URLs accumulated per thumbnail with no release; large documents ballooned memory.
 - **Root cause.** No ownership discipline for transient render artifacts.
 - **Fix.** Canvas bitmaps released on URL encode; object-URL cache LRU-bounded to 6 documents with revocation on evict/close; windows of 24 pages at concurrency 2.
@@ -54,7 +54,7 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 ### F-5 — Cancellation lifecycle races
 
-- **Status.** Resolved. **Area.** Studio jobs + engine cancellation (`folio.ts` `runStudioOperation`, `src/execution/cancellation.rs`). **Severity.** High (untrusted cancel button).
+- **Status.** Resolved. **Area.** Studio jobs + engine cancellation (`folio.ts` `runStudioOperation`, `engine/src/execution/cancellation.rs`). **Severity.** High (untrusted cancel button).
 - **Symptoms.** Cancel issued before the adapter handle existed could be lost; thumbnail work survived document close.
 - **Root cause.** Async handle creation vs. synchronous user intent; independent thumbnail job lifetimes.
 - **Fix.** `cancelled` flag races safely with handle creation (cancel-after-create guaranteed); thumbnail jobs tracked per document and cancelled en masse on close; `CANCELLED` is a terminal status with its own code and message.

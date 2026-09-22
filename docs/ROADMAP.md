@@ -8,15 +8,16 @@ This roadmap records actual project direction. Items are separated by commitment
 - **v1.1.0** — client-side PDF tools refinement (`f4d8f17`, 2026-08-17).
 - **v1.2.x – v1.6.0** (2026-08-23) — PWA offline fix, windowed rendering, theme polish, mobile flows, PDF render worker, cancellable merge jobs with stage progress.
 - **v1.7.0 (`dev`)** — unified Folio repository: complete Rust engine source + WASM bridge + tests + examples + production Studio in one repo; Rust/WASM manipulation in a Web Worker; PDF.js rendering-only; real progress/cancellation/structured errors; Metadata and Images → PDF tools; Compress disabled; Testbench removed from product.
-- **Phase 1 (this phase)** — repository renamed `pdf-studio` → `folio`; product identity corrected; persistent documentation system established (`AGENTS.md` + `docs/`).
+- **Phase 1 (done)** — repository renamed `pdf-studio` → `folio`; product identity corrected; persistent documentation system established (`AGENTS.md` + `docs/`).
+- **Phase 2 (done, this change)** — filesystem restructured into project-oriented ownership: `engine/` (Rust source, tests, examples, manifest + lockfile), `wasm/` (bridge, path-dependency updated), `app/` (frontend, no config changes required), `docs/` untouched. No Cargo workspace; no behavior changes; full suite re-verified.
 
 ## Current
 
-- Phase 1 completion: full verification re-run, commit, normal push to `dev`, clean working tree.
+- Phase 2 completion: full verification re-run from the new structure, commit, normal push to `dev`, clean working tree.
 
 ## Next
 
-- **Phase 2 — filesystem restructuring.** Reorganize the unified repository layout (currently `src/`, `tests/`, `examples/`, `frontend/`, `wasm/`) into the planned `engine/` + `app/` + `wasm/` structure. Separate task with its own verification; do not start it inside Phase 1 work.
+- **Phase 3 — fresh-clone validation.** Clone `-b dev` to a temp directory and re-run the full suite there (see `docs/LESSONS.md` L-8). Separate task; not performed in Phase 2.
 - Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
 
 ## Future / not committed
