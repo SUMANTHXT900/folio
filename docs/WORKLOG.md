@@ -102,7 +102,7 @@ Chronological record of meaningful development events. Each entry records object
 - **Findings.** Test setup needed explicit `cleanup()` (no auto-cleanup in this vitest config — renders accumulated across tests in one file). StrictMode was already on: URL/id creation inside the updater was a latent dev-mode leak, fixed as part of returning ids.
 - **Decisions.** Session boundary = scanner open → Done; strip is previews-only, `ImagePage[]` stays the source of truth; no capability/CV code in this phase (explicitly deferred).
 - **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, typecheck/lint/format clean, 145 unit tests, production build (34 precache, zero testbench strings), canonical E2E 30/30 + 4 SKIP with Phase 1 drag tests intact (overlay/indicator/keyboard/arrows all PASS). `main` untouched.
-- **Remaining.** Phase 3 (capabilities), real-device matrix (overlay alignment, portrait/landscape, front/rear, strip scroll on small phones).
+- **Remaining.** Phase 3 (capabilities) — completed below; device matrix still manual.
 
 ## 2026-09-23 — v1.9 Phase 3: camera capability controls
 
@@ -111,4 +111,13 @@ Chronological record of meaningful development events. Each entry records object
 - **Findings.** TS DOM lib lacks zoom/torch/focusMode on `MediaTrackConstraintSet` (narrow casts used); repo eslint bans non-null-asserted optional chains (adjusted one test). No browser here exposes real capabilities, so hardware application is unverified by automation.
 - **Decisions.** Manual + focusDistance alone is NOT tap-to-focus (no honest point→distance map); continuous focus/exposure requested silently, never displayed as a feature; zoom uses a slider bound to min/max/step (presets add nothing over the native range input).
 - **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, typecheck/lint/format clean, 160 unit tests, production build (34 precache, zero testbench strings), canonical E2E 30/30 + 4 SKIP (Phase 1/2 assertions intact). No version bump (reserved for v1.9 completion). `main` untouched.
-- **Remaining.** Phase 4 (lifecycle/disconnect hardening: B1 generation guard, B2 track-ended/devicechange, B3 play-failure surfacing); hardware-only matrix below (all unverified).
+- **Remaining.** Phase 4 (lifecycle/disconnect hardening) — completed below; hardware matrix still manual.
+
+## 2026-09-23 — v1.9 Phase 4: camera lifecycle & failure hardening
+
+- **Objective.** Close B1/B2/B3: stale-stream leaks, silent disconnects, swallowed play failures — with deterministic tests, no hardware.
+- **Work.** `CameraCapture.tsx`: generation-guarded `start()` (only the current generation installs state/stream; stale resolutions stop their own stream); `track.ended` listener → `disconnected` state with retry (remaining tracks released, caps cleared, no frozen frame); `devicechange` listener (picker refresh, vanish-of-active-device → disconnected, no restart on mere addition, cleanup on unmount); `play()` rejection → `preview-blocked` state (hardware released; autoplay-policy vs genuine failure copy; Try again is a real user gesture); `leave()`/unmount bump the generation. Explicit local state machine (`starting | live | failed | disconnected | preview-blocked`) documented in the file header. Tests +4 (`CameraCapture.test.tsx` 14 total): stale-stop with srcObject proof, ended→disconnect→retry recovery, play-reject→retry, devicechange removal + listener cleanup.
+- **Findings.** One self-inflicted edit slip deleted a line (caught by immediate re-read, repaired before typecheck). All 14 component tests pass first-run after the isolation fix from Phase 2.
+- **Decisions.** Retry reuses `start()` (fresh generation, fresh caps); disconnect clears capability UI (no stale zoom/torch for a dead device); taps during non-live states impossible (controls only render live).
+- **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, typecheck/lint/format clean, 164 unit tests, production build (34 precache, zero testbench strings), canonical E2E 30/30 + 4 SKIP (Phase 1–3 assertions intact). No version bump (reserved for v1.9 completion). `main` untouched.
+- **Remaining.** Hardware-only matrix (disconnect/reconnect, autoplay-policy variances, real capability application) — all unverified; v2.0 detection work explicitly not started.

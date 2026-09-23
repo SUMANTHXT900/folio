@@ -12,6 +12,16 @@
  *
  * Lifecycle: one `MediaStream` per session, opened on mount, stopped on
  * Done/close/unmount. No frames retained — only captured Files.
+ *
+ * State machine (local, explicit — no ambiguous "stream exists but dead"
+ * states): `starting` → `live` → (`disconnected` | `preview-blocked` |
+ * `failed`), with `live` re-entered via Try again. Every async
+ * continuation is generation-guarded: only the current generation may
+ * install state or a stream; stale resolutions stop their own stream
+ * and touch nothing (B1). Track `ended` → `disconnected` (B2);
+ * `devicechange` refreshes the picker and disconnects a vanished active
+ * device; `play()` rejection → `preview-blocked`, never a frozen frame
+ * presented as live (B3).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Card, ErrorBlock } from '../components/ui';
@@ -22,7 +32,7 @@ import {
   type CameraCapabilities,
 } from './cameraCapabilities';
 
-type CameraStatus = 'starting' | 'live' | 'failed';
+type CameraStatus = 'starting' | 'live' | 'failed' | 'disconnected' | 'preview-blocked';
 
 export interface SessionThumb {
   id: string;
@@ -130,60 +140,142 @@ export function CameraCapture({
   // until the stream reports dimensions; tracks orientation changes.
   const [aspect, setAspect] = useState({ w: 4, h: 3 });
 
-  const start = useCallback(async (mode: 'environment' | 'user', exactDevice: string) => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setFailure(failureMessage(new DOMException('unsupported', 'NotSupportedError')));
-      setStatus('failed');
-      return;
-    }
+  // Generation guard (B1): every start() takes a generation; async
+  // continuations that arrive stale stop their own stream and install
+  // nothing. Mirrors for closures that outlive renders.
+  const genRef = useRef(0);
+  const statusRef = useRef<CameraStatus>('starting');
+  statusRef.current = status;
+  const deviceIdRef = useRef(deviceId);
+  deviceIdRef.current = deviceId;
+  // Detach for the current track-ended listener (B2).
+  const endedCleanup = useRef<(() => void) | null>(null);
+  const detachEnded = () => {
+    endedCleanup.current?.();
+    endedCleanup.current = null;
+  };
+
+  /** Installs the disconnected state: hardware released, caps cleared. */
+  const markDisconnected = useCallback((message: string) => {
+    detachEnded();
     stopStream(streamRef.current);
     streamRef.current = null;
     trackRef.current = null;
-    // Fresh capability state per session: never carry controls over from
-    // the previous camera.
     setCaps(NO_CAPABILITIES);
     setZoom(null);
-    setZoomDead(false);
     setTorchOn(false);
-    setTorchDead(false);
-    setControlNote(null);
-    setFocusPoint(null);
-    setStatus('starting');
-    setFailure(null);
-    try {
-      const constraints: MediaStreamConstraints = {
-        audio: false,
-        video: exactDevice ? { deviceId: { exact: exactDevice } } : { facingMode: { ideal: mode } },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-      const videoTrack = stream.getVideoTracks()[0] ?? null;
-      trackRef.current = videoTrack;
-      const detected = readTrackCapabilities(videoTrack);
-      setCaps(detected);
-      if (detected.zoom !== null) setZoom(detected.zoom.min);
-      // Silent best-effort: continuous focus/exposure where reported.
-      void requestContinuousModes(videoTrack);
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = stream;
-        await video.play().catch(() => undefined);
-      }
-      const all = await navigator.mediaDevices.enumerateDevices().catch(() => []);
-      setDevices(all.filter((d) => d.kind === 'videoinput'));
-      setStatus('live');
-    } catch (error) {
-      stopStream(streamRef.current);
-      streamRef.current = null;
-      setFailure(failureMessage(error));
-      setStatus('failed');
-    }
+    setFailure(message);
+    setStatus('disconnected');
   }, []);
 
-  // Open on mount / facing change; stop on unmount.
+  const start = useCallback(
+    async (mode: 'environment' | 'user', exactDevice: string) => {
+      const gen = genRef.current + 1;
+      genRef.current = gen;
+      const isCurrent = () => genRef.current === gen;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setFailure(failureMessage(new DOMException('unsupported', 'NotSupportedError')));
+        setStatus('failed');
+        return;
+      }
+      detachEnded();
+      stopStream(streamRef.current);
+      streamRef.current = null;
+      trackRef.current = null;
+      // Fresh capability state per session: never carry controls over from
+      // the previous camera.
+      setCaps(NO_CAPABILITIES);
+      setZoom(null);
+      setZoomDead(false);
+      setTorchOn(false);
+      setTorchDead(false);
+      setControlNote(null);
+      setFocusPoint(null);
+      setStatus('starting');
+      setFailure(null);
+      try {
+        const constraints: MediaStreamConstraints = {
+          audio: false,
+          video: exactDevice
+            ? { deviceId: { exact: exactDevice } }
+            : { facingMode: { ideal: mode } },
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (!isCurrent()) {
+          // Stale resolution (B1): stop it, install nothing.
+          stopStream(stream);
+          return;
+        }
+        streamRef.current = stream;
+        const videoTrack = stream.getVideoTracks()[0] ?? null;
+        trackRef.current = videoTrack;
+        const detected = readTrackCapabilities(videoTrack);
+        setCaps(detected);
+        if (detected.zoom !== null) setZoom(detected.zoom.min);
+        // Silent best-effort: continuous focus/exposure where reported.
+        void requestContinuousModes(videoTrack);
+        // Unexpected track death (B2): unplug, OS revoke, browser kill.
+        if (videoTrack && typeof videoTrack.addEventListener === 'function') {
+          const onEnded = () => {
+            if (!isCurrent()) return;
+            markDisconnected(
+              'The camera disconnected. Reconnect it and try again — your pages are safe.',
+            );
+          };
+          videoTrack.addEventListener('ended', onEnded);
+          endedCleanup.current = () => videoTrack.removeEventListener('ended', onEnded);
+        }
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          try {
+            await video.play();
+          } catch (playError) {
+            // Preview never started (B3): release hardware, say so, offer
+            // retry. Never present a frozen frame as a live camera.
+            if (!isCurrent()) {
+              stopStream(stream);
+              return;
+            }
+            detachEnded();
+            stopStream(streamRef.current);
+            streamRef.current = null;
+            trackRef.current = null;
+            setCaps(NO_CAPABILITIES);
+            const blocked =
+              playError instanceof DOMException && playError.name === 'NotAllowedError';
+            setFailure(
+              blocked
+                ? 'Video preview was blocked by the browser (autoplay policy). Tap Try again — that tap counts as interaction.'
+                : 'Video preview could not start on this browser. Try again, or use the file picker.',
+            );
+            setStatus('preview-blocked');
+            return;
+          }
+        }
+        const all = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+        if (!isCurrent()) return;
+        setDevices(all.filter((d) => d.kind === 'videoinput'));
+        setStatus('live');
+      } catch (error) {
+        if (!isCurrent()) return;
+        detachEnded();
+        stopStream(streamRef.current);
+        streamRef.current = null;
+        trackRef.current = null;
+        setFailure(failureMessage(error));
+        setStatus('failed');
+      }
+    },
+    [markDisconnected],
+  );
+
+  // Open on mount / facing change; stop + invalidate on unmount.
   useEffect(() => {
     void start(facing, deviceId);
     return () => {
+      genRef.current += 1;
+      detachEnded();
       stopStream(streamRef.current);
       streamRef.current = null;
       trackRef.current = null;
@@ -195,6 +287,36 @@ export function CameraCapture({
     // Restart only when the requested source changes — never on capture.
   }, [facing, deviceId]);
 
+  // Device plug/unplug: refresh the picker; if the explicitly selected
+  // device vanished mid-session, move to the disconnected state instead
+  // of showing a dead camera. Never restarts the stream just because a
+  // device was added.
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!md || typeof md.addEventListener !== 'function') return;
+    const onDeviceChange = () => {
+      void (async () => {
+        const all = await md.enumerateDevices().catch(() => []);
+        const videoInputs = all.filter((d) => d.kind === 'videoinput');
+        setDevices(videoInputs);
+        const wanted = deviceIdRef.current;
+        if (
+          wanted &&
+          statusRef.current !== 'starting' &&
+          !videoInputs.some((d) => d.deviceId === wanted)
+        ) {
+          markDisconnected(
+            'The selected camera is no longer available. Choose another camera or try again.',
+          );
+        }
+      })();
+    };
+    md.addEventListener('devicechange', onDeviceChange);
+    return () => {
+      md.removeEventListener?.('devicechange', onDeviceChange);
+    };
+  }, [markDisconnected]);
+
   const syncAspect = useCallback(() => {
     const video = videoRef.current;
     if (video && video.videoWidth > 0 && video.videoHeight > 0) {
@@ -203,6 +325,8 @@ export function CameraCapture({
   }, []);
 
   const leave = () => {
+    genRef.current += 1;
+    detachEnded();
     stopStream(streamRef.current);
     streamRef.current = null;
     trackRef.current = null;
@@ -320,21 +444,22 @@ export function CameraCapture({
         </div>
       )}
 
-      {status === 'failed' && failure && (
-        <div className="space-y-3">
-          <ErrorBlock error={new Error(failure)} />
-          <div className="flex gap-2">
-            <Button variant="ghost" onClick={() => void start(facing, deviceId)}>
-              Try again
-            </Button>
-            <Button variant="ghost" onClick={leave}>
-              Back to pages
-            </Button>
+      {(status === 'failed' || status === 'disconnected' || status === 'preview-blocked') &&
+        failure && (
+          <div className="space-y-3">
+            <ErrorBlock error={new Error(failure)} />
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => void start(facing, deviceId)}>
+                Try again
+              </Button>
+              <Button variant="ghost" onClick={leave}>
+                Back to pages
+              </Button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {status !== 'failed' && (
+      {status !== 'failed' && status !== 'disconnected' && status !== 'preview-blocked' && (
         <div className={status === 'starting' ? 'hidden' : ''}>
           {/* Viewport: exact frame aspect, letterboxed — the full frame
               stays visible and matches the captured image. */}

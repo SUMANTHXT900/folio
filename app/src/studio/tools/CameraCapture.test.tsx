@@ -228,3 +228,118 @@ describe('CameraCapture capability controls', () => {
     expect(screen.queryByLabelText(/flashlight/)).toBeNull();
   });
 });
+
+describe('CameraCapture lifecycle hardening', () => {
+  it('B1: a stale late-resolving stream is stopped and never installed', async () => {
+    const staleStop = vi.fn();
+    const staleStream = {
+      getTracks: () => [{ stop: staleStop, kind: 'video' }],
+      getVideoTracks: () => [],
+    };
+    const liveStop = vi.fn();
+    const liveStream = {
+      getTracks: () => [{ stop: liveStop, kind: 'video' }],
+      getVideoTracks: () => [],
+    };
+    let resolveStale!: (s: unknown) => void;
+    const getUserMedia = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((r) => (resolveStale = r as (s: unknown) => void)))
+      .mockResolvedValue(liveStream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: async () => [] },
+      configurable: true,
+    });
+    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    // First request still pending — start another generation.
+    fireEvent.click(screen.getByLabelText('Switch camera'));
+    await screen.findByLabelText('Capture page');
+    // Late resolution of generation 1: stopped, never installed.
+    resolveStale(staleStream);
+    await waitFor(() => expect(staleStop).toHaveBeenCalledTimes(1));
+    expect(liveStop).not.toHaveBeenCalled();
+    expect((document.querySelector('video') as HTMLVideoElement | null)?.srcObject).toBe(
+      liveStream,
+    );
+    expect(screen.queryByText(/disconnected|blocked|could not be started/)).toBeNull();
+  });
+
+  it('B2: track ended moves to disconnected with retry recovery', async () => {
+    const listeners = new Map<string, Set<() => void>>();
+    const trackStop = vi.fn();
+    const track = {
+      stop: trackStop,
+      kind: 'video',
+      getCapabilities: () => ({}),
+      applyConstraints: async () => undefined,
+      addEventListener: (t: string, h: () => void) => {
+        let set = listeners.get(t);
+        if (!set) {
+          set = new Set();
+          listeners.set(t, set);
+        }
+        set.add(h);
+      },
+      removeEventListener: (t: string, h: () => void) => listeners.get(t)?.delete(h),
+    };
+    const getUserMedia = vi.fn(async () => ({
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    }));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: async () => [] },
+      configurable: true,
+    });
+    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    await screen.findByLabelText('Capture page');
+    listeners.get('ended')?.forEach((h) => h());
+    await screen.findByText(/camera disconnected/i);
+    expect(trackStop).toHaveBeenCalled();
+    // Retry restores a live camera.
+    fireEvent.click(screen.getByText('Try again'));
+    await screen.findByLabelText('Capture page');
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('B3: play() rejection releases hardware and offers retry', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    playMock.mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
+    const onDone = vi.fn();
+    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={onDone} sessionPages={[]} />);
+    await screen.findByText(/blocked by the browser \(autoplay policy\)/);
+    expect(stopTrack).toHaveBeenCalled();
+    expect(screen.queryByLabelText('Capture page')).toBeNull();
+    // Retry (a real user tap) resumes the camera.
+    playMock.mockResolvedValueOnce(undefined);
+    fireEvent.click(screen.getByText('Try again'));
+    await screen.findByLabelText('Capture page');
+  });
+
+  it('devicechange refreshes devices and disconnects a vanished active camera', async () => {
+    const target = new EventTarget();
+    const removeSpy = vi.spyOn(target, 'removeEventListener');
+    const d1 = { kind: 'videoinput', deviceId: 'd1', label: 'Cam 1' };
+    const d2 = { kind: 'videoinput', deviceId: 'd2', label: 'Cam 2' };
+    let current: Array<{ kind: string; deviceId: string; label: string }> = [d1, d2];
+    const getUserMedia = vi.fn(async () => fakeStream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: Object.assign(target, {
+        getUserMedia,
+        enumerateDevices: async () => current,
+      }),
+      configurable: true,
+    });
+    const { unmount } = render(
+      <CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />,
+    );
+    await screen.findByLabelText('Capture page');
+    // Select the second camera explicitly, then unplug it.
+    fireEvent.change(screen.getByLabelText('Choose camera'), { target: { value: 'd2' } });
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
+    current = [d1];
+    target.dispatchEvent(new Event('devicechange'));
+    await screen.findByText(/no longer available/);
+    unmount();
+    expect(removeSpy).toHaveBeenCalledWith('devicechange', expect.any(Function));
+  });
+});
