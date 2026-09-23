@@ -22,7 +22,7 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 - **Symptoms.** The nav grid was `grid-cols-4` but held 8 destinations (Home + 7 tools), wrapping to ~135px-tall two rows while the page reserved only `pb-[76px]`; cells ~44px wide with 9.5px labels.
 - **Root cause.** Grid sized when the tool list was shorter; never resized as tools grew to 7.
 - **Fix.** Single-row horizontally scrolling strip (snap, hidden scrollbar, 56px touch height, 10px labels); page bottom padding (`pb-[92px]`) applied only when the nav renders.
-- **Verification.** Frontend-only on a Rust-less machine: eslint clean, prettier clean, vitest 118/118. Full suite (typecheck/build/E2E) pending on the Rust-capable side before push.
+- **Verification.** Frontend-only on a Rust-less machine: eslint clean, prettier clean, vitest 118/118. Full suite re-verified on the Rust-capable side 2026-09-23: Rust 345 tests, `fmt`/`clippy` clean, WASM build passing, typecheck/lint/format clean, 118 unit tests, production build (PWA SW, 34 precache entries, zero testbench strings), canonical E2E 21/21 + 4 SKIP without the optional corpus, optional suites exit 0 with explicit SKIP — baselines unchanged, patch bumped to v1.7.1.
 
 ### F-8 — Hero proof-line clipped on small phones
 

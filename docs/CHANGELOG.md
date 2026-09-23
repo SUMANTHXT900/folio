@@ -2,6 +2,14 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.7.1 — Mobile UI fixes F-7–F-10 (`dev`, 2026-09-23)
+
+Commit `3057b95` (patch bump to `1.7.1` after the laptop-side full-suite re-verification).
+
+- UI-only batch, engine untouched: mobile bottom nav is a single-row snap-scrolling strip with page bottom padding applied only where the nav renders (F-7, F-10); hero proof-line wraps below `sm` (F-8); Rearrange drag starts from a grip handle, rows keep `pan-y` scroll, arrow buttons enlarged (F-9).
+- About-page version tree needs no edit: the `latest` entry reflects `package.json` via the Vite `__FOLIO_VERSION__` define.
+- Verification: full suite green on the Rust-capable side — Rust 345 tests, `fmt`/`clippy` clean, WASM build passing, typecheck/lint/format clean, 118 frontend tests, production build (PWA SW, 34 precache entries, zero testbench strings), canonical E2E 21/21 + 4 SKIP without the optional corpus, optional suites exit 0 with explicit SKIP.
+
 ## v1.7.0 — Unified Folio repository (`dev`, 2026-09-22)
 
 Commit `d76a22e` (+ `.gitattributes` `74943c4`, lock normalization `d9bb998`).

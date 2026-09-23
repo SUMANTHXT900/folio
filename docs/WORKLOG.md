@@ -71,3 +71,12 @@ Chronological record of meaningful development events. Each entry records object
   4. If the suite is green, decide the version bump per the release workflow (UI-fix batch → patch bump; keep `CHANGELOG.md`, About version tree, `STATUS.md`, `README.md` consistent). If anything fails, fix on the laptop side — do not ask the VPS side to verify further than lint/format/unit tests.
   5. `main`/production promotion stays unscheduled and out of scope — do NOT promote as a side effect.
 - **Remaining after handoff.** Full-suite confirmation (or fixes); version bump decision; nothing else pending from this change.
+
+## 2026-09-23 — Handoff closure: F-7–F-10 verified, v1.7.1 (laptop side)
+
+- **Objective.** Execute the VPS handoff above on the Rust-capable side and close it out.
+- **Work.** `git pull` on `dev` (fast-forward `656cdbe` → `3057b95`, clean tree confirmed). Ran the full suite per `docs/DEVELOPMENT.md`: `cargo test` in `engine/` (345 passing: 228 unit + integration), `cargo fmt --check` clean, `cargo clippy --all-targets` clean, `npm run build:wasm` passing, `npm run typecheck` passing (the VPS-side `wasm/pkg` gap resolved by building), `npm run lint` / `format:check` clean, `npm test` 118/118, `npm run build` passing (PWA SW, 34 precache entries, zero testbench strings in bundle). Canonical E2E `node e2e/studio.e2e.mjs` against a PID-verified `vite --port 5199 --strictPort` server: 21/21 passed + 4 SKIPPED (no `test pdfs/` corpus present); optional `large-files`/`thumbnail`/`metadata` suites exit 0 with explicit SKIP. Patch bump `1.7.0` → `1.7.1` via `npm version patch --no-git-tag-version` (About `latest` entry follows automatically via `__FOLIO_VERSION__`); closed out `STATUS.md` (baselines unchanged), `CHANGELOG.md` (new v1.7.1 entry), `BUGS.md` F-7 verification, `ROADMAP.md`, `README.md` (badge + history).
+- **Findings.** Zero baseline changes — the F-7–F-10 batch is purely presentational, as designed. The VPS-side typecheck error was purely the gitignored `wasm/pkg/` absence, not a code issue.
+- **Decisions.** v1.7.1 patch (not minor): UI-fix batch with no engine/contract changes. `main`/production promotion stays unscheduled and out of scope — NOT done here.
+- **Verification.** As listed under Work above; rebuilt after the version bump to confirm the shipped artifact.
+- **Remaining.** `main`/production promotion decision (unscheduled); nothing else pending.

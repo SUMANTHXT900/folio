@@ -10,11 +10,12 @@ This roadmap records actual project direction. Items are separated by commitment
 - **v1.7.0 (`dev`)** — unified Folio repository: complete Rust engine source + WASM bridge + tests + examples + production Studio in one repo; Rust/WASM manipulation in a Web Worker; PDF.js rendering-only; real progress/cancellation/structured errors; Metadata and Images → PDF tools; Compress disabled; Testbench removed from product.
 - **Phase 1 (done)** — repository renamed `pdf-studio` → `folio`; product identity corrected; persistent documentation system established (`AGENTS.md` + `docs/`).
 - **Phase 2 (done)** — filesystem restructured into project-oriented ownership: `engine/` (Rust source, tests, examples, manifest + lockfile), `wasm/` (bridge, path-dependency updated), `app/` (frontend, no config changes required), `docs/` untouched. No Cargo workspace; no behavior changes; full suite re-verified.
-- **Phase 3 (done, this change)** — testing policy finalized: large external PDFs reclassified as optional developer-owned benchmark inputs (see `docs/DECISIONS.md` D13); canonical E2E (`studio.e2e.mjs`) passes from a fresh clone with no corpus via deterministic synthetic small fixtures (`app/e2e/corpus.mjs`) and explicit SKIP of large-file sections; `large-files`/`thumbnail`/`metadata` E2E marked optional with clean SKIP semantics; old `folio-engine` workspace retired.
+- **Phase 3 (done)** — testing policy finalized: large external PDFs reclassified as optional developer-owned benchmark inputs (see `docs/DECISIONS.md` D13); canonical E2E (`studio.e2e.mjs`) passes from a fresh clone with no corpus via deterministic synthetic small fixtures (`app/e2e/corpus.mjs`) and explicit SKIP of large-file sections; `large-files`/`thumbnail`/`metadata` E2E marked optional with clean SKIP semantics; old `folio-engine` workspace retired.
+- **v1.7.1 (done)** — mobile UI fixes F-7–F-10 patch (UI-only, engine untouched), full suite re-verified with baselines unchanged (see `docs/WORKLOG.md` 2026-09-23 handoff closure).
 
 ## Current
 
-- Phase 3 completion: full verification re-run without the corpus, commit, normal push to `dev`, clean working tree.
+- No active development. Next decision is the `main`/production promotion (unscheduled).
 
 ## Next
 

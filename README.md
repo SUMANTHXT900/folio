@@ -14,7 +14,7 @@
   <a href="https://dev.folio-pdf.pages.dev/" target="_blank" rel="noopener">
     <img src="https://img.shields.io/badge/Live-dev.folio--pdf.pages.dev-d9902d?style=for-the-badge&logo=cloudflare&logoColor=white" alt="Live dev preview" />
   </a>
-  <img src="https://img.shields.io/badge/version-1.7.0-d9902d?style=for-the-badge" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.1-d9902d?style=for-the-badge" alt="Version" />
   <img src="https://img.shields.io/badge/engine-Rust%20WASM-b7410e?style=for-the-badge" alt="Engine" />
   <img src="https://img.shields.io/badge/privacy-100%25%20local-16a34a?style=for-the-badge" alt="Privacy" />
 </p>
@@ -161,6 +161,7 @@ npx wrangler pages deploy dist --project-name folio-pdf --branch dev
 
 ## Project history
 
+- **v1.7.1 (dev)** - Mobile UI fixes F-7–F-10 (patch, UI-only, engine untouched): single-row snap-scrolling bottom nav inside tools with page padding reserved only where the nav renders, hero proof-line wraps below `sm`, Rearrange drag starts from a grip handle with `pan-y` page scroll preserved. Full suite re-verified (see `docs/STATUS.md` baseline).
 - **v1.7.0 (dev)** - Folio engine integration: the complete Rust engine source, WASM bridge, tests, and examples now live in this repository alongside the production Studio. Rust/WASM-powered PDF processing in a Web Worker, PDF.js retained for rendering, real progress/cancellation/structured errors, completion metadata (duration, page counts, output sizes), new Metadata and Images → PDF tools, Compress reserved for a future update, production UI preserved, Developer Testbench removed from the product.
 - **v1.6.0** - cancellable merge jobs with stage progress, large-selection memory notice, mobile-aware blur.
 - **v1.5.0** - PDF render Worker + main-thread fallback, blob-URL thumbs, Show-All resume, scaleX progress.
