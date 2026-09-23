@@ -196,7 +196,7 @@ export default function Home() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.5, delay: 0.22 }}
-          className="mt-5 lg:mt-0 lg:absolute lg:right-0 lg:bottom-1 flex items-center gap-3 text-[13px] font-medium text-ink-500 dark:text-ink-300 whitespace-nowrap"
+          className="mt-5 lg:mt-0 lg:absolute lg:right-0 lg:bottom-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] font-medium text-ink-500 dark:text-ink-300 sm:flex-nowrap sm:whitespace-nowrap"
         >
           <span>
             <strong className="font-display text-brass-600 dark:text-brass-300 font-semibold">

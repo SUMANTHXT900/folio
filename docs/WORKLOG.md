@@ -58,3 +58,16 @@ Chronological record of meaningful development events. Each entry records object
 - **Decisions.** D13 (large PDFs optional, never canonical); synthetic stand-ins cover canonical shapes with zero bytes in git; 25/25 stays the with-corpus benchmark, 21/21 + 4 SKIP the fresh-clone expectation.
 - **Verification.** Without any corpus: Rust 345 tests, `fmt`/`clippy` (incl. strict `--all-features -- -D warnings`) clean, WASM build passing, typecheck/lint/format clean, 118 frontend tests, production build (PWA SW, 34 precache entries), canonical E2E 21/21 passed + 4 SKIPPED (optional corpus unavailable), optional suites exit 0 with explicit SKIP. No large PDFs added, `main` untouched.
 - **Remaining.** `main`/production promotion decision (unscheduled).
+
+## 2026-09-23 — Mobile UI fixes F-7–F-10 (bottom nav, proof line, rearrange handle)
+
+- **Objective.** Fix the crammed mobile bottom nav plus other phone UI issues found in the same audit, UI-only (the VPS has no Rust toolchain, no `wasm-pack`, no Chrome).
+- **Work.** `StudioApp.tsx`: nav is now a single-row snap-scrolling strip (was `grid-cols-4` holding 8 destinations across two rows); page bottom padding (`pb-[92px]`) applies only when the nav renders. `Home.tsx`: hero proof-line wraps below `sm`. `RearrangeTool.tsx`: drag starts only from a grip handle (`dragControls`, rows keep `pan-y` scroll), arrow buttons enlarged, helper copy updated. Docs: `BUGS.md` F-7–F-10 recorded as resolved.
+- **Verification (VPS side).** eslint clean, prettier clean, vitest 118/118 passing. `npx tsc --noEmit` reports exactly one error — the missing gitignored `wasm/pkg/folio_wasm.js` module (pre-existing environmental gap, fails identically without these changes); zero type errors in the edited files. `package-lock.json` churn from the local `npm install` reverted. NOT run here (impossible without Rust/Chrome): `build:wasm`, production build, E2E. `STATUS.md` baselines untouched. Committed + pushed to `dev` from here (UI-only, engine untouched).
+- **HANDOFF for the laptop-side agent.** You have Rust + the full toolchain — do this in order:
+  1. `git pull` on `dev`; confirm HEAD includes the F-7–F-10 commit.
+  2. Run the full verification suite exactly as `docs/DEVELOPMENT.md` prescribes: `cargo test` + `fmt --check` + `clippy` in `engine/`; `npm run build:wasm`, then typecheck/lint/format/unit-tests/build in `app/`; canonical E2E (`node e2e/studio.e2e.mjs`) — expect 21/21 + 4 explicit SKIPs without the optional `test pdfs/` corpus.
+  3. If any `docs/STATUS.md` baseline number changes, update that table in the same session (rule: never leave stale numbers).
+  4. If the suite is green, decide the version bump per the release workflow (UI-fix batch → patch bump; keep `CHANGELOG.md`, About version tree, `STATUS.md`, `README.md` consistent). If anything fails, fix on the laptop side — do not ask the VPS side to verify further than lint/format/unit tests.
+  5. `main`/production promotion stays unscheduled and out of scope — do NOT promote as a side effect.
+- **Remaining after handoff.** Full-suite confirmation (or fixes); version bump decision; nothing else pending from this change.

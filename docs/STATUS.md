@@ -23,6 +23,7 @@
 ## Current work
 
 - Phase 3 tasks: E2E corpus-optional rework (done), docs reclassification (done), full verification re-run, commit + push to `dev`.
+- Mobile UI fixes F-7–F-10 (bottom nav strip, proof-line wrap, rearrange handle): implemented + pushed to `dev` with frontend-only verification (VPS has no Rust/Chrome); full suite re-run pending on the Rust-capable side — see the 2026-09-23 `docs/WORKLOG.md` handoff entry.
 
 ## Pending work
 

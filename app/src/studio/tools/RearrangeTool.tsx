@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, memo, useCallback, useRef } from 'react';
-import { Reorder } from 'framer-motion';
+import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import {
   ToolHeading,
   DropZone,
@@ -33,6 +33,7 @@ const RearrangeRow = memo(function RearrangeRow({
   onPreview,
   isFirst,
   isLast,
+  dragControls,
 }: {
   pageIdx: number;
   pos: number;
@@ -42,9 +43,27 @@ const RearrangeRow = memo(function RearrangeRow({
   onPreview: () => void;
   isFirst: boolean;
   isLast: boolean;
+  dragControls: DragControls;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-800/60 px-3 py-2">
+      {/* Drag handle — the ONLY touch point that starts a drag. The rest of the
+          row keeps the page's vertical scroll (see DragRow's pan-y). */}
+      <span
+        onPointerDown={(e) => dragControls.start(e)}
+        className="flex w-8 h-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 hover:text-brass-500 active:cursor-grabbing"
+        aria-label="Drag to reorder"
+        role="button"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <circle cx="9" cy="6" r="1.6" />
+          <circle cx="15" cy="6" r="1.6" />
+          <circle cx="9" cy="12" r="1.6" />
+          <circle cx="15" cy="12" r="1.6" />
+          <circle cx="9" cy="18" r="1.6" />
+          <circle cx="15" cy="18" r="1.6" />
+        </svg>
+      </span>
       <span className="w-6 text-center text-xs font-mono text-ink-400">{pos + 1}</span>
       <button onClick={onPreview} className="flex-1 flex items-center gap-3 text-left">
         {thumb ? (
@@ -64,7 +83,7 @@ const RearrangeRow = memo(function RearrangeRow({
         <button
           onClick={onMoveUp}
           disabled={isFirst}
-          className="px-1.5 py-0.5 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label="Move up"
         >
           ↑
@@ -72,7 +91,7 @@ const RearrangeRow = memo(function RearrangeRow({
         <button
           onClick={onMoveDown}
           disabled={isLast}
-          className="px-1.5 py-0.5 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label="Move down"
         >
           ↓
@@ -81,6 +100,51 @@ const RearrangeRow = memo(function RearrangeRow({
     </div>
   );
 });
+
+/* One reorderable row: drag starts ONLY from the handle (dragListener={false}).
+   The item keeps `touch-action: pan-y` so vertical page scroll works on touch. */
+function DragRow({
+  pageIdx,
+  pos,
+  thumb,
+  onMoveUp,
+  onMoveDown,
+  onPreview,
+  isFirst,
+  isLast,
+}: {
+  pageIdx: number;
+  pos: number;
+  thumb: string;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onPreview: () => void;
+  isFirst: boolean;
+  isLast: boolean;
+}) {
+  const controls = useDragControls();
+  return (
+    <Reorder.Item
+      value={pageIdx}
+      dragListener={false}
+      dragControls={controls}
+      className="list-none"
+      style={{ touchAction: 'pan-y' }}
+    >
+      <RearrangeRow
+        pageIdx={pageIdx}
+        pos={pos}
+        thumb={thumb}
+        onMoveUp={onMoveUp}
+        onMoveDown={onMoveDown}
+        onPreview={onPreview}
+        isFirst={isFirst}
+        isLast={isLast}
+        dragControls={controls}
+      />
+    </Reorder.Item>
+  );
+}
 
 export default function RearrangeTool() {
   const { files, setFiles, addFiles, error: filesError, busy, setBusy, setError } = usePdfFiles();
@@ -236,7 +300,7 @@ export default function RearrangeTool() {
       <ToolHeading
         icon={<RearrangeIcon />}
         name="Rearrange"
-        desc="Drag to reorder, or use the arrows — click a page to preview it"
+        desc="Drag the handle to reorder, or use the arrows — click a page to preview it"
       />
 
       {!file && (
@@ -279,22 +343,21 @@ export default function RearrangeTool() {
           {!loading && order.length > 0 && (
             <Card>
               <p className="text-sm font-medium text-ink-700 dark:text-paper-100 mb-3">
-                Drag, click to preview, or use arrows
+                Drag the handle to reorder, or use the arrows — click a page to preview
               </p>
               <Reorder.Group axis="y" values={order} onReorder={setOrder} className="space-y-2">
                 {visibleOrder.map((pageIdx, i) => (
-                  <Reorder.Item key={pageIdx} value={pageIdx} className="list-none">
-                    <RearrangeRow
-                      pageIdx={pageIdx}
-                      pos={i}
-                      thumb={thumbs[pageIdx]}
-                      onMoveUp={() => move(i, -1)}
-                      onMoveDown={() => move(i, 1)}
-                      onPreview={() => setViewer(i)}
-                      isFirst={i === 0}
-                      isLast={i === order.length - 1}
-                    />
-                  </Reorder.Item>
+                  <DragRow
+                    key={pageIdx}
+                    pageIdx={pageIdx}
+                    pos={i}
+                    thumb={thumbs[pageIdx]}
+                    onMoveUp={() => move(i, -1)}
+                    onMoveDown={() => move(i, 1)}
+                    onPreview={() => setViewer(i)}
+                    isFirst={i === 0}
+                    isLast={i === order.length - 1}
+                  />
                 ))}
               </Reorder.Group>
               {hiddenCount > 0 && (

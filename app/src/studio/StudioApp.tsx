@@ -268,9 +268,12 @@ export default function StudioApp() {
     );
   }, [id, isTool, isAbout, route]);
 
+  // The bottom nav exists only inside tools — reserve page space for it only there.
+  const showMobileNav = !isHome && isTool;
+
   return (
     <MotionConfig reducedMotion="user">
-      <div className="min-h-screen flex flex-col pb-[76px] sm:pb-0">
+      <div className={'min-h-screen flex flex-col' + (showMobileNav ? ' pb-[92px] sm:pb-0' : '')}>
         <style>{VT_CSS}</style>
         <ScrollProgress />
         {fallbackWave && (
@@ -299,7 +302,7 @@ export default function StudioApp() {
         </AnimatePresence>
 
         <Footer />
-        {!isHome && isTool && <MobileNav route={route} />}
+        {showMobileNav && <MobileNav route={route} />}
       </div>
     </MotionConfig>
   );
@@ -444,7 +447,8 @@ export const TOOL_LIST: { id: ToolId; name: string; tagline: string }[] = [
 ];
 
 /* Mobile bottom nav — only shown inside tools (home already IS the nav).
-   Utility-focused: back home + sibling tools for quick hopping. */
+   Single-row horizontal strip: 8 destinations never fit a fixed grid,
+   so this scrolls (snap) instead of wrapping into space-stealing rows. */
 function MobileNav({ route }: { route: string }) {
   const active = route as ToolId;
   return (
@@ -452,10 +456,10 @@ function MobileNav({ route }: { route: string }) {
       className="sm:hidden fixed bottom-0 inset-x-0 z-50 glass bg-paper-100/92 dark:bg-ink-950/92 border-t border-paper-300/60 dark:border-ink-800/60 pb-[env(safe-area-inset-bottom)]"
       aria-label="Tools"
     >
-      <div className="grid grid-cols-4 gap-0.5 px-2 py-1.5">
+      <div className="flex gap-1 overflow-x-auto px-2 py-1.5 snap-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <a
           href="#/"
-          className="relative flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-xl min-h-[52px]"
+          className="relative flex shrink-0 snap-start flex-col items-center justify-center gap-0.5 rounded-xl px-3.5 py-1.5 min-h-[56px] min-w-[62px]"
           aria-label="All tools"
         >
           <span className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-400 dark:text-ink-300">
@@ -473,7 +477,7 @@ function MobileNav({ route }: { route: string }) {
               <path d="M5 9.5V21h14V9.5" />
             </svg>
           </span>
-          <span className="text-[9.5px] text-ink-400 dark:text-ink-300">Home</span>
+          <span className="text-[10px] text-ink-400 dark:text-ink-300">Home</span>
         </a>
         {TOOL_LIST.map((t) => {
           const isActive = active === t.id;
@@ -481,7 +485,7 @@ function MobileNav({ route }: { route: string }) {
             <a
               key={t.id}
               href={`#/${t.id}`}
-              className="relative flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-xl min-h-[52px]"
+              className="relative flex shrink-0 snap-start flex-col items-center justify-center gap-0.5 rounded-xl px-3.5 py-1.5 min-h-[56px] min-w-[62px]"
               aria-current={isActive ? 'page' : undefined}
             >
               {isActive && (
@@ -503,7 +507,7 @@ function MobileNav({ route }: { route: string }) {
               </span>
               <span
                 className={
-                  'relative text-[9.5px] leading-none ' +
+                  'relative text-[10px] leading-none ' +
                   (isActive
                     ? 'text-brass-600 dark:text-brass-300 font-semibold'
                     : 'text-ink-400 dark:text-ink-300')

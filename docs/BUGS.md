@@ -16,6 +16,32 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 ## Resolved
 
+### F-7 — Mobile bottom nav wrapping into two rows and covering content
+
+- **Status.** Resolved. **Area.** Studio shell (`app/src/studio/StudioApp.tsx` `MobileNav`). **Severity.** Medium (footer and bottom content unreachable behind the nav on phones).
+- **Symptoms.** The nav grid was `grid-cols-4` but held 8 destinations (Home + 7 tools), wrapping to ~135px-tall two rows while the page reserved only `pb-[76px]`; cells ~44px wide with 9.5px labels.
+- **Root cause.** Grid sized when the tool list was shorter; never resized as tools grew to 7.
+- **Fix.** Single-row horizontally scrolling strip (snap, hidden scrollbar, 56px touch height, 10px labels); page bottom padding (`pb-[92px]`) applied only when the nav renders.
+- **Verification.** Frontend-only on a Rust-less machine: eslint clean, prettier clean, vitest 118/118. Full suite (typecheck/build/E2E) pending on the Rust-capable side before push.
+
+### F-8 — Hero proof-line clipped on small phones
+
+- **Status.** Resolved. **Area.** Home (`app/src/studio/Home.tsx`). **Severity.** Low (text cut off, no function lost).
+- **Symptoms.** The "0 servers · 100% browser · ∞ free" row was `whitespace-nowrap` at 13px — wider than a 360px viewport — and body `overflow-x-hidden` clipped it.
+- **Fix.** Wraps below `sm` (`flex-wrap`, kept single-line on larger screens).
+
+### F-9 — Rearrange touch-drag capturing page scroll
+
+- **Status.** Resolved. **Area.** Rearrange tool (`app/src/studio/tools/RearrangeTool.tsx`). **Severity.** Medium (primary reorder gesture unusable on touch; arrows were the only reliable path).
+- **Symptoms.** Vertical `Reorder` list with no drag handle: touch gestures on rows were captured by drag instead of scrolling the page.
+- **Fix.** Drag starts only from a grip handle (`dragControls` + `dragListener={false}`); rows keep `touch-action: pan-y` so the page scrolls normally. Arrow buttons enlarged (`px-3 py-1`); helper copy now names the handle.
+
+### F-10 — Dead bottom padding on mobile Home/About
+
+- **Status.** Resolved with F-7. **Area.** Studio shell. **Severity.** Low (76px empty space).
+- **Symptoms.** `pb-[76px]` applied on every mobile page although the nav renders only inside tools.
+- **Fix.** The padding applies only when the nav renders (`showMobileNav`).
+
 ### F-1 — WASM wall-clock panic (`std::time` on `wasm32-unknown-unknown`)
 
 - **Status.** Resolved. **Area.** Engine timing (`engine/src/core/clock.rs`, `engine/src/observability/timing.rs`). **Severity.** High (every timed WASM execution would panic).
