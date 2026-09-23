@@ -26,6 +26,10 @@ cd folio
 cd engine
 cargo test
 
+# Document-scan core (same independent-manifest pattern in scan/):
+cd ../scan
+cargo test
+
 # Frontend + WASM:
 cd ../app
 npm install
@@ -49,6 +53,11 @@ No backend, no proxy, no localhost bridge. The dev server serves the app; the en
 ```bash
 # 1. Rust engine — inside engine/
 cargo test                 # 345 tests: units + integration (one file per op + lifecycle)
+cargo fmt --check          # must be clean
+cargo clippy --all-targets # must be clean (warnings fail the bar)
+
+# 1b. Document-scan core — inside scan/ (v2.0 M1+)
+cargo test                 # scan pipeline tests (geometry, detect, warp, enhance)
 cargo fmt --check          # must be clean
 cargo clippy --all-targets # must be clean (warnings fail the bar)
 

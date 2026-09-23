@@ -24,7 +24,7 @@
 
 ## Current work
 
-- v1.8.0 done: Images → PDF page assembly implemented, full suite green (baselines updated below), docs closed out. About version flows automatically via `__FOLIO_VERSION__`.
+- v2.0 M1 done: `folio-scan` crate (detection + warp + enhancement, 26 tests, benchmarked); M2 (scan worker) next. No version bump yet.
 
 ## Pending work
 
@@ -48,6 +48,7 @@ None. No blocked items.
 | Check                                                         | Result                                                                                                                                                          |
 | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Rust tests (`cargo test` in `engine/`)                        | 345 passing (228 unit + integration suites)                                                                                                                     |
+| Scan core tests (`cargo test` in `scan/`)                     | 26 passing (geometry, detect, warp, enhance, pipeline)                                                                                                          |
 | Rust format (`cargo fmt --check`)                             | clean                                                                                                                                                           |
 | Rust lints (`cargo clippy --all-targets`)                     | clean                                                                                                                                                           |
 | WASM build (`npm run build:wasm` in `app/`)                   | passing (`wasm-pack`, `wasm/pkg/` reproduced)                                                                                                                   |

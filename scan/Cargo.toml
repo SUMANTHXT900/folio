@@ -1,0 +1,29 @@
+[package]
+name = "folio-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Local, offline document-scan core: detection, perspective warp, enhancement (v2.0 M1)"
+license = "MIT"
+
+[lib]
+name = "folio_scan"
+path = "src/lib.rs"
+# cdylib is required for the M2 wasm-pack browser build (same shape as
+# folio-wasm); rlib keeps native tests/examples linking normally.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Image decoding/encoding (Lesson 11 pattern: pure-Rust, WASM-compatible,
+# only JPEG+PNG, no rayon). Shared with folio-engine's footprint.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Detection primitives only (Canny, contours, blur, threshold). Default
+# features OFF: no rayon/threading, no text/FFT — sequential baseline,
+# single-threaded WASM execution like the engine.
+imageproc = { version = "0.27", default-features = false }
+
+[dev-dependencies]
+# Same crate for deterministic in-memory fixtures only.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[profile.release]
+opt-level = 3

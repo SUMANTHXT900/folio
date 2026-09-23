@@ -63,6 +63,11 @@ folio/
 │   ├── examples/      Rust CLI examples (opt-in corpus tools).
 │   ├── Cargo.toml     Engine manifest (package `folio-engine`).
 │   └── Cargo.lock     Engine dependency lock.
+├── scan/              Folio Rust document-scan core (v2.0 M1) — detection, warp, enhancement.
+│   ├── src/           Scan source (geometry, detect, warp, enhance, pipeline, error).
+│   ├── examples/      Scan benchmark + debug CLIs.
+│   ├── Cargo.toml     Scan manifest (package `folio-scan`).
+│   └── Cargo.lock     Scan dependency lock.
 ├── wasm/              Thin Rust → WASM bridge (wasm-pack). No PDF logic here.
 │   ├── src/           Glue crate (`folio-wasm`) over the engine.
 │   └── Cargo.toml     Bridge manifest; path-depends on `../engine`.
@@ -77,8 +82,8 @@ folio/
 └── README.md          Public project front page.
 ```
 
-Rust commands run in `engine/`; frontend commands run in `app/`. There is no
-Cargo workspace: `engine/` and `wasm/` keep their independent manifests and
+Rust commands run in `engine/` (PDF engine) or `scan/` (document-scan core); frontend commands run in `app/`. There is no
+Cargo workspace: `engine/`, `scan/`, and `wasm/` keep their independent manifests and
 lockfiles (see `docs/DECISIONS.md` D12). The `test pdfs/` directory (gitignored,
 local-only, optional benchmark corpus — never required for canonical testing,
 see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
