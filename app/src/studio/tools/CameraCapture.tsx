@@ -15,6 +15,12 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Card, ErrorBlock } from '../components/ui';
+import {
+  NO_CAPABILITIES,
+  readTrackCapabilities,
+  requestContinuousModes,
+  type CameraCapabilities,
+} from './cameraCapabilities';
 
 type CameraStatus = 'starting' | 'live' | 'failed';
 
@@ -101,7 +107,9 @@ export function CameraCapture({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const trackRef = useRef<MediaStreamTrack | null>(null);
   const counterRef = useRef(0);
+  const focusTimer = useRef<number | null>(null);
   const [status, setStatus] = useState<CameraStatus>('starting');
   const [failure, setFailure] = useState<string | null>(null);
   const [facing, setFacing] = useState<'environment' | 'user'>('environment');
@@ -109,6 +117,15 @@ export function CameraCapture({
   const [deviceId, setDeviceId] = useState<string>('');
   const [capturing, setCapturing] = useState(false);
   const [grid, setGrid] = useState(false);
+  // Hardware capabilities of the ACTIVE track only — recalculated on
+  // every (re)start so switching cameras never shows stale controls.
+  const [caps, setCaps] = useState<CameraCapabilities>(NO_CAPABILITIES);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [zoomDead, setZoomDead] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [torchDead, setTorchDead] = useState(false);
+  const [controlNote, setControlNote] = useState<string | null>(null);
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
   // Real frame aspect (letterboxed, never cropped). Defaults to 4:3
   // until the stream reports dimensions; tracks orientation changes.
   const [aspect, setAspect] = useState({ w: 4, h: 3 });
@@ -121,6 +138,16 @@ export function CameraCapture({
     }
     stopStream(streamRef.current);
     streamRef.current = null;
+    trackRef.current = null;
+    // Fresh capability state per session: never carry controls over from
+    // the previous camera.
+    setCaps(NO_CAPABILITIES);
+    setZoom(null);
+    setZoomDead(false);
+    setTorchOn(false);
+    setTorchDead(false);
+    setControlNote(null);
+    setFocusPoint(null);
     setStatus('starting');
     setFailure(null);
     try {
@@ -130,6 +157,13 @@ export function CameraCapture({
       };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+      const videoTrack = stream.getVideoTracks()[0] ?? null;
+      trackRef.current = videoTrack;
+      const detected = readTrackCapabilities(videoTrack);
+      setCaps(detected);
+      if (detected.zoom !== null) setZoom(detected.zoom.min);
+      // Silent best-effort: continuous focus/exposure where reported.
+      void requestContinuousModes(videoTrack);
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
@@ -152,6 +186,11 @@ export function CameraCapture({
     return () => {
       stopStream(streamRef.current);
       streamRef.current = null;
+      trackRef.current = null;
+      if (focusTimer.current !== null) {
+        window.clearTimeout(focusTimer.current);
+        focusTimer.current = null;
+      }
     };
     // Restart only when the requested source changes — never on capture.
   }, [facing, deviceId]);
@@ -166,7 +205,59 @@ export function CameraCapture({
   const leave = () => {
     stopStream(streamRef.current);
     streamRef.current = null;
+    trackRef.current = null;
     onDone();
+  };
+
+  /**
+   * Zoom through the lens, never CSS: applies the track's own range.
+   * A rejection disables the control with a note — reporting a zoom
+   * capability never promised it would apply.
+   */
+  const applyZoom = async (value: number) => {
+    const track = trackRef.current;
+    if (!track || caps.zoom === null) return;
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: value } as MediaTrackConstraintSet] });
+      setZoom(value);
+    } catch {
+      setZoomDead(true);
+      setControlNote('Zoom is not adjustable on this camera right now.');
+    }
+  };
+
+  /** Torch toggle through constraints; rejection disables it with a note. */
+  const toggleTorch = async () => {
+    const track = trackRef.current;
+    if (!track || !caps.torch) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] });
+      setTorchOn(next);
+    } catch {
+      setTorchDead(true);
+      setControlNote('The flashlight is not available on this camera right now.');
+    }
+  };
+
+  /**
+   * Tap-to-focus, only when the track reports single-shot AF: triggers a
+   * real refocus cycle and marks the tap point while it runs. Without
+   * that capability taps do nothing — no fake focus feedback.
+   */
+  const tapToFocus = (e: React.MouseEvent<HTMLDivElement>) => {
+    const track = trackRef.current;
+    if (!track || !caps.supportsTapToFocus) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    setFocusPoint({
+      x: ((e.clientX - rect.left) / rect.width) * 100,
+      y: ((e.clientY - rect.top) / rect.height) * 100,
+    });
+    if (focusTimer.current !== null) window.clearTimeout(focusTimer.current);
+    focusTimer.current = window.setTimeout(() => setFocusPoint(null), 900);
+    track
+      .applyConstraints({ advanced: [{ focusMode: 'single-shot' } as MediaTrackConstraintSet] })
+      .catch(() => undefined);
   };
 
   const capture = async () => {
@@ -255,6 +346,7 @@ export function CameraCapture({
                 maxHeight: '62vh',
                 width: ratio < 1 ? `min(100%, calc(62vh * ${ratio}))` : '100%',
               }}
+              onClick={tapToFocus}
             >
               <video
                 ref={videoRef}
@@ -267,6 +359,16 @@ export function CameraCapture({
                 style={facing === 'user' ? { transform: 'scaleX(-1)' } : undefined}
               />
               <ScannerOverlay grid={grid} />
+              {/* Tap-to-focus marker: positional feedback for a requested
+                  refocus cycle — rendered only when actually requested. */}
+              {focusPoint !== null && (
+                <span
+                  aria-hidden
+                  data-focus-point
+                  className="absolute h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-brass-300"
+                  style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%` }}
+                />
+              )}
             </div>
           </div>
 
@@ -306,7 +408,9 @@ export function CameraCapture({
             </div>
           )}
 
-          {/* Shutter row: grid toggle, capture, retake. */}
+          {/* Shutter row: grid, capability controls, capture, retake.
+              Torch/zoom render ONLY when the active track reports them;
+              a rejected apply disables the control with a note. */}
           <div className="mt-3 flex items-center gap-3">
             <button
               onClick={() => setGrid((g) => !g)}
@@ -331,6 +435,50 @@ export function CameraCapture({
                 <path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16" />
               </svg>
             </button>
+            {caps.torch && !torchDead && (
+              <button
+                onClick={() => void toggleTorch()}
+                aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
+                aria-pressed={torchOn}
+                title="Flashlight"
+                className={`flex h-11 min-w-11 items-center justify-center rounded-xl border px-3 text-xs transition-colors ${
+                  torchOn
+                    ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+                    : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+                }`}
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
+                </svg>
+              </button>
+            )}
+            {caps.zoom !== null && !zoomDead && zoom !== null && (
+              <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700">
+                <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
+                <input
+                  type="range"
+                  min={caps.zoom.min}
+                  max={caps.zoom.max}
+                  step={caps.zoom.step}
+                  value={zoom}
+                  onChange={(e) => void applyZoom(Number(e.target.value))}
+                  aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
+                  className="min-w-0 flex-1 accent-brass-500"
+                />
+                <span className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300">
+                  {zoom.toFixed(1)}×
+                </span>
+              </label>
+            )}
             <button
               onClick={() => void capture()}
               disabled={capturing}
@@ -354,6 +502,11 @@ export function CameraCapture({
               Retake
             </button>
           </div>
+          {controlNote !== null && (
+            <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">
+              {controlNote}
+            </p>
+          )}
 
           <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
             <button
@@ -383,6 +536,7 @@ export function CameraCapture({
             )}
             <span className="text-xs text-ink-400 dark:text-ink-300">
               Frame the page in the guide — captures join the page list below.
+              {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}
             </span>
           </div>
         </div>
