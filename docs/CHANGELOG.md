@@ -2,6 +2,13 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.8.0 — Images → PDF page assembly (`dev`, 2026-09-23)
+
+- Unified ordered page collection (`ImagePage[]`) for uploads + camera captures: preview grid, ←/→ move-button reorder (HTML5 drag as desktop-only enhancement), per-page remove, add-more after initial selection, per-page rotate (app-side canvas re-encode; unrotated pages byte-identical), camera input (`getUserMedia` → video → JPEG capture, per-error failure copy, stream stopped on Done/close/unmount).
+- App-only: no changes to `folio.ts`, adapters, worker protocol, WASM glue, or the Rust engine (`pdf.images_to_pdf` contract unchanged — see `docs/DECISIONS.md` D14). About-page version tree needs no edit (dynamic via `__FOLIO_VERSION__`).
+- Tests: 16 new frontend unit tests (`imagePages`, `imagePrepare`); E2E images section extended (preview order, move reorder, rotate badge, remove + add-more, build) with committed `red-wide.png`/`blue-tall.jpg` fixtures; camera covered by error-mapper review + manual checklist (no webcam in CI).
+- Verification: full suite green — Rust 345, `fmt`/`clippy` clean, WASM build passing, typecheck/lint/format clean, 134 frontend tests, production build (PWA SW, 34 precache entries, zero testbench strings), canonical E2E 25/25 + 4 SKIP without the optional corpus.
+
 ## v1.7.1 — Mobile UI fixes F-7–F-10 (`dev`, 2026-09-23)
 
 Commit `3057b95` (patch bump to `1.7.1` after the laptop-side full-suite re-verification).

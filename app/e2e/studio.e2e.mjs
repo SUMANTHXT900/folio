@@ -390,16 +390,71 @@ async function main() {
     await page.close();
   }
 
-  // ---- Images: two images → PDF ----
+  // ---- Images: page assembly (preview → reorder → rotate → remove → add) → PDF ----
   {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'images');
-    const png = path.join(__dirname, 'fixtures', 'pixel.png');
-    const jpg = path.join(__dirname, 'fixtures', 'pixel.jpg');
-    await upload(page, 'input[type="file"]', [png, jpg]);
+    const red = path.join(__dirname, 'fixtures', 'red-wide.png');
+    const blue = path.join(__dirname, 'fixtures', 'blue-tall.jpg');
+    const cardOrder = () =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
+          (li) => li.getAttribute('aria-label') ?? '',
+        ),
+      );
+    const clickButton = (ariaLabel) =>
+      page.evaluate((label) => {
+        [...document.querySelectorAll('button')]
+          .find((b) => b.getAttribute('aria-label') === label)
+          ?.click();
+      }, ariaLabel);
+    await upload(page, 'input[type="file"]', [red, blue]);
     await page.waitForFunction(() => document.body.innerText.includes('Build PDF'), {
       timeout: 30000,
     });
+    let cards = await cardOrder();
+    check(
+      'images page manager shows two previews in upload order',
+      cards.length === 2 && cards[0].includes('red-wide.png') && cards[1].includes('blue-tall.jpg'),
+      cards.join(' | '),
+    );
+    // Guaranteed reorder mechanism: move blue earlier → blue first.
+    await clickButton('Move blue-tall.jpg earlier');
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('ul[aria-label="Pages in PDF order"] > li')
+          ?.getAttribute('aria-label')
+          ?.includes('blue-tall.jpg'),
+      { timeout: 10000 },
+    );
+    cards = await cardOrder();
+    check(
+      'images move controls reorder pages',
+      cards[0].includes('blue-tall.jpg') && cards[1].includes('red-wide.png'),
+      cards.join(' | '),
+    );
+    // Rotate red 90° (badge appears; build exercises the canvas re-encode path).
+    await clickButton('Rotate red-wide.png 90 degrees clockwise');
+    const rotated = await page.evaluate(() => document.body.innerText.includes('90°'));
+    check('images rotate marks the page', rotated);
+    // Remove blue → one page; add red-wide again → two pages.
+    await clickButton('Remove blue-tall.jpg');
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 1,
+      { timeout: 10000 },
+    );
+    await upload(page, 'input[type="file"]', [red]);
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
+      { timeout: 10000 },
+    );
+    cards = await cardOrder();
+    check(
+      'images remove + add-more keep the collection consistent',
+      cards.length === 2 && cards[0].includes('red-wide.png'),
+      cards.join(' | '),
+    );
     const dlDir = path.join(__dirname, 'downloads');
     const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {

@@ -69,7 +69,7 @@ Global rules for all operations: inputs arrive as bytes (never paths); validatio
 
 - **Purpose.** One PDF from JPEG/PNG images, one page per image, input order preserved.
 - **Input.** One or more image byte blobs (staged without a rendering document). **Options.** `pageSize: 'fit' | 'standard'`, `backgroundRgb: [r, g, b]`.
-- **Output.** New PDF, N images → N pages. `FitImage` (default) sizes each page to the image's natural size (`px * 72 / dpi`); `StandardPage` uses fixed A4 (595.28 × 841.89 pt). Aspect ratio never distorted. EXIF orientation and DPI handled in-engine so native and WASM share one implementation.
+- **Output.** New PDF, N images → N pages. `FitImage` (default) sizes each page to the image's natural size (`px * 72 / dpi`); `StandardPage` uses fixed A4 (595.28 × 841.89 pt). Aspect ratio never distorted. EXIF orientation and DPI handled in-engine so native and WASM share one implementation. Page ordering, preview, and per-page rotation are app-level (Studio page collection stages images in order; rotation is canvas-applied before staging) — the engine contract is unchanged (see `docs/DECISIONS.md` D14).
 - **Errors.** Non-JPEG/PNG input fails as `UNSUPPORTED_FORMAT`.
 - **Testing.** `engine/tests/pdf_images_to_pdf.rs` + unit tests + E2E (built PDF download).
 

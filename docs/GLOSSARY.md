@@ -23,6 +23,8 @@ Definitions follow the actual implementation. Use these meanings consistently in
 - **PdfThumbnailEngine / DefaultPdfThumbnailEngine.** Windowed thumbnail generation over a shared `PdfRenderEngine`: bounded concurrency, page windows, LRU URL cache, canvas release.
 - **Studio.** The application UI shell (`app/src/studio/`: `StudioApp`, tools, hooks, services). "Studio" names the UI layer, not the product.
 - **Folio service.** `studio/services/folio.ts`: the single integration boundary between the Studio UI and the engine. Owns the binary stores, translates errors, streams progress.
+- **ImagePage / page collection.** The Images → PDF page model (`app/src/studio/tools/imagePages.ts` + `useImagePages.ts`): ordered entries of `{id, source, file handle, name, size, previewUrl, rotationDeg}`. Order is the PDF order; binaries stay in handles/stores, never in state.
+- **Camera capture.** The Images → PDF input source (`CameraCapture.tsx`): `getUserMedia` session producing `File`s into the page collection. Fully local; stream stopped on Done/close/unmount.
 - **WASM.** WebAssembly: the compilation target (`wasm32-unknown-unknown`) that lets the browser execute the same Rust engine core native tests exercise. Built with `wasm-pack` into gitignored `wasm/pkg/`.
 - **wasm-pack.** The tool building `wasm/` into the `wasm/pkg/` browser package (`--target web`). Invoked via `npm run build:wasm` from `app/`.
 - **lopdf.** The pure-Rust PDF parsing/manipulation crate the engine builds on. No OS dependencies; WASM-compatible with default features off.

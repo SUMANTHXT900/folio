@@ -12,6 +12,7 @@ This roadmap records actual project direction. Items are separated by commitment
 - **Phase 2 (done)** — filesystem restructured into project-oriented ownership: `engine/` (Rust source, tests, examples, manifest + lockfile), `wasm/` (bridge, path-dependency updated), `app/` (frontend, no config changes required), `docs/` untouched. No Cargo workspace; no behavior changes; full suite re-verified.
 - **Phase 3 (done)** — testing policy finalized: large external PDFs reclassified as optional developer-owned benchmark inputs (see `docs/DECISIONS.md` D13); canonical E2E (`studio.e2e.mjs`) passes from a fresh clone with no corpus via deterministic synthetic small fixtures (`app/e2e/corpus.mjs`) and explicit SKIP of large-file sections; `large-files`/`thumbnail`/`metadata` E2E marked optional with clean SKIP semantics; old `folio-engine` workspace retired.
 - **v1.7.1 (done)** — mobile UI fixes F-7–F-10 patch (UI-only, engine untouched), full suite re-verified with baselines unchanged (see `docs/WORKLOG.md` 2026-09-23 handoff closure).
+- **v1.8.0 (done)** — Images → PDF page assembly (app-only, engine untouched): unified ordered page collection for uploads + camera captures, preview grid, ←/→ move reorder (drag as enhancement), remove, add-more, per-page rotate, camera input (see `docs/DECISIONS.md` D14).
 
 ## Current
 

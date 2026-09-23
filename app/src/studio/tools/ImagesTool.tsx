@@ -19,6 +19,10 @@ import {
   studioShareAvailable,
   type StudioJob,
 } from '../services/folio';
+import { useImagePages } from './useImagePages';
+import { PageGrid } from './PageGrid';
+import { CameraCapture } from './CameraCapture';
+import { browserImageRenderer, preparePageBytes } from './imagePrepare';
 
 const ICON = (
   <svg
@@ -37,52 +41,61 @@ const ICON = (
   </svg>
 );
 
-interface ImagePick {
-  id: number;
-  name: string;
-  size: number;
-  file: File;
-}
+const ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
 
 /**
- * Images → PDF tool: builds one PDF from JPEG/PNG images through the
- * Folio engine (`pdf.images_to_pdf`, one page per image, in listed
+ * Images → PDF page assembly: uploads + camera captures join one ordered
+ * page collection (preview, reorder, remove, rotate), then build through
+ * the Folio engine (`pdf.images_to_pdf`, one page per image, in listed
  * order). Image bytes are staged in the service store only for the run
- * (never in React state); the picker keeps name/size/file handles.
+ * (never in React state); pages hold File/Blob handles + preview URLs.
  */
 export default function ImagesTool() {
-  const [picks, setPicks] = useState<ImagePick[]>([]);
+  const { pages, addFiles, addEntries, move, moveTo, remove, rotate, clear } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
+  const [cameraMode, setCameraMode] = useState(false);
+  const [sessionCaptured, setSessionCaptured] = useState(0);
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
   const [meta, setMeta] = useState<string[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
-  const idRef = useRef(0);
   const jobRef = useRef<StudioJob | null>(null);
+  const moreInputRef = useRef<HTMLInputElement>(null);
+  const [cameraSupported] = useState(
+    () =>
+      typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === 'function',
+  );
 
-  const addImages = (incoming: File[]) => {
-    const images = incoming.filter(
-      (f) => f.type === 'image/jpeg' || f.type === 'image/png' || /\.(jpe?g|png)$/i.test(f.name),
-    );
-    if (images.length < incoming.length) {
+  const addUploads = (incoming: File[]) => {
+    const result = addFiles(incoming, 'upload');
+    if (result.skipped > 0) {
       setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
     } else {
       setError(null);
     }
-    if (images.length === 0) return;
-    setPicks((prev) => [
-      ...prev,
-      ...images.map((file) => {
-        idRef.current += 1;
-        return { id: idRef.current, name: file.name, size: file.size, file };
-      }),
-    ]);
+  };
+
+  const onCapture = (file: File) => {
+    addEntries([{ file, name: file.name, source: 'camera' }]);
+    setSessionCaptured((n) => n + 1);
+  };
+
+  const onRetake = () => {
+    for (let i = pages.length - 1; i >= 0; i -= 1) {
+      if (pages[i].source === 'camera') {
+        remove(pages[i].id);
+        setSessionCaptured((n) => Math.max(0, n - 1));
+        return;
+      }
+    }
   };
 
   const onBuild = async () => {
-    if (picks.length === 0) return;
+    if (pages.length === 0) return;
     setWorking(true);
     setError(null);
     setDone(null);
@@ -91,9 +104,9 @@ export default function ImagesTool() {
     setStage(null);
     const staged: string[] = [];
     try {
-      for (const pick of picks) {
-        const buffer = await pick.file.arrayBuffer();
-        staged.push(stageStudioBytes(pick.name, new Uint8Array(buffer)));
+      for (const page of pages) {
+        const prepared = await preparePageBytes(page, browserImageRenderer);
+        staged.push(stageStudioBytes(prepared.name, prepared.bytes));
       }
       const job = runStudioOperation(
         'pdf.images_to_pdf',
@@ -120,7 +133,7 @@ export default function ImagesTool() {
       const imageCount =
         summary !== undefined && 'imageCount' in summary && typeof summary.imageCount === 'number'
           ? summary.imageCount
-          : picks.length;
+          : pages.length;
       const pageCount =
         summary !== undefined && 'pageCount' in summary ? summary.pageCount : imageCount;
       setMeta([
@@ -157,67 +170,105 @@ export default function ImagesTool() {
       <ToolHeading
         icon={ICON}
         name="Images to PDF"
-        desc="Build one PDF from JPEG or PNG images, one page per image, in listed order."
+        desc="Assemble pages from files or camera, arrange them in order, then build one PDF."
       />
 
-      {picks.length === 0 ? (
-        <DropZone
-          accept="image/jpeg,image/png,.jpg,.jpeg,.png"
-          multiple
-          onFiles={addImages}
-          title="Drop your images here"
-          cta="Select images"
-        />
+      {pages.length === 0 && !cameraMode ? (
+        <div className="space-y-4">
+          <DropZone
+            accept={ACCEPT}
+            multiple
+            onFiles={addUploads}
+            title="Drop your images here"
+            cta="Select images"
+          />
+          {cameraSupported && (
+            <Button variant="ghost" onClick={() => setCameraMode(true)} className="w-full">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+              Scan with camera
+            </Button>
+          )}
+          {error !== null && <ErrorBlock error={error} />}
+        </div>
       ) : (
         <div className="space-y-5">
+          {cameraMode ? (
+            <CameraCapture
+              onCapture={onCapture}
+              onRetake={onRetake}
+              onDone={() => {
+                setCameraMode(false);
+                setSessionCaptured(0);
+              }}
+              capturedCount={sessionCaptured}
+            />
+          ) : (
+            cameraSupported && (
+              <Button variant="ghost" onClick={() => setCameraMode(true)} className="w-full">
+                Scan with camera
+              </Button>
+            )
+          )}
+
           <Card>
             <div className="mb-3 flex items-center justify-between">
               <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                {picks.length} image{picks.length > 1 ? 's' : ''} · page order is list order
+                {pages.length} page{pages.length === 1 ? '' : 's'} · top-to-bottom is PDF order
               </p>
               <button
-                onClick={() => setPicks([])}
+                onClick={clear}
                 className="rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-ink-300 dark:hover:bg-red-950/30"
               >
                 Clear all
               </button>
             </div>
-            <ul className="mb-4 flex flex-col gap-2">
-              {picks.map((pick, i) => (
-                <li
-                  key={pick.id}
-                  className="flex items-center gap-3 rounded-xl border border-paper-300 bg-paper-50 px-3 py-2 dark:border-ink-700 dark:bg-ink-800"
-                >
-                  <span className="w-6 shrink-0 font-mono text-sm text-brass-600 tabular-nums dark:text-brass-300">
-                    {i + 1}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-ink-900 dark:text-paper-100">
-                      {pick.name}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setPicks((prev) => prev.filter((p) => p.id !== pick.id))}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/40"
-                    aria-label={`Remove ${pick.name}`}
-                  >
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M18 6 6 18M6 6l12 12" />
-                    </svg>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <p className="mb-3 text-sm font-medium text-ink-700 dark:text-paper-100">
+            {pages.length > 0 ? (
+              <PageGrid
+                pages={pages}
+                onMove={move}
+                onMoveTo={moveTo}
+                onRemove={remove}
+                onRotate={rotate}
+              />
+            ) : (
+              <p className="text-sm text-ink-400 dark:text-ink-300">
+                No pages yet — add images below or capture with the camera.
+              </p>
+            )}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <input
+                ref={moreInputRef}
+                type="file"
+                accept={ACCEPT}
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  addUploads(Array.from(e.target.files ?? []));
+                  e.target.value = '';
+                }}
+              />
+              <Button variant="ghost" onClick={() => moreInputRef.current?.click()}>
+                Add images
+              </Button>
+              {cameraSupported && !cameraMode && (
+                <Button variant="ghost" onClick={() => setCameraMode(true)}>
+                  Scan more
+                </Button>
+              )}
+            </div>
+            <p className="mb-3 mt-4 text-sm font-medium text-ink-700 dark:text-paper-100">
               Page size policy
             </p>
             <div className="flex gap-4 text-sm">
@@ -242,12 +293,12 @@ export default function ImagesTool() {
             </div>
           </Card>
 
-          {!done && (
+          {!done && pages.length > 0 && (
             <div className="flex items-center gap-3">
               <Button onClick={onBuild} disabled={working} className="w-full">
                 {working
                   ? 'Building…'
-                  : `Build PDF · ${picks.length} image${picks.length === 1 ? '' : 's'}`}
+                  : `Build PDF · ${pages.length} image${pages.length === 1 ? '' : 's'}`}
               </Button>
               {working && (
                 <Button variant="ghost" onClick={onCancel}>

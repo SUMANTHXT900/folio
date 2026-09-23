@@ -61,7 +61,7 @@ Open, inspect, thumbnail, and operate on hundred-megabyte / thousand-page PDFs w
 | Rearrange | `pdf.reorder` — exact permutation via drag-to-reorder |
 | Rotate | `pdf.rotate` — relative quarter-turns per page or whole document |
 | Metadata | `pdf.read_metadata` / `pdf.set_metadata` — set / clear / leave-unchanged patch semantics |
-| Images → PDF | `pdf.images_to_pdf` — JPEG/PNG, one page per image, fit or A4 |
+| Images → PDF | `pdf.images_to_pdf` — JPEG/PNG, one page per image, fit or A4; page assembly (preview grid, reorder, remove, add-more, rotate, camera capture) over a unified ordered page collection |
 | Compress | Disabled — reserved for a future update (see `ROADMAP.md`) |
 | Rendering | Page previews, bounded thumbnails, page-count intake via PDF.js |
 
