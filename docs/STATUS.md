@@ -45,21 +45,21 @@ None. No blocked items.
 
 ## Validated baseline (v1.8.0, `dev`)
 
-| Check | Result |
-|---|---|
-| Rust tests (`cargo test` in `engine/`) | 345 passing (228 unit + integration suites) |
-| Rust format (`cargo fmt --check`) | clean |
-| Rust lints (`cargo clippy --all-targets`) | clean |
-| WASM build (`npm run build:wasm` in `app/`) | passing (`wasm-pack`, `wasm/pkg/` reproduced) |
-| Frontend typecheck (`npm run typecheck`) | passing |
-| Frontend lint (`npm run lint`) | passing |
-| Frontend format (`npm run format:check`) | passing |
-| Frontend unit tests (`npm test`) | 145 passing (137 + 8 new: 4 hook session-contract + 4 scanner component) |
-| Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle |
-| Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus) | 30/30 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`) |
-| Optional large-file E2E (historical, needs local corpus) | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |
+| Check                                                         | Result                                                                                                                                                          |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust tests (`cargo test` in `engine/`)                        | 345 passing (228 unit + integration suites)                                                                                                                     |
+| Rust format (`cargo fmt --check`)                             | clean                                                                                                                                                           |
+| Rust lints (`cargo clippy --all-targets`)                     | clean                                                                                                                                                           |
+| WASM build (`npm run build:wasm` in `app/`)                   | passing (`wasm-pack`, `wasm/pkg/` reproduced)                                                                                                                   |
+| Frontend typecheck (`npm run typecheck`)                      | passing                                                                                                                                                         |
+| Frontend lint (`npm run lint`)                                | passing                                                                                                                                                         |
+| Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
+| Frontend unit tests (`npm test`)                              | 145 passing (137 + 8 new: 4 hook session-contract + 4 scanner component)                                                                                        |
+| Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
+| Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 30/30 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
+| Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |
 
-These values were established during the v1.7.0 integration verification (fresh-clone runs included), re-confirmed by the Phase 3 verification in `docs/DEVELOPMENT.md`, re-confirmed for v1.7.1 (F-7–F-10, UI-only), and updated for v1.8.0 (Images → PDF page assembly: +16 frontend tests, +4 canonical E2E checks). The 25/25 full-corpus result remains the benchmark for runs *with* the optional corpus; the 25/25 + 4 SKIP result is the expected fresh-clone result *without* it. If any number changes, update this table in the same commit.
+These values were established during the v1.7.0 integration verification (fresh-clone runs included), re-confirmed by the Phase 3 verification in `docs/DEVELOPMENT.md`, re-confirmed for v1.7.1 (F-7–F-10, UI-only), and updated for v1.8.0 (Images → PDF page assembly: +16 frontend tests, +4 canonical E2E checks). The 25/25 full-corpus result remains the benchmark for runs _with_ the optional corpus; the 25/25 + 4 SKIP result is the expected fresh-clone result _without_ it. If any number changes, update this table in the same commit.
 
 ## Repository state
 
