@@ -434,9 +434,63 @@ async function main() {
       cards[0].includes('blue-tall.jpg') && cards[1].includes('red-wide.png'),
       cards.join(' | '),
     );
+    // Keyboard drag (dnd-kit KeyboardSensor): lift the first card, move
+    // right, drop — exercises the same sortable path as pointer/touch drag.
+    // Key steps need settle time: lift measurement and indicator commits
+    // are async renders, so back-to-back presses race them.
+    await page.evaluate(() => {
+      document
+        .querySelector('ul[aria-label="Pages in PDF order"] > li button[aria-label^="Drag"]')
+        ?.focus();
+    });
+    await page.keyboard.press('Space');
+    let overlayShown = false;
+    try {
+      await page.waitForFunction(() => document.querySelector('[data-drag-overlay]') !== null, {
+        timeout: 10000,
+      });
+      overlayShown = true;
+    } catch {
+      overlayShown = false;
+    }
+    check('images keyboard drag lifts a DragOverlay', overlayShown);
+    await page.keyboard.press('ArrowRight');
+    let indicatorShown = false;
+    try {
+      await page.waitForFunction(() => document.querySelector('[data-drop-indicator]') !== null, {
+        timeout: 10000,
+      });
+      indicatorShown = true;
+    } catch {
+      indicatorShown = false;
+    }
+    check('images drag shows an insertion indicator', indicatorShown);
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('ul[aria-label="Pages in PDF order"] > li')
+          ?.getAttribute('aria-label')
+          ?.includes('red-wide.png'),
+      { timeout: 10000 },
+    );
+    cards = await cardOrder();
+    check(
+      'images keyboard drag reorders pages',
+      cards[0].includes('red-wide.png') && cards[1].includes('blue-tall.jpg'),
+      cards.join(' | '),
+    );
     // Rotate red 90° (badge appears; build exercises the canvas re-encode path).
     await clickButton('Rotate red-wide.png 90 degrees clockwise');
-    const rotated = await page.evaluate(() => document.body.innerText.includes('90°'));
+    let rotated = false;
+    try {
+      await page.waitForFunction(() => document.body.innerText.includes('90°'), {
+        timeout: 10000,
+      });
+      rotated = true;
+    } catch {
+      rotated = false;
+    }
     check('images rotate marks the page', rotated);
     // Remove blue → one page; add red-wide again → two pages.
     await clickButton('Remove blue-tall.jpg');
