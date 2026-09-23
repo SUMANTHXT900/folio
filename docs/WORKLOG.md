@@ -89,3 +89,17 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, WASM build passing, typecheck/lint/format clean, 134 unit tests, production build (PWA SW, 34 precache entries, zero testbench strings), canonical E2E 25/25 + 4 SKIP (no corpus), optional suites exit 0 SKIP. Deployed `app/dist/` (v1.8.0 build) to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`). `main` untouched.
 - **Remaining.** `main`/production promotion decision (unscheduled); mobile-device camera field check (manual).
 - **Remaining.** `main`/production promotion decision (unscheduled); nothing else pending.
+
+## 2026-09-23 — v1.9 Phase 1: dnd-kit page-grid drag/drop
+
+- **Work.** `@dnd-kit/core` + `sortable` + `utilities`: `rectSortingStrategy` grid, grip handle as sole activator (`touch-action: none` on handle only), `DragOverlay`, before/after insertion indicator, Pointer (8px) + Touch (250ms long-press) + Keyboard sensors. Arrows kept as guaranteed fallback; `imagePages.ts` untouched. New `pageDrag.ts` (pure drop→index mapping + 3 tests). E2E keyboard-drag assertions (overlay/indicator/reorder). Fixed during verification: a duplicated rotate click from an edit slip, and keyboard-step racing (settle-time waits).
+- **Verification.** 137 unit tests, canonical E2E 28/28 + 4 SKIP (run twice), zero console errors.
+
+## 2026-09-23 — v1.9 Phase 2: document-scanner UI (presentation layer)
+
+- **Objective.** Scanner-style viewfinder without hardware capabilities (Phase 3) or CV (v2.0).
+- **Work.** Rewrote `CameraCapture.tsx`: full-ratio letterboxed preview (fixes G1 crop; aspect from stream metadata + resize tracking), framing-guide overlay (corner markers, dim mask, `pointer-events-none`, `data-scanner-overlay`), 3×3 grid toggle (`data-scanner-grid`), session thumbnail strip (newest ringed, URLs only), shutter-style capture + Done + session-scoped Retake, kept switch-camera/device-select. `ImagesTool.tsx`: session-id boundary (ids reset on scanner open/Done; Retake pops only the session's last id). `useImagePages.ts`: `addEntries` returns ids and creates URLs outside the updater (StrictMode double-invoke fix). Tests: `useImagePages.test.ts` (4: ids, Scan-More order contract, revoke on clear/unmount, skip counting), `CameraCapture.test.tsx` (4: denied/unfound failures, overlay+grid+strip+Done-stop, unmount-stop). E2E: scanner-failure graceful path + uploads-after-failure (headless has no camera — deterministic).
+- **Findings.** Test setup needed explicit `cleanup()` (no auto-cleanup in this vitest config — renders accumulated across tests in one file). StrictMode was already on: URL/id creation inside the updater was a latent dev-mode leak, fixed as part of returning ids.
+- **Decisions.** Session boundary = scanner open → Done; strip is previews-only, `ImagePage[]` stays the source of truth; no capability/CV code in this phase (explicitly deferred).
+- **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, typecheck/lint/format clean, 145 unit tests, production build (34 precache, zero testbench strings), canonical E2E 30/30 + 4 SKIP with Phase 1 drag tests intact (overlay/indicator/keyboard/arrows all PASS). `main` untouched.
+- **Remaining.** Phase 3 (capabilities), real-device matrix (overlay alignment, portrait/landscape, front/rear, strip scroll on small phones).

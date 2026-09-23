@@ -53,21 +53,22 @@ export function useImagePages() {
   };
 
   const addEntries = useCallback(
-    (entries: Array<{ file: File | Blob; name: string; source: ImageSource }>) => {
-      setPages((prev) => [
-        ...prev,
-        ...entries.map((e) => {
-          const url = URL.createObjectURL(e.file);
-          track(url);
-          return createPage({
-            id: nextId(),
-            source: e.source,
-            file: e.file,
-            name: e.name,
-            previewUrl: url,
-          });
-        }),
-      ]);
+    (entries: Array<{ file: File | Blob; name: string; source: ImageSource }>): string[] => {
+      // Created OUTSIDE the updater: updaters may double-invoke under
+      // StrictMode, which would leak URLs and burn ids (see usePdfFiles).
+      const made = entries.map((e) => {
+        const url = URL.createObjectURL(e.file);
+        track(url);
+        return createPage({
+          id: nextId(),
+          source: e.source,
+          file: e.file,
+          name: e.name,
+          previewUrl: url,
+        });
+      });
+      setPages((prev) => [...prev, ...made]);
+      return made.map((p) => p.id);
     },
     [],
   );

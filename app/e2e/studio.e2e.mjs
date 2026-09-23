@@ -529,6 +529,40 @@ async function main() {
     await page.close();
   }
 
+  // ---- Images: scanner unavailable (headless has no camera) fails gracefully ----
+  {
+    const { page, consoleErrors } = await newPage(browser);
+    await gotoTool(page, 'images');
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.includes('Scan with camera'))
+        ?.click();
+    });
+    await page.waitForFunction(
+      () =>
+        /No camera was found|Camera access was denied|could not be started/.test(
+          document.body.innerText,
+        ),
+      { timeout: 30000 },
+    );
+    check('images scanner failure explains itself', true);
+    // Back to pages; uploads still work after the failure (collection intact).
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Back to pages')
+        ?.click();
+    });
+    const red = path.join(__dirname, 'fixtures', 'red-wide.png');
+    await upload(page, 'input[type="file"]', [red]);
+    await page.waitForFunction(() => document.body.innerText.includes('Build PDF'), {
+      timeout: 30000,
+    });
+    check('images uploads work after scanner failure', true);
+    if (consoleErrors.length > 0)
+      console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
+    await page.close();
+  }
+
   // ---- Compress: disabled with future note ----
   {
     const { page, consoleErrors } = await newPage(browser);

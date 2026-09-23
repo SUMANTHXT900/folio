@@ -54,7 +54,9 @@ export default function ImagesTool() {
   const { pages, addFiles, addEntries, move, moveTo, remove, rotate, clear } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [cameraMode, setCameraMode] = useState(false);
-  const [sessionCaptured, setSessionCaptured] = useState(0);
+  // Session boundary: ids captured since the scanner was opened. Retake
+  // only ever touches these — never pre-session pages. Reset on Done.
+  const [sessionIds, setSessionIds] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
   const [meta, setMeta] = useState<string[]>([]);
@@ -80,19 +82,21 @@ export default function ImagesTool() {
   };
 
   const onCapture = (file: File) => {
-    addEntries([{ file, name: file.name, source: 'camera' }]);
-    setSessionCaptured((n) => n + 1);
+    const [id] = addEntries([{ file, name: file.name, source: 'camera' }]);
+    if (id !== undefined) setSessionIds((prev) => [...prev, id]);
   };
 
   const onRetake = () => {
-    for (let i = pages.length - 1; i >= 0; i -= 1) {
-      if (pages[i].source === 'camera') {
-        remove(pages[i].id);
-        setSessionCaptured((n) => Math.max(0, n - 1));
-        return;
-      }
-    }
+    setSessionIds((prev) => {
+      const target = prev[prev.length - 1];
+      if (target !== undefined) remove(target);
+      return prev.slice(0, -1);
+    });
   };
+
+  // Session thumbnails for the scanner strip (URLs only, no byte copies).
+  // Filters the live collection so removals are reflected immediately.
+  const sessionPages = pages.filter((p) => sessionIds.includes(p.id));
 
   const onBuild = async () => {
     if (pages.length === 0) return;
@@ -183,7 +187,14 @@ export default function ImagesTool() {
             cta="Select images"
           />
           {cameraSupported && (
-            <Button variant="ghost" onClick={() => setCameraMode(true)} className="w-full">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSessionIds([]);
+                setCameraMode(true);
+              }}
+              className="w-full"
+            >
               <svg
                 width="16"
                 height="16"
@@ -210,13 +221,24 @@ export default function ImagesTool() {
               onRetake={onRetake}
               onDone={() => {
                 setCameraMode(false);
-                setSessionCaptured(0);
+                setSessionIds([]);
               }}
-              capturedCount={sessionCaptured}
+              sessionPages={sessionPages.map((p) => ({
+                id: p.id,
+                previewUrl: p.previewUrl,
+                name: p.name,
+              }))}
             />
           ) : (
             cameraSupported && (
-              <Button variant="ghost" onClick={() => setCameraMode(true)} className="w-full">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSessionIds([]);
+                  setCameraMode(true);
+                }}
+                className="w-full"
+              >
                 Scan with camera
               </Button>
             )
@@ -263,7 +285,13 @@ export default function ImagesTool() {
                 Add images
               </Button>
               {cameraSupported && !cameraMode && (
-                <Button variant="ghost" onClick={() => setCameraMode(true)}>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setSessionIds([]);
+                    setCameraMode(true);
+                  }}
+                >
                   Scan more
                 </Button>
               )}
