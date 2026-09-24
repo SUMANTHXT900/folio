@@ -113,3 +113,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** Engine `rotation_deg` option (rejected: contract churn, revisit if lossless rotation is ever required). framer-motion `Reorder` grid drag as primary (rejected: single-axis library vs wrapping grid; buttons primary, native HTML5 drag as desktop-only enhancement).
 - **Consequences.** No changes to `folio.ts`, adapters, worker protocol, WASM glue, or Rust. Preview URLs must be revoked on remove/clear/unmount (hook-owned). Large collections are bounded by engine-side decoded-RGB memory (pre-existing ceiling, not redesigned).
 - **Status.** Decided, implemented and verified in v1.8.0 (134 frontend tests incl. 16 new page-logic tests, canonical E2E 25/25 + 4 SKIP with reorder/rotate/remove/add assertions).
+
+## D15 — Scan integration: review-before-accept, live-guidance-only, Original preserved
+
+- **Decision.** Captures in scan modes resolve into a session-local review (processed preview + Use scan / Use original / Retry / Retake) — nothing enters `ImagePage[]` unconfirmed. Live detection (~160px frames, 500 ms ticks, skipped while busy) drives only the "Document detected" framing hint; the shutter always runs fresh full-resolution detection and live corners are never reused for the final warp. Original mode bypasses the worker entirely (v1.9 direct capture preserved). Accepted scans store the processed `File` as the page with the pre-scan capture retained in `scanStore` under the page id (released on remove/clear/replace, never on scanner close).
+- **Reason.** Unconfirmed auto-insertion would corrupt collections on mis-detection; reusing low-res corners for full-res geometry would silently degrade output; keeping the v1.9 path guarantees the camera works when WASM is unavailable.
+- **Alternatives considered.** Auto-insert processed pages (rejected: mis-detection writes bad pages). Manual corner adjust in v2.0 (deferred to v2.1, explicit). Auto-capture (deferred to v2.1, explicit).
+- **Consequences.** E2E uses a runtime-generated Y4M fake camera (canvas.captureStream yields 2x2 in headless); scan-build E2E probes the result blob in-page because second-browser download plumbing does not fire.
+- **Status.** Decided, implemented and verified in v2.0 M3 (180 unit tests, canonical E2E 35/35 + 4 SKIP).

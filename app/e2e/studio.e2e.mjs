@@ -21,6 +21,7 @@
  *   2. Terminal B: node e2e/studio.e2e.mjs [--dev http://localhost:5199]
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
@@ -444,6 +445,9 @@ async function main() {
         ?.focus();
     });
     await page.keyboard.press('Space');
+    // Settle time: lift measurement and indicator commits are async
+    // renders — back-to-back presses race them (proven 3/3 with sleeps).
+    await new Promise((r) => setTimeout(r, 400));
     let overlayShown = false;
     try {
       await page.waitForFunction(() => document.querySelector('[data-drag-overlay]') !== null, {
@@ -455,6 +459,7 @@ async function main() {
     }
     check('images keyboard drag lifts a DragOverlay', overlayShown);
     await page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 500));
     let indicatorShown = false;
     try {
       await page.waitForFunction(() => document.querySelector('[data-drop-indicator]') !== null, {
@@ -561,6 +566,201 @@ async function main() {
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
+  }
+
+  // ---- Images: document scan with a fake camera ----
+  // Headless Chrome has no camera and canvas.captureStream yields 2×2
+  // frames, so this block launches a second browser with a synthetic
+  // Y4M camera (bright trapezoid on dark, generated below). Frames are
+  // real 640×480 pixels: the scan worker + WASM path is fully genuine.
+  {
+    const y4m = path.join(os.tmpdir(), 'folio-scan-doc.y4m');
+    {
+      const w = 640;
+      const h = 480;
+      const fd = fs.openSync(y4m, 'w');
+      fs.writeSync(fd, `YUV4MPEG2 W${w} H${h} F30:1 Ip A1:1 C420\n`);
+      const uvSize = (w / 2) * (h / 2);
+      for (let f = 0; f < 90; f += 1) {
+        fs.writeSync(fd, 'FRAME\n');
+        const y = Buffer.alloc(w * h, 16);
+        for (let row = 0; row < h; row += 1) {
+          const t = row / h;
+          const lx = Math.round(w * (0.19 + (0.13 - 0.19) * t));
+          const rx = Math.round(w * (0.81 + (0.73 - 0.81) * t));
+          if (row >= Math.round(h * 0.11) && row <= Math.round(h * 0.88)) {
+            y.fill(235, row * w + lx, row * w + rx);
+          }
+        }
+        fs.writeSync(fd, y);
+        fs.writeSync(fd, Buffer.alloc(uvSize, 128));
+        fs.writeSync(fd, Buffer.alloc(uvSize, 128));
+      }
+      fs.closeSync(fd);
+    }
+    const camBrowser = await puppeteer.launch({
+      executablePath: CHROME,
+      headless: 'shell',
+      protocolTimeout: 600000,
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--mute-audio',
+        '--disable-extensions',
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        `--use-file-for-fake-video-capture=${y4m}`,
+      ],
+    });
+    const { page, consoleErrors } = await newPage(camBrowser);
+    // Route downloads for this browser session (the main suite only
+    // configures its own browser).
+    const camDlSession = await camBrowser.target().createCDPSession();
+    await camDlSession.send('Browser.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: path.join(__dirname, 'downloads'),
+    });
+    await gotoTool(page, 'images');
+    const scanWithCamera = async () => {
+      await page.evaluate(() => {
+        [...document.querySelectorAll('button')]
+          .find((b) => b.textContent?.includes('Scan with camera'))
+          ?.click();
+      });
+      await page.waitForFunction(
+        () => {
+          const v = document.querySelector('video');
+          return v !== null && v.videoWidth > 100;
+        },
+        { timeout: 30000 },
+      );
+    };
+    await scanWithCamera();
+    // Document mode (default): capture → processed review → accept.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Capture page')
+        ?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
+      timeout: 120000,
+    });
+    check('images scan produces a processed review', true);
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 1,
+      { timeout: 30000 },
+    );
+    let cards = await page.evaluate(() =>
+      [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
+        (li) => li.getAttribute('aria-label') ?? '',
+      ),
+    );
+    check(
+      'images accepted scan enters the page collection',
+      cards.length === 1 && cards[0].includes('scan-'),
+      cards.join(' | '),
+    );
+    // Scan more in Grayscale mode: collection preserved, second page added.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Grayscale scan mode')
+        ?.click();
+    });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Capture page')
+        ?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
+      timeout: 120000,
+    });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
+      { timeout: 30000 },
+    );
+    cards = await page.evaluate(() =>
+      [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
+        (li) => li.getAttribute('aria-label') ?? '',
+      ),
+    );
+    check(
+      'images scan-more preserves pages across sessions',
+      cards.length === 2,
+      cards.join(' | '),
+    );
+    // Stale-result safety: capture then leave immediately — no page appears.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Capture page')
+        ?.click();
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Done scanning')
+        ?.click();
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    const count = await page.evaluate(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length,
+    );
+    check('images stale scan result never becomes a page', count === 2, `pages=${count}`);
+    // Scanned pages build a real PDF. Proven in-page (second browser
+    // sessions don't route OS downloads): fetch the result blob and
+    // assert real PDF bytes. Download plumbing itself is covered by the
+    // main-browser download tests above.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.startsWith('Build PDF'))
+        ?.click();
+    });
+    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+      timeout: 300000,
+    });
+    const probe = await page.evaluate(async () => {
+      const a = document.querySelector('a[download]');
+      if (!a) return null;
+      const res = await fetch(a.href);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return { bytes: buf.length, magic: String.fromCharCode(...buf.slice(0, 5)) };
+    });
+    check(
+      'images scanned pages build a PDF',
+      probe !== null && probe.magic === '%PDF-' && probe.bytes > 10000,
+      probe ? `${probe.magic} ${probe.bytes} bytes` : 'missing',
+    );
+    if (consoleErrors.length > 0)
+      console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
+    await page.close();
+    await camBrowser.close();
+    try {
+      fs.unlinkSync(y4m);
+    } catch {
+      // Best effort temp cleanup.
+    }
   }
 
   // ---- Compress: disabled with future note ----

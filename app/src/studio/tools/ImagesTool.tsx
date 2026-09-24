@@ -23,6 +23,7 @@ import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
 import { CameraCapture } from './CameraCapture';
 import { browserImageRenderer, preparePageBytes } from './imagePrepare';
+import { clearScans, releaseScan, retainOriginal } from './scan/scanStore';
 
 const ICON = (
   <svg
@@ -86,10 +87,36 @@ export default function ImagesTool() {
     if (id !== undefined) setSessionIds((prev) => [...prev, id]);
   };
 
+  /**
+   * Accepted scan: the processed (or original) file becomes the page;
+   * the pre-scan capture is retained under the page id for Use-original
+   * provenance. Released on page remove / clear-all (never on scanner
+   * close — lifetime follows the page).
+   */
+  const onScanAccept = (entry: { file: File; original: File | null; name: string }) => {
+    const [id] = addEntries([{ file: entry.file, name: entry.name, source: 'camera' }]);
+    if (id === undefined) return;
+    if (entry.original !== null) retainOriginal(id, entry.original, entry.name);
+    setSessionIds((prev) => [...prev, id]);
+  };
+
+  const onRemovePage = (id: string) => {
+    releaseScan(id);
+    remove(id);
+  };
+
+  const onClearAll = () => {
+    clearScans();
+    clear();
+  };
+
   const onRetake = () => {
     setSessionIds((prev) => {
       const target = prev[prev.length - 1];
-      if (target !== undefined) remove(target);
+      if (target !== undefined) {
+        releaseScan(target);
+        remove(target);
+      }
       return prev.slice(0, -1);
     });
   };
@@ -218,6 +245,7 @@ export default function ImagesTool() {
           {cameraMode ? (
             <CameraCapture
               onCapture={onCapture}
+              onScanAccept={onScanAccept}
               onRetake={onRetake}
               onDone={() => {
                 setCameraMode(false);
@@ -250,7 +278,7 @@ export default function ImagesTool() {
                 {pages.length} page{pages.length === 1 ? '' : 's'} · top-to-bottom is PDF order
               </p>
               <button
-                onClick={clear}
+                onClick={onClearAll}
                 className="rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-ink-300 dark:hover:bg-red-950/30"
               >
                 Clear all
@@ -261,7 +289,7 @@ export default function ImagesTool() {
                 pages={pages}
                 onMove={move}
                 onMoveTo={moveTo}
-                onRemove={remove}
+                onRemove={onRemovePage}
                 onRotate={rotate}
               />
             ) : (

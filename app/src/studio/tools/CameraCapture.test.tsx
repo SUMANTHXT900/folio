@@ -70,7 +70,15 @@ describe('CameraCapture failure states', () => {
       },
     });
     const onDone = vi.fn();
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={onDone} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={onDone}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByText(/Camera access was denied/);
     expect(media.getUserMedia).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByText('Try again'));
@@ -86,7 +94,15 @@ describe('CameraCapture failure states', () => {
         throw new DOMException('none', 'NotFoundError');
       },
     });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByText(/No camera was found/);
   });
 });
@@ -98,6 +114,7 @@ describe('CameraCapture scanner UI', () => {
     const { unmount } = render(
       <CameraCapture
         onCapture={noop}
+        onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
         sessionPages={[
@@ -127,7 +144,13 @@ describe('CameraCapture scanner UI', () => {
   it('stops the stream on unmount', async () => {
     mockMedia({ getUserMedia: async () => fakeStream });
     const { unmount } = render(
-      <CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />,
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
     );
     await screen.findByLabelText('Capture page');
     unmount();
@@ -145,7 +168,15 @@ describe('CameraCapture capability controls', () => {
   it('renders zoom + torch only when reported, and applies through constraints', async () => {
     const track = videoTrack(fullCaps);
     mockMedia({ getUserMedia: async () => streamWith(track) });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     const slider = (await screen.findByLabelText(/Camera zoom/)) as HTMLInputElement;
     expect(slider.min).toBe('1');
     expect(slider.max).toBe('4');
@@ -164,7 +195,15 @@ describe('CameraCapture capability controls', () => {
   it('hides zoom + torch on capability-free tracks (laptop-webcam shape)', async () => {
     const track = videoTrack(undefined);
     mockMedia({ getUserMedia: async () => streamWith(track) });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByLabelText('Capture page');
     expect(screen.queryByLabelText(/Camera zoom/)).toBeNull();
     expect(screen.queryByLabelText(/flashlight/)).toBeNull();
@@ -176,7 +215,15 @@ describe('CameraCapture capability controls', () => {
       throw new DOMException('rejected', 'NotAllowedError');
     });
     mockMedia({ getUserMedia: async () => streamWith(track) });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     const slider = await screen.findByLabelText(/Camera zoom/);
     fireEvent.change(slider, { target: { value: '3' } });
     await screen.findByText(/Zoom is not adjustable/);
@@ -186,7 +233,15 @@ describe('CameraCapture capability controls', () => {
   it('tap-to-focus fires only with single-shot support', async () => {
     const track = videoTrack(fullCaps);
     mockMedia({ getUserMedia: async () => streamWith(track) });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByLabelText('Capture page');
     const viewport = document.querySelector('video')?.parentElement;
     expect(viewport).not.toBeNull();
@@ -200,7 +255,15 @@ describe('CameraCapture capability controls', () => {
   it('taps do nothing without single-shot support', async () => {
     const track = videoTrack({ focusMode: ['continuous'] });
     mockMedia({ getUserMedia: async () => streamWith(track) });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByLabelText('Capture page');
     const viewport = document.querySelector('video')?.parentElement;
     expect(viewport).not.toBeNull();
@@ -221,7 +284,15 @@ describe('CameraCapture capability controls', () => {
       value: { getUserMedia, enumerateDevices: async () => [] },
       configurable: true,
     });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByLabelText(/Camera zoom/);
     fireEvent.click(screen.getByLabelText('Switch camera'));
     await waitFor(() => expect(screen.queryByLabelText(/Camera zoom/)).toBeNull());
@@ -250,7 +321,15 @@ describe('CameraCapture lifecycle hardening', () => {
       value: { getUserMedia, enumerateDevices: async () => [] },
       configurable: true,
     });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     // First request still pending — start another generation.
     fireEvent.click(screen.getByLabelText('Switch camera'));
     await screen.findByLabelText('Capture page');
@@ -290,7 +369,15 @@ describe('CameraCapture lifecycle hardening', () => {
       value: { getUserMedia, enumerateDevices: async () => [] },
       configurable: true,
     });
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByLabelText('Capture page');
     listeners.get('ended')?.forEach((h) => h());
     await screen.findByText(/camera disconnected/i);
@@ -305,7 +392,15 @@ describe('CameraCapture lifecycle hardening', () => {
     mockMedia({ getUserMedia: async () => fakeStream });
     playMock.mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
     const onDone = vi.fn();
-    render(<CameraCapture onCapture={noop} onRetake={noop} onDone={onDone} sessionPages={[]} />);
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={onDone}
+        sessionPages={[]}
+      />,
+    );
     await screen.findByText(/blocked by the browser \(autoplay policy\)/);
     expect(stopTrack).toHaveBeenCalled();
     expect(screen.queryByLabelText('Capture page')).toBeNull();
@@ -330,7 +425,13 @@ describe('CameraCapture lifecycle hardening', () => {
       configurable: true,
     });
     const { unmount } = render(
-      <CameraCapture onCapture={noop} onRetake={noop} onDone={noop} sessionPages={[]} />,
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
     );
     await screen.findByLabelText('Capture page');
     // Select the second camera explicitly, then unplug it.

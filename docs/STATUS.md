@@ -24,7 +24,7 @@
 
 ## Current work
 
-- v2.0 M2 done: scan worker + protocol + WASM integration (see WORKLOG); M3 (CameraCapture integration) next. No version bump yet.
+- v2.0 M3 done: CameraCapture scan integration (see WORKLOG); M4 (E2E hardening, docs, version bump) next. No version bump yet.
 
 ## Pending work
 
@@ -55,7 +55,7 @@ None. No blocked items.
 | Frontend typecheck (`npm run typecheck`)                      | passing                                                                                                                                                         |
 | Frontend lint (`npm run lint`)                                | passing                                                                                                                                                         |
 | Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
-| Frontend unit tests (`npm test`)                              | 175 passing (164 + 11 new scan worker: protocol, client lifecycle/safety, store)                                                                                |
+| Frontend unit tests (`npm test`)                              | 180 passing (175 + 5 new scan processor: review, stale, live)                                                                                                   |
 | Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
 | Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 30/30 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |

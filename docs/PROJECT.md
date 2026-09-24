@@ -54,16 +54,16 @@ Open, inspect, thumbnail, and operate on hundred-megabyte / thousand-page PDFs w
 
 ## Current capabilities (v1.7.0, `dev`)
 
-| Tool | Operation(s) |
-|---|---|
-| Merge | `pdf.merge` — ordered concatenation, real progress + cancellation |
-| Split | `pdf.split` — visual pick mode + page-range parts, atomic, structured range errors |
-| Rearrange | `pdf.reorder` — exact permutation via drag-to-reorder |
-| Rotate | `pdf.rotate` — relative quarter-turns per page or whole document |
-| Metadata | `pdf.read_metadata` / `pdf.set_metadata` — set / clear / leave-unchanged patch semantics |
-| Images → PDF | `pdf.images_to_pdf` — JPEG/PNG, one page per image, fit or A4; page assembly (preview grid, reorder, remove, add-more, rotate, camera capture) over a unified ordered page collection |
-| Compress | Disabled — reserved for a future update (see `ROADMAP.md`) |
-| Rendering | Page previews, bounded thumbnails, page-count intake via PDF.js |
+| Tool         | Operation(s)                                                                                                                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Merge        | `pdf.merge` — ordered concatenation, real progress + cancellation                                                                                                                                                   |
+| Split        | `pdf.split` — visual pick mode + page-range parts, atomic, structured range errors                                                                                                                                  |
+| Rearrange    | `pdf.reorder` — exact permutation via drag-to-reorder                                                                                                                                                               |
+| Rotate       | `pdf.rotate` — relative quarter-turns per page or whole document                                                                                                                                                    |
+| Metadata     | `pdf.read_metadata` / `pdf.set_metadata` — set / clear / leave-unchanged patch semantics                                                                                                                            |
+| Images → PDF | `pdf.images_to_pdf` — JPEG/PNG, one page per image, fit or A4; page assembly (preview grid, reorder, remove, add-more, rotate, camera capture with document-scan processing) over a unified ordered page collection |
+| Compress     | Disabled — reserved for a future update (see `ROADMAP.md`)                                                                                                                                                          |
+| Rendering    | Page previews, bounded thumbnails, page-count intake via PDF.js                                                                                                                                                     |
 
 Engine-only capabilities (tested, no Studio UI surface yet): `pdf.inspect` (basic/detailed), `pdf.extract_pages`, `pdf.delete_pages`. They are part of the engine contract in `docs/OPERATIONS.md` and must keep passing tests.
 

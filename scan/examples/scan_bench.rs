@@ -18,8 +18,15 @@ use std::time::Instant;
 use folio_scan::enhance::ScanMode;
 use folio_scan::{detect_document, scan_document, ScanRequest};
 
-/// Paints a white perspective document on a dark noisy background.
-fn doc_photo(w: u32, h: u32, light: u8) -> Vec<u8> {
+/// Paints a perspective document on a dark noisy background.
+fn doc_photo_styled(
+    w: u32,
+    h: u32,
+    light: u8,
+    paper: [u8; 3],
+    clutter: bool,
+    text_lines: bool,
+) -> Vec<u8> {
     let corners = [
         (0.19 * w as f64, 0.11 * h as f64),
         (0.81 * w as f64, 0.16 * h as f64),
@@ -48,9 +55,32 @@ fn doc_photo(w: u32, h: u32, light: u8) -> Vec<u8> {
         if y as f64 >= top && y as f64 <= bottom {
             for x in (lx as u32)..=(rx as u32).min(w - 1) {
                 let o = (y as usize * w as usize + x as usize) * 3;
-                rgb[o] = 242;
-                rgb[o + 1] = 242;
-                rgb[o + 2] = 242;
+                let mut px = paper;
+                // Printed text lines: dark bars inset from the edges.
+                if text_lines {
+                    let lx_u = lx as u32;
+                    let rx_u = rx as u32;
+                    let row_in_doc = y - top as u32;
+                    if x > lx_u + 12 && x < rx_u.saturating_sub(12) && row_in_doc % 14 < 3 {
+                        px = [40, 40, 40];
+                    }
+                }
+                rgb[o] = px[0];
+                rgb[o + 1] = px[1];
+                rgb[o + 2] = px[2];
+            }
+        }
+    }
+    // Background clutter: dark rectangles outside the document.
+    if clutter {
+        for (rx, ry, rw, rh) in [(30u32, 40u32, 90u32, 60u32), (520u32, 700u32, 80u32, 50u32)] {
+            for y in ry..(ry + rh).min(h) {
+                for x in rx..(rx + rw).min(w) {
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    rgb[o] = 60;
+                    rgb[o + 1] = 55;
+                    rgb[o + 2] = 50;
+                }
             }
         }
     }
@@ -64,7 +94,21 @@ fn doc_photo(w: u32, h: u32, light: u8) -> Vec<u8> {
 }
 
 fn bench(name: &str, w: u32, h: u32, light: u8, mode: ScanMode) {
-    let input = doc_photo(w, h, light);
+    bench_styled(name, w, h, light, [242, 242, 242], false, false, mode);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_styled(
+    name: &str,
+    w: u32,
+    h: u32,
+    light: u8,
+    paper: [u8; 3],
+    clutter: bool,
+    text_lines: bool,
+    mode: ScanMode,
+) {
+    let input = doc_photo_styled(w, h, light, paper, clutter, text_lines);
     // Decode (shared input cost, measured once here for context).
     let t = Instant::now();
     let decoded = image::load_from_memory(&input).expect("decodes").to_rgb8();
@@ -100,4 +144,57 @@ fn main() {
     bench("webcam", 640, 480, 18, ScanMode::Original);
     bench("low-light medium", 1280, 960, 8, ScanMode::Original);
     bench("low-light b/w", 1280, 960, 8, ScanMode::BlackWhite);
+    // Representative evaluation (synthetic stand-ins, NOT real-device
+    // photos — see WORKLOG M3): receipt aspect, colored paper, clutter,
+    // printed text, perspective-heavy framing.
+    bench_styled(
+        "receipt tall",
+        600,
+        1400,
+        18,
+        [242, 242, 242],
+        false,
+        false,
+        ScanMode::Original,
+    );
+    bench_styled(
+        "colored paper",
+        1280,
+        960,
+        18,
+        [232, 220, 198],
+        false,
+        false,
+        ScanMode::Original,
+    );
+    bench_styled(
+        "cluttered background",
+        1280,
+        960,
+        18,
+        [242, 242, 242],
+        true,
+        false,
+        ScanMode::Original,
+    );
+    bench_styled(
+        "printed text page",
+        1280,
+        960,
+        18,
+        [242, 242, 242],
+        false,
+        true,
+        ScanMode::BlackWhite,
+    );
+    bench_styled(
+        "perspective-heavy b/w",
+        4000,
+        3000,
+        18,
+        [242, 242, 242],
+        true,
+        true,
+        ScanMode::BlackWhite,
+    );
 }

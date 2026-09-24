@@ -16,7 +16,7 @@ This roadmap records actual project direction. Items are separated by commitment
 
 ## Current
 
-- No active development. Next decision is the `main`/production promotion (unscheduled).
+- v2.0 scanner in progress (M1–M3 done on `dev`): `folio-scan` core, scan worker + WASM, CameraCapture integration with review-before-accept. M4 (final docs, version bump) next.
 
 ## Next
 

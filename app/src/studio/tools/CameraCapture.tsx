@@ -31,6 +31,14 @@ import {
   requestContinuousModes,
   type CameraCapabilities,
 } from './cameraCapabilities';
+import { SCANNER_MODES, useScanProcessor, type ScannerMode } from './scan/useScanProcessor';
+
+const MODE_LABELS: Record<ScannerMode, string> = {
+  original: 'Original',
+  document: 'Document',
+  grayscale: 'Grayscale',
+  blackwhite: 'B&W',
+};
 
 type CameraStatus = 'starting' | 'live' | 'failed' | 'disconnected' | 'preview-blocked';
 
@@ -102,12 +110,15 @@ function ScannerOverlay({ grid }: { grid: boolean }) {
 
 export function CameraCapture({
   onCapture,
+  onScanAccept,
   onRetake,
   onDone,
   sessionPages,
 }: {
-  /** A captured page (caller adds it to the shared collection). */
+  /** A directly captured page (Original mode — v1.9 path, no worker). */
   onCapture: (file: File) => void;
+  /** An accepted scan (processed file + optional original to retain). */
+  onScanAccept: (entry: { file: File; original: File | null; name: string }) => void;
   /** Drops the most recent capture of the current session. */
   onRetake: () => void;
   /** Leaves camera mode (stream stopped first). */
@@ -139,6 +150,10 @@ export function CameraCapture({
   // Real frame aspect (letterboxed, never cropped). Defaults to 4:3
   // until the stream reports dimensions; tracks orientation changes.
   const [aspect, setAspect] = useState({ w: 4, h: 3 });
+
+  // Document scanner (M3): capture → worker → review state machine.
+  // `original` mode bypasses it entirely (v1.9 direct capture).
+  const scan = useScanProcessor();
 
   // Generation guard (B1): every start() takes a generation; async
   // continuations that arrive stale stop their own stream and install
@@ -271,7 +286,11 @@ export function CameraCapture({
   );
 
   // Open on mount / facing change; stop + invalidate on unmount.
+  // A camera switch also resets scan state (fresh worker, no stale jobs).
+  // scan.reset is a stable callback; start is the documented trigger.
+  const resetScan = scan.reset;
   useEffect(() => {
+    resetScan();
     void start(facing, deviceId);
     return () => {
       genRef.current += 1;
@@ -279,13 +298,14 @@ export function CameraCapture({
       stopStream(streamRef.current);
       streamRef.current = null;
       trackRef.current = null;
+      resetScan();
       if (focusTimer.current !== null) {
         window.clearTimeout(focusTimer.current);
         focusTimer.current = null;
       }
     };
     // Restart only when the requested source changes — never on capture.
-  }, [facing, deviceId]);
+  }, [facing, deviceId, resetScan, start]);
 
   // Device plug/unplug: refresh the picker; if the explicitly selected
   // device vanished mid-session, move to the disconnected state instead
@@ -330,6 +350,7 @@ export function CameraCapture({
     stopStream(streamRef.current);
     streamRef.current = null;
     trackRef.current = null;
+    resetScan();
     onDone();
   };
 
@@ -384,9 +405,14 @@ export function CameraCapture({
       .catch(() => undefined);
   };
 
-  const capture = async () => {
+  /**
+   * Shutter: captures the full-res frame, then either hands it straight
+   * to the collection (Original mode — v1.9 path, no worker) or sends it
+   * to the scan worker for processing + review.
+   */
+  const captureFrame = async (): Promise<File | null> => {
     const video = videoRef.current;
-    if (!video || video.videoWidth === 0 || capturing) return;
+    if (!video || video.videoWidth === 0 || capturing) return null;
     setCapturing(true);
     try {
       const canvas = document.createElement('canvas');
@@ -408,13 +434,69 @@ export function CameraCapture({
       if (blob === null) throw new Error('Capture encode failed.');
       counterRef.current += 1;
       const name = `scan-${String(counterRef.current).padStart(3, '0')}.jpg`;
-      onCapture(new File([blob], name, { type: 'image/jpeg' }));
+      return new File([blob], name, { type: 'image/jpeg' });
     } catch (error) {
       setFailure(error instanceof Error ? error.message : 'Capture failed.');
+      return null;
     } finally {
       setCapturing(false);
     }
   };
+
+  const capture = async () => {
+    const file = await captureFrame();
+    if (file === null) return;
+    if (scan.mode === 'original') {
+      onCapture(file);
+    } else {
+      scan.processCapture(file, scan.mode);
+    }
+  };
+
+  const acceptReview = (useProcessed: boolean) => {
+    const accepted = scan.accept(useProcessed);
+    if (accepted === null) return;
+    onScanAccept(accepted);
+  };
+
+  /**
+   * Low-res live tick (~160px, best-effort): guidance only. Skipped
+   * while a capture scan or review is active (latest-frame semantics
+   * live in the hook); live corners are NEVER reused for the final scan.
+   */
+  useEffect(() => {
+    if (status !== 'live' || scan.mode === 'original') return;
+    const id = window.setInterval(() => {
+      const video = videoRef.current;
+      if (
+        video === null ||
+        video.videoWidth === 0 ||
+        scan.processing ||
+        scan.pending !== null ||
+        document.hidden
+      ) {
+        return;
+      }
+      const scale = 160 / Math.max(video.videoWidth, video.videoHeight);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const ctx = canvas.getContext('2d');
+      if (ctx === null) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(
+        (blob) => {
+          canvas.width = 0;
+          canvas.height = 0;
+          if (blob !== null) scan.requestLive(blob);
+        },
+        'image/jpeg',
+        0.7,
+      );
+    }, 500);
+    return () => window.clearInterval(id);
+    // Stable primitives only: the scan object identity changes per render.
+  }, [status, scan.mode, scan.processing, scan.pending, scan.requestLive]);
 
   const ratio = aspect.w / aspect.h;
 
@@ -461,6 +543,33 @@ export function CameraCapture({
 
       {status !== 'failed' && status !== 'disconnected' && status !== 'preview-blocked' && (
         <div className={status === 'starting' ? 'hidden' : ''}>
+          {/* Capture mode: Original bypasses the scan worker (v1.9 direct
+              capture); Document/Grayscale/B&W process through it. */}
+          <div
+            className="mb-3 flex gap-1 rounded-xl border border-paper-300 p-1 dark:border-ink-700"
+            role="group"
+            aria-label="Capture mode"
+          >
+            {SCANNER_MODES.map((value) => {
+              const label = MODE_LABELS[value];
+              return (
+                <button
+                  key={value}
+                  onClick={() => scan.setMode(value)}
+                  aria-label={`${label} scan mode`}
+                  aria-pressed={scan.mode === value}
+                  disabled={scan.processing || scan.pending !== null}
+                  className={`flex-1 rounded-lg px-2 py-1.5 text-xs transition-colors disabled:opacity-40 ${
+                    scan.mode === value
+                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-100 dark:text-ink-900'
+                      : 'text-ink-500 hover:bg-paper-200 dark:text-ink-300 dark:hover:bg-ink-700'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
           {/* Viewport: exact frame aspect, letterboxed — the full frame
               stays visible and matches the captured image. */}
           <div className="flex justify-center">
@@ -494,8 +603,100 @@ export function CameraCapture({
                   style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%` }}
                 />
               )}
+              {scan.processing && (
+                <div className="absolute inset-0 flex items-center justify-center bg-ink-950/60">
+                  <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
+                    Processing scan…
+                  </p>
+                </div>
+              )}
             </div>
           </div>
+
+          {/* Live guidance: low-res worker verdict, framing aid only —
+              never the final transform geometry. */}
+          {scan.mode !== 'original' && (
+            <p
+              role="status"
+              className={`mt-2 text-center text-xs ${
+                scan.liveDetected
+                  ? 'font-medium text-forest-600 dark:text-forest-300'
+                  : 'text-ink-400 dark:text-ink-300'
+              }`}
+            >
+              {scan.liveDetected
+                ? 'Document detected ✓ — capture when ready'
+                : 'Frame the page in the guide'}
+            </p>
+          )}
+
+          {/* Review: pending scan decision. Session state only — nothing
+              enters the page collection until Accept. */}
+          {scan.pending !== null && (
+            <div className="mt-3 rounded-2xl border border-brass-400/40 bg-paper-50 p-3 dark:bg-ink-800/60">
+              <div className="flex gap-3">
+                <img
+                  src={scan.pending.previewUrl}
+                  alt={
+                    scan.pending.result.status === 'processed'
+                      ? `Processed scan preview: ${scan.pending.original.name}`
+                      : `Original capture preview: ${scan.pending.original.name}`
+                  }
+                  className="h-28 w-20 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
+                />
+                <div className="min-w-0 flex-1">
+                  {scan.pending.result.status === 'processed' && (
+                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                      Scan ready — perspective-corrected
+                    </p>
+                  )}
+                  {scan.pending.result.status === 'original' && (
+                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                      No reliable document boundary found
+                    </p>
+                  )}
+                  {scan.pending.result.status === 'error' && (
+                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                      Scanner unavailable
+                    </p>
+                  )}
+                  <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
+                    {scan.pending.result.status === 'processed' &&
+                      'The corrected scan is shown. The original photo is kept for fallback.'}
+                    {scan.pending.result.status === 'original' &&
+                      'Use the original photo as the page, or retake.'}
+                    {scan.pending.result.status === 'error' &&
+                      'Use the original photo, or retry the scan.'}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {scan.pending.result.status === 'processed' && (
+                  <Button onClick={() => acceptReview(true)}>Use scan</Button>
+                )}
+                <Button
+                  variant={scan.pending.result.status === 'processed' ? 'ghost' : 'primary'}
+                  onClick={() => acceptReview(false)}
+                >
+                  Use original
+                </Button>
+                {scan.pending.result.status === 'error' && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      const current = scan.pending;
+                      if (current !== null) scan.processCapture(current.original, scan.mode);
+                    }}
+                  >
+                    Retry
+                  </Button>
+                )}
+                <Button variant="ghost" onClick={() => scan.discard()}>
+                  Retake
+                </Button>
+              </div>
+            </div>
+          )}
 
           {/* Session strip: previews only, newest last with a brass ring. */}
           {sessionPages.length > 0 && (
@@ -606,8 +807,8 @@ export function CameraCapture({
             )}
             <button
               onClick={() => void capture()}
-              disabled={capturing}
-              aria-label={capturing ? 'Capturing page' : 'Capture page'}
+              disabled={capturing || scan.processing || scan.pending !== null}
+              aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
               className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800"
             >
               <span
