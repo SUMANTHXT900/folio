@@ -502,8 +502,16 @@ export function CameraCapture({
 
   return (
     <Card>
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+      {/* CameraTopBar: close | title | view + device controls. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <button
+          onClick={leave}
+          aria-label="Done scanning"
+          className="rounded-lg px-2 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700 min-h-[36px]"
+        >
+          ‹ Done
+        </button>
+        <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
           Scan document
           {sessionPages.length > 0 && (
             <span className="ml-2 rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300">
@@ -512,12 +520,66 @@ export function CameraCapture({
           )}
         </p>
         <button
-          onClick={leave}
-          aria-label="Done scanning"
-          className="rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
+          onClick={() => setGrid((g) => !g)}
+          aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
+          aria-pressed={grid}
+          title="Alignment grid"
+          className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
+            grid
+              ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+              : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+          }`}
         >
-          Done
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          >
+            <path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16" />
+          </svg>
         </button>
+        <button
+          onClick={() => {
+            setDeviceId('');
+            setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+          }}
+          aria-label="Switch camera"
+          title="Switch camera"
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+        </button>
+        {devices.length > 1 && (
+          <select
+            value={deviceId}
+            onChange={(e) => setDeviceId(e.target.value)}
+            className="h-9 rounded-lg border border-paper-300 bg-transparent px-2 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
+            aria-label="Choose camera"
+          >
+            <option value="">Auto</option>
+            {devices.map((d, i) => (
+              <option key={d.deviceId} value={d.deviceId}>
+                {d.label || `Camera ${i + 1}`}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {status === 'starting' && (
@@ -603,6 +665,21 @@ export function CameraCapture({
                   style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%` }}
                 />
               )}
+              {/* Detection pill: low-res worker verdict, framing aid only —
+                  never the final transform geometry. */}
+              {scan.mode !== 'original' && (
+                <p
+                  aria-hidden
+                  data-detection-pill
+                  className={`pointer-events-none absolute inset-x-0 bottom-2 mx-auto w-fit rounded-full px-3 py-1 text-[11px] ${
+                    scan.liveDetected
+                      ? 'bg-forest-600/90 font-medium text-white'
+                      : 'bg-ink-900/70 text-paper-50'
+                  }`}
+                >
+                  {scan.liveDetected ? 'Document detected ✓' : 'Frame the page in the guide'}
+                </p>
+              )}
               {scan.processing && (
                 <div className="absolute inset-0 flex items-center justify-center bg-ink-950/60">
                   <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
@@ -613,21 +690,11 @@ export function CameraCapture({
             </div>
           </div>
 
-          {/* Live guidance: low-res worker verdict, framing aid only —
-              never the final transform geometry. */}
+          {/* Screen-reader mirror of the in-viewport detection pill. */}
           {scan.mode !== 'original' && (
-            <p
-              role="status"
-              className={`mt-2 text-center text-xs ${
-                scan.liveDetected
-                  ? 'font-medium text-forest-600 dark:text-forest-300'
-                  : 'text-ink-400 dark:text-ink-300'
-              }`}
-            >
-              {scan.liveDetected
-                ? 'Document detected ✓ — capture when ready'
-                : 'Frame the page in the guide'}
-            </p>
+            <span className="sr-only" role="status">
+              {scan.liveDetected ? 'Document detected — capture when ready' : 'Framing guide'}
+            </span>
           )}
 
           {/* Review: pending scan decision. Session state only — nothing
@@ -734,40 +801,23 @@ export function CameraCapture({
             </div>
           )}
 
-          {/* Shutter row: grid, capability controls, capture, retake.
-              Torch/zoom render ONLY when the active track reports them;
-              a rejected apply disables the control with a note. */}
-          <div className="mt-3 flex items-center gap-3">
-            <button
-              onClick={() => setGrid((g) => !g)}
-              aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
-              aria-pressed={grid}
-              title="Alignment grid"
-              className={`flex h-11 min-w-11 items-center justify-center rounded-xl border px-3 text-xs transition-colors ${
-                grid
-                  ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
-                  : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
-              }`}
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-              >
-                <path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16" />
-              </svg>
-            </button>
+          {/* Camera dock: torch · shutter · retake on row one (mobile),
+              zoom spans row two; desktop composes one centered cluster
+              (torch · wide zoom · shutter · retake). Torch/zoom render
+              ONLY when the active track reports them; a rejected apply
+              disables the control with a note. Safe-area padded. */}
+          <div
+            role="group"
+            aria-label="Camera controls"
+            className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-3 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center"
+          >
             {caps.torch && !torchDead && (
               <button
                 onClick={() => void toggleTorch()}
                 aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
                 aria-pressed={torchOn}
                 title="Flashlight"
-                className={`flex h-11 min-w-11 items-center justify-center rounded-xl border px-3 text-xs transition-colors ${
+                className={`flex h-11 w-11 items-center justify-center rounded-full border transition-colors sm:order-1 ${
                   torchOn
                     ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
                     : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
@@ -787,29 +837,11 @@ export function CameraCapture({
                 </svg>
               </button>
             )}
-            {caps.zoom !== null && !zoomDead && zoom !== null && (
-              <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700">
-                <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
-                <input
-                  type="range"
-                  min={caps.zoom.min}
-                  max={caps.zoom.max}
-                  step={caps.zoom.step}
-                  value={zoom}
-                  onChange={(e) => void applyZoom(Number(e.target.value))}
-                  aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
-                  className="min-w-0 flex-1 accent-brass-500"
-                />
-                <span className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300">
-                  {zoom.toFixed(1)}×
-                </span>
-              </label>
-            )}
             <button
               onClick={() => void capture()}
               disabled={capturing || scan.processing || scan.pending !== null}
               aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
-              className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800"
+              className="mx-auto flex h-16 w-16 items-center justify-center justify-self-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800 sm:order-3 sm:mx-2"
             >
               <span
                 aria-hidden
@@ -823,10 +855,32 @@ export function CameraCapture({
               disabled={sessionPages.length === 0}
               aria-label="Retake last capture"
               title="Retake last capture"
-              className="flex h-11 min-w-11 items-center justify-center rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300"
+              className="flex h-11 min-w-11 items-center justify-center justify-self-end rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300 sm:order-4"
             >
               Retake
             </button>
+            {caps.zoom !== null && !zoomDead && zoom !== null && (
+              <label className="col-span-3 flex h-11 min-w-0 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700 sm:order-2 sm:col-span-1 sm:w-72 sm:flex-none">
+                <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
+                <input
+                  type="range"
+                  min={caps.zoom.min}
+                  max={caps.zoom.max}
+                  step={caps.zoom.step}
+                  value={zoom}
+                  onChange={(e) => void applyZoom(Number(e.target.value))}
+                  aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
+                  aria-valuetext={`${zoom.toFixed(1)} times zoom`}
+                  className="min-w-0 flex-1 accent-brass-500"
+                />
+                <span
+                  aria-hidden
+                  className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300"
+                >
+                  {zoom.toFixed(1)}×
+                </span>
+              </label>
+            )}
           </div>
           {controlNote !== null && (
             <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">
@@ -835,31 +889,6 @@ export function CameraCapture({
           )}
 
           <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
-            <button
-              onClick={() => {
-                setDeviceId('');
-                setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
-              }}
-              aria-label="Switch camera"
-              className="rounded-lg border border-paper-300 px-3 py-1.5 text-xs text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
-            >
-              Switch camera
-            </button>
-            {devices.length > 1 && (
-              <select
-                value={deviceId}
-                onChange={(e) => setDeviceId(e.target.value)}
-                className="rounded-lg border border-paper-300 bg-transparent px-2 py-1.5 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
-                aria-label="Choose camera"
-              >
-                <option value="">Auto</option>
-                {devices.map((d, i) => (
-                  <option key={d.deviceId} value={d.deviceId}>
-                    {d.label || `Camera ${i + 1}`}
-                  </option>
-                ))}
-              </select>
-            )}
             <span className="text-xs text-ink-400 dark:text-ink-300">
               Frame the page in the guide — captures join the page list below.
               {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}

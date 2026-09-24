@@ -728,6 +728,94 @@ async function main() {
       () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length,
     );
     check('images stale scan result never becomes a page', count === 2, `pages=${count}`);
+    // Responsive HUD geometry: dock below viewport, pill inside it,
+    // strip below the dock — at desktop and narrow-phone widths.
+    // (Torch/zoom stay hidden: the fake track reports no capabilities.)
+    const hudGeometry = () =>
+      page.evaluate(() => {
+        const rect = (el) => {
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return {
+            top: Math.round(r.top),
+            bottom: Math.round(r.bottom),
+            left: Math.round(r.left),
+            right: Math.round(r.right),
+          };
+        };
+        const video = document.querySelector('video');
+        const viewport = video?.parentElement ?? null;
+        return {
+          viewport: rect(viewport),
+          pill: rect(document.querySelector('[data-detection-pill]')),
+          shutter: rect(
+            [...document.querySelectorAll('button')].find(
+              (b) => b.getAttribute('aria-label') === 'Capture page',
+            ) ?? null,
+          ),
+          strip: rect(document.querySelector('[aria-label="Pages captured this session"]')),
+          torch: document.querySelector('[aria-label^="Turn flashlight"]') !== null,
+        };
+      });
+    // Strip lives between viewport and dock: below the framing area,
+    // above the shutter row.
+    const hudSane = (g) =>
+      g.viewport !== null &&
+      g.shutter !== null &&
+      g.shutter.top >= g.viewport.bottom - 1 &&
+      (g.pill === null || (g.pill.top >= g.viewport.top && g.pill.bottom <= g.viewport.bottom)) &&
+      (g.strip === null ||
+        (g.strip.top >= g.viewport.bottom - 1 && g.strip.bottom <= g.shutter.top + 1)) &&
+      g.torch === false;
+    // Desktop composition (current 1280px viewport): reopen the scanner.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    let hud = await hudGeometry();
+    check('images scanner HUD layers cleanly on desktop', hudSane(hud), JSON.stringify(hud));
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Done scanning')
+        ?.click();
+    });
+    // Narrow phone: fresh scanner session plus one accept (so the
+    // session strip is present), then the same geometry assertions.
+    await page.setViewport({ width: 375, height: 667 });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Capture page')
+        ?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
+      timeout: 120000,
+    });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelector('[aria-label="Pages captured this session"]') !== null,
+      { timeout: 30000 },
+    );
+    hud = await hudGeometry();
+    check('images scanner HUD layers cleanly on narrow phone', hudSane(hud), JSON.stringify(hud));
+    await page.setViewport({ width: 1280, height: 900 });
     // Scanned pages build a real PDF. Proven in-page (second browser
     // sessions don't route OS downloads): fetch the result blob and
     // assert real PDF bytes. Download plumbing itself is covered by the

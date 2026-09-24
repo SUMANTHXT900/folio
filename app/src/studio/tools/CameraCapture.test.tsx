@@ -158,6 +158,62 @@ describe('CameraCapture scanner UI', () => {
   });
 });
 
+describe('CameraCapture responsive HUD', () => {
+  it('layers topbar, dock, and strip without moving behavior', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    // TopBar: close + grid + switch.
+    expect(screen.getByLabelText('Done scanning')).toBeTruthy();
+    expect(screen.getByLabelText('Show alignment grid')).toBeTruthy();
+    expect(screen.getByLabelText('Switch camera')).toBeTruthy();
+    // Dock group with shutter + retake.
+    expect(screen.getByLabelText('Camera controls')).toBeTruthy();
+    expect(screen.getByLabelText('Retake last capture')).toBeTruthy();
+    // Session strip intact.
+    expect(screen.getByLabelText('Pages captured this session')).toBeTruthy();
+  });
+
+  it('keeps torch compact and zoom bound to real capabilities', async () => {
+    const track = videoTrack({
+      zoom: { min: 2, max: 6, step: 1 },
+      torch: true,
+      focusMode: [],
+    });
+    mockMedia({ getUserMedia: async () => streamWith(track) });
+    render(
+      <CameraCapture
+        onCapture={noop}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    const torch = await screen.findByLabelText('Turn flashlight on');
+    expect(torch.className).toContain('rounded-full');
+    const slider = (await screen.findByLabelText(/Camera zoom/)) as HTMLInputElement;
+    expect(slider.min).toBe('2');
+    expect(slider.max).toBe('6');
+    expect(slider.step).toBe('1');
+    // Current value displayed alongside the slider.
+    expect(screen.getByText('2.0×')).toBeTruthy();
+    fireEvent.change(slider, { target: { value: '5' } });
+    await waitFor(() =>
+      expect(track.applyConstraints).toHaveBeenCalledWith({ advanced: [{ zoom: 5 }] }),
+    );
+    expect(screen.getByText('5.0×')).toBeTruthy();
+  });
+});
+
 describe('CameraCapture capability controls', () => {
   const fullCaps = {
     zoom: { min: 1, max: 4, step: 0.5 },

@@ -150,3 +150,11 @@ Chronological record of meaningful development events. Each entry records object
 - **Decisions (D16).** Review-before-accept (nothing enters the collection unconfirmed); live corners never reused for final geometry; Original mode = v1.9 path preserved; manual corners + auto-capture stay v2.1.
 - **Verification.** Scan Rust 26/26, `fmt`/strict clippy clean, typecheck/lint/format clean, 180/180 unit, production build (36 precache entries, 4695 KB incl. `folio_scan_bg.wasm` 514 KB + `scan.worker.js` — budget preserved « 8 MB, zero testbench strings), canonical E2E 35/35 + 4 SKIP (run twice), zero console errors. `main` untouched. No version bump (M4).
 - **Remaining.** M4 (final docs, CHANGELOG, version bump); real-device matrix (all unverified).
+
+## 2026-09-24 — Camera HUD responsiveness pass (UI-only, pre-M4)
+
+- **Objective.** Delayer the scanner controls (viewport / topbar / dock / strip) for mobile + desktop without behavior changes.
+- **Work.** `CameraCapture.tsx`: new `CameraTopBar` (Done «, title + badge, grid toggle, switch-camera icon, device picker), detection pill moved inside the viewport (sr-only live-region mirror kept, no double announcement), dock recomposed as mobile grid (torch · centered shutter · retake + full-width zoom row) vs desktop centered cluster (torch · wide zoom · shutter · retake) sharing one DOM, compact circular torch, safe-area padded dock. `data-detection-pill` hook for tests. Tests: +2 HUD layout (topbar/dock/strip presence, torch shape, live zoom min/max/step/value), E2E geometric layering at 1280px + 375×667 (viewport/pill/shutter/strip/torch-absent).
+- **Findings.** Strip sits between viewport and dock (assertion first written backwards — caught by the new check, corrected). No behavior regressions: 37/37 E2E twice, 182 unit.
+- **Verification.** typecheck/lint/format clean, 182/182 unit, production build, canonical E2E 37/37 + 4 SKIP (×2), zero console errors. No version bump (M4). `main` untouched.
+- **Remaining.** M4; manual-device checks (small-phone dock feel, torch/zoom on real phones, safe-area on notched devices).
