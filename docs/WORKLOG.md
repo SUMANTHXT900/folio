@@ -151,6 +151,14 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Scan Rust 26/26, `fmt`/strict clippy clean, typecheck/lint/format clean, 180/180 unit, production build (36 precache entries, 4695 KB incl. `folio_scan_bg.wasm` 514 KB + `scan.worker.js` — budget preserved « 8 MB, zero testbench strings), canonical E2E 35/35 + 4 SKIP (run twice), zero console errors. `main` untouched. No version bump (M4).
 - **Remaining.** M4 (final docs, CHANGELOG, version bump); real-device matrix (all unverified).
 
+## 2026-09-24 — Image → PDF stress + camera-quality audit (pre-v2.0 hardening, no fixes)
+
+- **Objective.** Diagnose the 30-image Aw-Snap crash and the webcam quality gap with measurements, not guesses.
+- **Work.** Traced the full pipeline stage-by-stage; added `engine/examples/gen_stress_images.rs` (deterministic 12 MP photographic-noise JPEGs, ~2.25 MB each — instrumentation only, no private photos); drove 5/10/20/30-page builds in headless Chrome via a temporary harness (since removed) measuring wall/engine time, output size, JS heap, and longtasks.
+- **Findings (measured).** No crash in headless desktop at 30 pages, but linear pathology: JS heap 8 MB → 2146 MB (~72 MB/page retained: staged inputs + adapter copies + 1 GB output Blob in React `done` state); output PDF 1.08 GB from 67 MB input (**16× inflation — raw RGB embedding, no DCT passthrough**); Rust holds ALL decoded RGB simultaneously (`decoded: Vec`, model B: 30 × 36 MB ≈ 1.08 GB) plus input blobs plus the output document (~2.3 GB transient in the worker); main-thread longtasks up to ~1 s during staging/preview/blob handling. Phone-class tab limits explain the Aw-Snap. Camera: constraints request only `facingMode ideal` (desktop webcams typically negotiate 640×480 vs the OS app's full sensor — prime quality suspect, needs hardware confirmation); canvas correctly uses `videoWidth/Height` (not CSS); capture JPEG q0.92 measured sane (q92 2.65 MB vs q98 5.78 MB on synthetic — resolution, not quality setting, is the suspect).
+- **Decisions.** No fixes implemented (audit-only); hardening proposals ranked in the report; `gen_stress_images.rs` kept as the documented repro path.
+- **Remaining.** Hardening milestone (incremental embed redesign + ownership cuts + camera negotiation) before any v2.0 release claim.
+
 ## 2026-09-24 — Camera HUD responsiveness pass (UI-only, pre-M4)
 
 - **Objective.** Delayer the scanner controls (viewport / topbar / dock / strip) for mobile + desktop without behavior changes.
