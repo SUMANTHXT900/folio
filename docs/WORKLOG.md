@@ -151,6 +151,14 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Scan Rust 26/26, `fmt`/strict clippy clean, typecheck/lint/format clean, 180/180 unit, production build (36 precache entries, 4695 KB incl. `folio_scan_bg.wasm` 514 KB + `scan.worker.js` — budget preserved « 8 MB, zero testbench strings), canonical E2E 35/35 + 4 SKIP (run twice), zero console errors. `main` untouched. No version bump (M4).
 - **Remaining.** M4 (final docs, CHANGELOG, version bump); real-device matrix (all unverified).
 
+## 2026-09-24 — Image→PDF hardening P0–P6 (memory + camera quality, no version bump)
+
+- **Objective.** Fix the measured 30-image crash architecture and the under-constrained camera without changing engine contracts.
+- **Work.** P0: `images_to_pdf` restructured to `PdfBuild` incremental embed (decode → embed → release per image; `Vec<DecodedImage>` gone; move-not-clone into streams; order/progress/cancel/atomicity/errors preserved). P6: per-instance liveness counters + `peak_decoded_retention_is_one_image_not_n` (globals rejected after they raced parallel tests — documented in code). P1: `transfer?: boolean` on `EngineDocumentInput` (additive); staged ids tracked in `folio.ts`; adapter moves exact-owned staged buffers, copies everything else (rendering-backed docs protected). P2: `studioDownload` accepts `Blob`; ImagesTool builds ONE Blob (was two + retained bytes); DoneBanner/share untouched. P3: `cameraConstraints.ts` (1080p/30fps ideals, exact only for explicit device) + negotiated-settings debug log. P4: 4 constraint tests. P5: regenerated fixtures, 5/10/20/30 stress + 30-page cancel probe.
+- **Findings.** Post-fix stress (same fixtures/harness): 30 pages complete, order/counts correct, cancel honest; JS heap still ~2 GB at n=30 — dominated by the 1 GB output Blob (by design for share/re-download) + harness probe artifact, NOT inputs (worker-side win proven structurally by P6 + code: peak decoded 36 MB vs 1.08 GB). Camera ideals unverified on hardware (no device here); canvas/`videoWidth` and q0.92 confirmed correct by code + size measurements.
+- **Verification.** Engine 346 (345 + peak test), `fmt`/strict clippy clean (both Rust runs), WASM rebuilt, typecheck/lint/format clean, 190/190 unit, production build (34 precache, zero testbench strings), canonical E2E 37/37 + 4 SKIP, zero console errors. `main` untouched. No version bump, M4 not started.
+- **Remaining.** Real-device matrix (mid-range Android 30-page run, webcam settings before/after ideals, iOS run); DCT passthrough stays v2.1.
+
 ## 2026-09-24 — Image → PDF stress + camera-quality audit (pre-v2.0 hardening, no fixes)
 
 - **Objective.** Diagnose the 30-image Aw-Snap crash and the webcam quality gap with measurements, not guesses.

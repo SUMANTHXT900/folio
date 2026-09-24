@@ -31,6 +31,7 @@ import {
   requestContinuousModes,
   type CameraCapabilities,
 } from './cameraCapabilities';
+import { buildVideoConstraints } from './cameraConstraints';
 import { SCANNER_MODES, useScanProcessor, type ScannerMode } from './scan/useScanProcessor';
 
 const MODE_LABELS: Record<ScannerMode, string> = {
@@ -211,9 +212,7 @@ export function CameraCapture({
       try {
         const constraints: MediaStreamConstraints = {
           audio: false,
-          video: exactDevice
-            ? { deviceId: { exact: exactDevice } }
-            : { facingMode: { ideal: mode } },
+          video: buildVideoConstraints({ facing: mode, deviceId: exactDevice }),
         };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         if (!isCurrent()) {
@@ -224,6 +223,15 @@ export function CameraCapture({
         streamRef.current = stream;
         const videoTrack = stream.getVideoTracks()[0] ?? null;
         trackRef.current = videoTrack;
+        if (videoTrack && typeof videoTrack.getSettings === 'function') {
+          // Negotiated reality, not the request: ideals may or may not
+          // hold. Debug-level only (never an error, never user-facing).
+          const s = videoTrack.getSettings();
+          console.debug(
+            `[folio-camera] negotiated ${s.width ?? '?'}x${s.height ?? '?'}@${s.frameRate ?? '?'}fps` +
+              (s.deviceId ? ` device=${s.deviceId.slice(0, 8)}` : ''),
+          );
+        }
         const detected = readTrackCapabilities(videoTrack);
         setCaps(detected);
         if (detected.zoom !== null) setZoom(detected.zoom.min);

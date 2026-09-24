@@ -221,14 +221,26 @@ impl Operation for ImagesToPdfOperation {
         ctx.report_progress(Some("preparing"), 10, 100, Some("preparing destination"));
         ctx.check_cancellation()?;
 
-        // Decode every image first (local state only). Any failure aborts
-        // before any PDF object is committed — atomic output.
+        // Incremental embed (memory fix): decode ONE image, embed it into
+        // the growing document, then release it before the next. Peak
+        // decoded retention is one image, not N — critical at 12 MP
+        // scale (36 MB × 30 pages no longer coexists). Page order follows
+        // input order; outputs commit only after the last page succeeds,
+        // so failure on page N still aborts with no partial PDF (atomic).
         let total = input.images.len() as u64;
-        let mut decoded = Vec::with_capacity(input.images.len());
+        let mut pdf = PdfBuild::begin(input.images.len());
         for (index, image) in input.images.iter().enumerate() {
             ctx.check_cancellation()?;
             let item = decode_image(image, index, options.background_rgb)?;
-            decoded.push(item);
+            // `item` moves into the document here and drops at the end of
+            // this iteration: peak decoded retention is one image.
+            pdf.append(
+                item.rgb,
+                item.width_px,
+                item.height_px,
+                item.dpi,
+                options.page_size,
+            )?;
             let completed = 10 + ((index as u64 + 1) * 80) / total.max(1);
             ctx.report_progress(
                 Some("processing images"),
@@ -246,11 +258,11 @@ impl Operation for ImagesToPdfOperation {
             Some("assembling PDF pages"),
         );
 
-        let document = build_pdf(&decoded, options.page_size)?;
+        let document = pdf.finish();
 
         ctx.check_cancellation()?;
         ctx.report_progress(Some("finalizing"), 100, 100, Some("images_to_pdf complete"));
-        let page_count = decoded.len() as u32;
+        let page_count = input.images.len() as u32;
         Ok(ImagesToPdfOutput {
             document,
             page_count,
@@ -272,8 +284,6 @@ struct DecodedImage {
     /// Detected (or fallback) DPI.
     dpi: f64,
 }
-
-impl DecodedImage {}
 
 /// Validates headers, decodes, applies EXIF orientation, composites alpha,
 /// and detects DPI. Input bytes are only borrowed, never mutated.
@@ -705,17 +715,74 @@ fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-/// Builds the output PDF: one page per decoded image per the page-size
-/// policy. Images are embedded as raw RGB XObjects (no filter, no
-/// re-compression); placement rectangles are computed with a single uniform
-/// scale so aspect ratios are always preserved.
-fn build_pdf(images: &[DecodedImage], policy: PageSizePolicy) -> Result<PdfDocument, EngineError> {
-    let mut doc = lopdf::Document::with_version("1.4");
-    let pages_id = doc.new_object_id();
-    let mut kids = Vec::with_capacity(images.len());
+/// Incrementally-built PDF document: pages accumulate as objects, but
+/// decoded image bytes are moved in and released per image — never
+/// retained across pages.
+struct PdfBuild {
+    doc: lopdf::Document,
+    pages_id: (u32, u16),
+    kids: Vec<lopdf::Object>,
+    // Test-only liveness accounting (P6): peak concurrently-live
+    // decoded images within THIS builder. Per-instance (not global),
+    // so parallel tests cannot interfere. Zero production impact.
+    #[cfg(test)]
+    live: usize,
+    #[cfg(test)]
+    peak_live: usize,
+}
 
-    for image in images {
-        let (page_w, page_h, rect) = placement(image, policy);
+impl PdfBuild {
+    fn begin(capacity: usize) -> Self {
+        let mut doc = lopdf::Document::with_version("1.4");
+        let pages_id = doc.new_object_id();
+        Self {
+            doc,
+            pages_id,
+            kids: Vec::with_capacity(capacity),
+            #[cfg(test)]
+            live: 0,
+            #[cfg(test)]
+            peak_live: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn peak_live(&self) -> usize {
+        self.peak_live
+    }
+
+    #[cfg(test)]
+    fn track_live(&mut self) {
+        self.live += 1;
+        self.peak_live = self.peak_live.max(self.live);
+    }
+
+    #[cfg(test)]
+    fn untrack_live(&mut self) {
+        self.live = self.live.saturating_sub(1);
+    }
+
+    /// Embeds one decoded image as the next page, taking ownership of
+    /// its RGB bytes (no clone — the caller's copy is moved from).
+    /// The bytes are released when this call returns: peak retention
+    /// across a run is one image.
+    fn append(
+        &mut self,
+        rgb: Vec<u8>,
+        width_px: u32,
+        height_px: u32,
+        dpi: f64,
+        policy: PageSizePolicy,
+    ) -> Result<(), EngineError> {
+        let decoded = DecodedImage {
+            width_px,
+            height_px,
+            rgb,
+            dpi,
+        };
+        #[cfg(test)]
+        self.track_live();
+        let (page_w, page_h, rect) = placement(&decoded, policy);
         if !(page_w.is_finite() && page_h.is_finite() && page_w > 0.0 && page_h > 0.0) {
             return Err(EngineError::new(
                 ErrorCode::Internal,
@@ -723,35 +790,39 @@ fn build_pdf(images: &[DecodedImage], policy: PageSizePolicy) -> Result<PdfDocum
             ));
         }
 
-        let image_id = doc.new_object_id();
+        let image_id = self.doc.new_object_id();
         let image_dict = dictionary! {
             "Type" => "XObject",
             "Subtype" => "Image",
-            "Width" => i64::from(image.width_px),
-            "Height" => i64::from(image.height_px),
+            "Width" => i64::from(decoded.width_px),
+            "Height" => i64::from(decoded.height_px),
             "ColorSpace" => "DeviceRGB",
             "BitsPerComponent" => 8,
         };
-        doc.objects.insert(
+        // Moved in, not cloned: the decoded buffer now belongs to the
+        // document (the caller's copy is gone after this call).
+        self.doc.objects.insert(
             image_id,
-            lopdf::Object::Stream(Stream::new(image_dict, image.rgb.clone())),
+            lopdf::Object::Stream(Stream::new(image_dict, decoded.rgb)),
         );
+        #[cfg(test)]
+        self.untrack_live();
 
         let (draw_w, draw_h, draw_x, draw_y) = rect;
         let content = format!(
             "q {:.2} 0 0 {:.2} {:.2} {:.2} cm /Im1 Do Q",
             draw_w, draw_h, draw_x, draw_y
         );
-        let content_id = doc.new_object_id();
-        doc.objects.insert(
+        let content_id = self.doc.new_object_id();
+        self.doc.objects.insert(
             content_id,
             lopdf::Object::Stream(Stream::new(dictionary! {}, content.into_bytes())),
         );
 
-        let page_id = doc.new_object_id();
+        let page_id = self.doc.new_object_id();
         let page_dict = dictionary! {
             "Type" => "Page",
-            "Parent" => pages_id,
+            "Parent" => self.pages_id,
             "MediaBox" => vec![
                 lopdf::Object::Integer(0),
                 lopdf::Object::Integer(0),
@@ -765,39 +836,48 @@ fn build_pdf(images: &[DecodedImage], policy: PageSizePolicy) -> Result<PdfDocum
             },
             "Contents" => content_id,
         };
-        doc.objects
+        self.doc
+            .objects
             .insert(page_id, lopdf::Object::Dictionary(page_dict));
-        kids.push(lopdf::Object::Reference(page_id));
+        self.kids.push(lopdf::Object::Reference(page_id));
+        Ok(())
     }
 
-    doc.objects.insert(
-        pages_id,
-        lopdf::Object::Dictionary(dictionary! {
-            "Type" => "Pages",
-            "Kids" => lopdf::Object::Array(kids),
-            "Count" => images.len() as i64,
-        }),
-    );
-    let catalog_id = doc.new_object_id();
-    doc.objects.insert(
-        catalog_id,
-        lopdf::Object::Dictionary(dictionary! {
-            "Type" => "Catalog",
-            "Pages" => pages_id,
-        }),
-    );
-    doc.trailer.set("Root", catalog_id);
-    // Fixed producer only (no timestamps): output stays byte-deterministic.
-    let info_id = doc.new_object_id();
-    doc.objects.insert(
-        info_id,
-        lopdf::Object::Dictionary(dictionary! {
-            "Producer" => lopdf::Object::string_literal("folio-engine images_to_pdf"),
-        }),
-    );
-    doc.trailer.set("Info", info_id);
+    /// Finalizes the document: Pages tree, catalog, trailer. Called once
+    /// after every image embedded — outputs exist only on success, so a
+    /// mid-run failure still yields no partial PDF (atomic).
+    fn finish(self) -> PdfDocument {
+        let count = self.kids.len() as i64;
+        let mut doc = self.doc;
+        doc.objects.insert(
+            self.pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => lopdf::Object::Array(self.kids),
+                "Count" => count,
+            }),
+        );
+        let catalog_id = doc.new_object_id();
+        doc.objects.insert(
+            catalog_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Catalog",
+                "Pages" => self.pages_id,
+            }),
+        );
+        doc.trailer.set("Root", catalog_id);
+        // Fixed producer only (no timestamps): output stays byte-deterministic.
+        let info_id = doc.new_object_id();
+        doc.objects.insert(
+            info_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Producer" => lopdf::Object::string_literal("folio-engine images_to_pdf"),
+            }),
+        );
+        doc.trailer.set("Info", info_id);
 
-    Ok(PdfDocument::from_lopdf(doc))
+        PdfDocument::from_lopdf(doc)
+    }
 }
 
 /// Returns `(page_w, page_h, (draw_w, draw_h, draw_x, draw_y))` in points.
@@ -1152,6 +1232,50 @@ mod tests {
         assert_eq!(&images[0].2[0..3], &[255, 0, 0]);
         assert_eq!(&images[1].2[0..3], &[0, 255, 0]);
         assert_eq!(&images[2].2[0..3], &[0, 0, 255]);
+    }
+
+    // -- incremental memory (P6 regression) ------------------------------------
+
+    #[test]
+    fn peak_decoded_retention_is_one_image_not_n() {
+        // The execute loop must embed each image and release it before
+        // decoding the next: at 12 MP scale, N retained RGB buffers is
+        // the browser-crash architecture. `PdfBuild` counts live decoded
+        // images per builder instance (no globals — parallel tests cannot
+        // interfere); the execute loop holds no other decoded storage,
+        // so builder peak == run peak.
+        let mut pdf = PdfBuild::begin(5);
+        for (i, color) in [
+            [200, 30, 30],
+            [30, 200, 30],
+            [30, 30, 200],
+            [200, 200, 30],
+            [30, 200, 200],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let bytes = solid_rgb_png(32, 32, *color);
+            let image = ImageInput::new(format!("{i}.png"), bytes).expect("input builds");
+            let item = decode_image(&image, i, [255, 255, 255]).expect("decodes");
+            pdf.append(
+                item.rgb,
+                item.width_px,
+                item.height_px,
+                item.dpi,
+                PageSizePolicy::FitImage,
+            )
+            .expect("embeds");
+        }
+        assert_eq!(
+            pdf.peak_live(),
+            1,
+            "peak decoded retention must be one image"
+        );
+        let mut doc = pdf.finish();
+        let bytes = doc.save_to_bytes().expect("serializes");
+        let reparsed = load_pdf(&bytes).expect("re-parses");
+        assert_eq!(reparsed.page_count(), 5);
     }
 
     // -- dimensions / aspect ---------------------------------------------------

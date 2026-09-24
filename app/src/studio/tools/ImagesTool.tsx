@@ -155,11 +155,15 @@ export default function ImagesTool() {
       jobRef.current = null;
       const first = out.outputs[0];
       const name = 'images.pdf';
-      studioDownload(first.bytes, name);
-      setDone({
-        name,
-        blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
-      });
+      // ONE Blob for auto-download, re-download, and share (P2): the
+      // engine output bytes are not retained afterwards, and no second
+      // Blob is built. DoneBanner owns its object URL (revoked on
+      // replace/unmount); the auto-download URL revokes after 60s.
+      // The Blob stays only while this completion card is displayed —
+      // required for save-again/share; cleared on rebuild, clear, unmount.
+      const blob = new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' });
+      studioDownload(blob, name);
+      setDone({ name, blob });
       const summary = out.summary;
       const imageCount =
         summary !== undefined && 'imageCount' in summary && typeof summary.imageCount === 'number'

@@ -6,8 +6,8 @@
  * covered by the production browser E2E (`e2e/studio.e2e.mjs`), never
  * mocked here.
  */
-import { describe, expect, it } from 'vitest';
-import { formatDurationMs, studioStripExt, toStudioError } from './folio';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { formatDurationMs, studioDownload, studioStripExt, toStudioError } from './folio';
 
 describe('toStudioError', () => {
   it('maps known codes to human messages and preserves the code', () => {
@@ -62,5 +62,50 @@ describe('studioStripExt', () => {
     expect(studioStripExt('report.pdf')).toBe('report');
     expect(studioStripExt('UPPER.PDF')).toBe('UPPER');
     expect(studioStripExt('no-ext')).toBe('no-ext');
+  });
+});
+
+describe('studioDownload', () => {
+  const revoked: string[] = [];
+
+  beforeEach(() => {
+    revoked.length = 0;
+    URL.createObjectURL = vi.fn(() => 'blob:download-1');
+    URL.revokeObjectURL = vi.fn((url: string) => {
+      revoked.push(url);
+    });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('downloads bytes through one object URL and revokes it', () => {
+    const clicks: string[] = [];
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(`${this.href}|${this.download}`);
+    });
+    studioDownload(new Uint8Array([1, 2, 3]), 'images.pdf');
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(clicks).toEqual(['blob:download-1|images.pdf']);
+    expect(revoked).toEqual([]);
+    vi.advanceTimersByTime(60_000);
+    expect(revoked).toEqual(['blob:download-1']);
+    clickSpy.mockRestore();
+  });
+
+  it('reuses a caller-provided Blob without copying', () => {
+    const blob = new Blob(['abc'], { type: 'application/pdf' });
+    const createSpy = vi.mocked(URL.createObjectURL);
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    studioDownload(blob, 'images.pdf');
+    // One URL from the given Blob — no second Blob is constructed here
+    // (Blob identity is preserved through the call).
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0][0]).toBe(blob);
   });
 });

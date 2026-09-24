@@ -410,6 +410,45 @@ describe('WasmWorkerEngineAdapter', () => {
     expect(raw.inputs[0].buffer).toBeInstanceOf(ArrayBuffer);
   });
 
+  it('moves staged transfer inputs without copying', async () => {
+    const { adapter, worker } = makeAdapter();
+    const bytes = new Uint8Array([9, 8, 7, 6]);
+    adapter.execute({
+      operation: 'pdf.images_to_pdf',
+      inputs: [{ name: 'a.png', bytes, transfer: true }],
+      options: { pageSize: 'fit', backgroundRgb: [255, 255, 255] },
+    });
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    const raw = worker.posted[0] as { inputs: Array<{ buffer: ArrayBuffer }> };
+    // Same buffer object moved across — zero-copy for staged inputs.
+    expect(raw.inputs[0].buffer).toBe(bytes.buffer);
+  });
+
+  it('copies rendering-backed inputs and views to protect other owners', async () => {
+    const { adapter, worker } = makeAdapter();
+    const shared = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const view = new Uint8Array(shared.buffer, 2, 2);
+    adapter.execute({
+      operation: 'pdf.images_to_pdf',
+      inputs: [
+        { name: 'shared.pdf', bytes: shared },
+        { name: 'view.png', bytes: view, transfer: true },
+      ],
+      options: { pageSize: 'fit', backgroundRgb: [255, 255, 255] },
+    });
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    const raw = worker.posted[0] as { inputs: Array<{ buffer: ArrayBuffer }> };
+    // Unflagged input: copied, original intact.
+    expect(raw.inputs[0].buffer).not.toBe(shared.buffer);
+    expect(new Uint8Array(raw.inputs[0].buffer)).toEqual(shared);
+    expect(shared).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6]));
+    // Flagged but non-exact view: copied exact range, source intact.
+    expect(new Uint8Array(raw.inputs[1].buffer)).toEqual(new Uint8Array([3, 4]));
+    expect(view).toEqual(new Uint8Array([3, 4]));
+  });
+
   it('bounds retained settled-job records (Lesson 14 large-file safety)', async () => {
     const { adapter, worker } = makeAdapter();
     const jobIds: string[] = [];

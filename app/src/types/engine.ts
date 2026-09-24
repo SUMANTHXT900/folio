@@ -42,10 +42,19 @@ export type ErrorCode =
   | 'INVALID_OPTIONS'
   | 'INTERNAL';
 
-/** One input document: bytes cross the boundary, never paths. */
+/**
+ * One input document: bytes cross the boundary, never paths.
+ *
+ * `transfer` (optional, default false): the caller relinquishes these
+ * bytes — the adapter moves the underlying buffer to the worker WITHOUT
+ * copying, neutering the caller's view. Only set for staged inputs with
+ * no other owner (never for rendering-backed documents shared with
+ * PDF.js). The wire shape is unchanged (name + bytes either way).
+ */
 export interface EngineDocumentInput {
   name: string;
   bytes: Uint8Array;
+  transfer?: boolean;
 }
 
 export interface InspectOptions {

@@ -24,7 +24,7 @@
 
 ## Current work
 
-- v2.0 M3 done: CameraCapture scan integration (see WORKLOG); M4 (E2E hardening, docs, version bump) next. No version bump yet.
+- Hardening milestone done (P0–P6, see WORKLOG): incremental Rust embed, staged-transfer ownership, single-Blob download, negotiated camera constraints. No version bump; M4/v2.0 release validation still pending real-device checks.
 
 ## Pending work
 
@@ -47,7 +47,7 @@ None. No blocked items.
 
 | Check                                                         | Result                                                                                                                                                          |
 | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust tests (`cargo test` in `engine/`)                        | 345 passing (228 unit + integration suites)                                                                                                                     |
+| Rust tests (`cargo test` in `engine/`)                        | 346 passing (229 unit + integration suites, incl. incremental-embed peak test)                                                                                  |
 | Scan core tests (`cargo test` in `scan/`)                     | 26 passing (geometry, detect, warp, enhance, pipeline)                                                                                                          |
 | Rust format (`cargo fmt --check`)                             | clean                                                                                                                                                           |
 | Rust lints (`cargo clippy --all-targets`)                     | clean                                                                                                                                                           |
@@ -55,7 +55,7 @@ None. No blocked items.
 | Frontend typecheck (`npm run typecheck`)                      | passing                                                                                                                                                         |
 | Frontend lint (`npm run lint`)                                | passing                                                                                                                                                         |
 | Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
-| Frontend unit tests (`npm test`)                              | 182 passing (180 + 2 new scanner HUD layout)                                                                                                                    |
+| Frontend unit tests (`npm test`)                              | 190 passing (182 + 8 new: adapter transfer, download lifecycle, camera constraints)                                                                             |
 | Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
 | Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 37/37 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |

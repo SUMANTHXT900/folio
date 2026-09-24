@@ -76,6 +76,12 @@ export interface StudioJob {
 const binaries = new Map<string, { bytes: Uint8Array; name: string }>();
 const renderDocIds = new Map<string, string>();
 const thumbJobs = new Map<string, Set<() => void>>();
+/**
+ * Staged (non-rendering) ids: raw bytes with no PDF.js owner, safe to
+ * TRANSFER to the worker (P1). Rendering-backed documents are never
+ * added here — transferring them would neuter the renderer's bytes.
+ */
+const stagedIds = new Set<string>();
 let docCounter = 0;
 
 let adapter: WasmWorkerEngineAdapter | null = null;
@@ -200,12 +206,14 @@ export function stageStudioBytes(name: string, bytes: Uint8Array): string {
   docCounter += 1;
   const id = `studio-${docCounter}`;
   binaries.set(id, { bytes, name });
+  stagedIds.add(id);
   return id;
 }
 
 /** Releases a staged raw entry (no rendering document involved). */
 export function releaseStagedBytes(id: string): void {
   binaries.delete(id);
+  stagedIds.delete(id);
 }
 
 function trackThumbJob(docId: string, cancel: () => void): void {
@@ -269,7 +277,7 @@ export function runStudioOperation(
           operation,
         );
       }
-      return { name: entry.name, bytes: entry.bytes };
+      return { name: entry.name, bytes: entry.bytes, transfer: stagedIds.has(id) };
     });
     const request = { operation, inputs, options } as EngineRequest;
     const { jobId, done: adapterDone } = adapter.execute(request);
@@ -535,9 +543,17 @@ export async function studioPreview(docId: string, pageNumber: number): Promise<
   }
 }
 
-/** Direct save via anchor (user-gesture download, same as Studio UX). */
-export function studioDownload(bytes: Uint8Array, name: string): void {
-  const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
+/**
+ * Direct save via anchor (user-gesture download, same as Studio UX).
+ * Accepts bytes or an existing Blob: passing the Blob avoids a second
+ * copy when the caller already built one for its completion UI. The
+ * object URL is revoked after 60s (generous download-start window).
+ */
+export function studioDownload(bytes: Uint8Array | Blob, name: string): void {
+  const blob =
+    bytes instanceof Blob
+      ? bytes
+      : new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;

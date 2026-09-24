@@ -211,6 +211,17 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
         throw new Error('WASM worker unavailable after initialization');
       }
       const inputs = request.inputs.map((input) => {
+        if (
+          input.transfer === true &&
+          input.bytes.byteOffset === 0 &&
+          input.bytes.byteLength === input.bytes.buffer.byteLength
+        ) {
+          // Staged input with no other owner: move the buffer itself,
+          // neutering the staged view (released by the caller in its
+          // finally). Rendering-backed inputs always take the copy path
+          // below — transferring them would destroy the renderer's bytes.
+          return { name: input.name, buffer: input.bytes.buffer as ArrayBuffer };
+        }
         // Copy: the store's buffer must survive for re-runs/benchmarks;
         // the copy's ArrayBuffer is TRANSFERRED (moved, zero-copy).
         const copy = input.bytes.slice();
