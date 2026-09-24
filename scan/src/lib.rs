@@ -25,6 +25,10 @@ pub mod geometry;
 pub mod pipeline;
 pub mod warp;
 
+// WASM glue (M2): exports only; the M1 core stays glue-free natively.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 pub use detect::{detect_document, Detection};
 pub use enhance::ScanMode;
 pub use error::{ScanError, ScanErrorKind};

@@ -12,9 +12,13 @@ dist-ssr/
 target/
 engine/target/
 wasm/target/
+scan/target/
 
 # Generated WASM package (reproduced via `npm run build:wasm` in app/)
 wasm/pkg/
+
+# Generated scan WASM package (reproduced via `npm run build:scan` in app/)
+scan/pkg/
 
 # Local PDF corpora and personal test documents (never commit)
 test pdfs

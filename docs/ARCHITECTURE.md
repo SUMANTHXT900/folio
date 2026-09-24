@@ -50,6 +50,10 @@ PdfRenderEngine → PDF.js
 
 Everything PDF-related executes in one of three places: the main thread (UI + rendering orchestration), the engine Web Worker (manipulation), and PDF.js's own worker (rendering). The main thread never blocks on engine work: `adapter.execute()` returns a `jobId` plus a `done` promise, and progress streams via subscription.
 
+## Scan worker boundary (v2.0 M2)
+
+Document-scan processing runs in a DEDICATED scan worker (`app/src/studio/tools/scan/scan.worker.ts`), separate from the PDF engine worker: different responsibility (image analysis vs PDF manipulation), different WASM module (`scan/pkg`, ~514 KB + glue), independent lifecycle. `ScanWorkerClient` is the main-thread gateway: lazy worker creation, init-once module reuse, transferable byte ownership (neuter-on-send), epoch-guarded stale-result discard, terminate-to-cancel with transparent recreate. The protocol (`scanProtocol.ts`, versioned) distinguishes `processed | original | error` — "no document detected" is fallback, not failure. Scan WASM loads on first scanner use, never at app boot; PWA precache budget unchanged (4.1 + ~0.5 « 8 MB cap).
+
 ## Binary ownership
 
 - PDF bytes live in module-level maps: the adapter-side binary store (`engine/binaryStore.ts`, keyed by `outputId`) and the studio-side `binaries` map (keyed by studio doc id). **Never in React state.**

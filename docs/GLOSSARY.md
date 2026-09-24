@@ -15,6 +15,8 @@ Definitions follow the actual implementation. Use these meanings consistently in
 - **Engine job ID.** See `JobId`. Display-only in the UI — never a React key — because it may repeat across worker restarts.
 - **EngineAdapter.** The TypeScript interface (`app/src/engine/EngineAdapter.ts`) everything engine-like implements: `execute(request)` → `{jobId, done}`, `cancel(jobId)`, `subscribe(jobId, listener)`.
 - **WasmWorkerEngineAdapter.** The production `EngineAdapter`: posts requests to the engine Web Worker, streams `EngineEvent`s, resolves `EngineExecution`s with real (non-simulated) data.
+- **ScanWorkerClient.** The scanner gateway (`app/src/studio/tools/scan/`): posts image bytes to the dedicated scan Web Worker running the `folio-scan` WASM module, resolves terminal `ScanResult`s (`processed | original | error`). Epoch-guarded: stale results after terminate/restart are discarded, never applied.
+- **Scan worker.** `scan.worker.ts`: owns scan WASM init + jobs, separate from the PDF engine worker (different responsibility, module, lifecycle). Versioned `scanProtocol.ts`; bytes cross as transferables.
 - **MockEngineAdapter.** Unit-test-only adapter reporting `simulated: true` events. Never backs a production path.
 - **EngineEvent.** One live message from an execution: `lifecycle | progress | log`, with optional `phase / completed / total / percentage / message`, sequence number, and wall-clock timestamp.
 - **EngineExecution.** The final TypeScript record of one execution: terminal status, authoritative `engineDurationMs`, `result` (summary + output refs) or `error`, per-job `events`, `simulated` flag.

@@ -34,6 +34,7 @@ cargo test
 cd ../app
 npm install
 npm run build:wasm   # generates ../wasm/pkg/ (gitignored) via wasm-pack
+npm run build:scan   # generates ../scan/pkg/ (gitignored) via wasm-pack
 npm run dev          # → http://localhost:5173
 ```
 
