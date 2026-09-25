@@ -256,3 +256,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Objective.** Real-phone report with screenshots: viewfinder full-size pre-capture, ~130px smaller after one capture (top-bar wrap + note strip + thumbnail strip all stole flex space).
 - **Work.** `CameraCapture.tsx`: nowrap single-row top bar (truncate title, short CTA, device picker to bottom hint row), import note → floating auto-dismissing pill (5s), slimmer strip without duplicate safe-area padding. Strip stays in-flow below dock per E2E layering contract.
 - **Verification.** Unit 228; E2E **44/44 + 4 SKIP** (new: framing-box 263px → 263px across first capture, pixel-identical); typecheck/lint/format clean. No version bump.
+
+- **Deploy.** Viewfinder fix deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
