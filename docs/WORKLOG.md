@@ -274,3 +274,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit 229; E2E **46/46 + 4 SKIP** (new: entry-card check); typecheck/lint/format clean. No version bump.
 
 - **Deploy.** Entry-card redesign deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-26 — Performance analysis & plan (docs-only)
+
+- **Objective.** Deep pipeline performance analysis with a phased, evidence-based plan (user request).
+- **Work.** Two passes: a full-repo audit plus direct source verification of the highest-impact claims. 17 findings recorded with file:line, impact, effort, and verified/reported status in the new `docs/PERFORMANCE.md`. Parallel-computing options assessed honestly (worker-level sharding vs. single-thread WASM baseline vs. gated threaded-WASM track). Phases P0–P4 defined with acceptance criteria and verification protocol. ROADMAP updated.
+- **Verified highlights.** Main-thread full-file `slice()` per execution (WasmWorkerEngineAdapter.ts:213-229); WASM intake double copy (wasm/src/lib.rs:941-950 + :513); `page_count()` rebuilds the page map (core/document.rs:87-89) making rotate/inspect/split O(N²)-flavored; rotate deep-copies all pages even for one-page rotations (rotate/mod.rs:178-207); per-page progress event storm; double `getPage` per thumbnail; scan pipeline full-res RGB copies; live detection runs warp+encode and discards it.
+- **No code changed.** Planning artifact only; no version bump.

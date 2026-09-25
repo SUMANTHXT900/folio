@@ -20,6 +20,7 @@ This roadmap records actual project direction. Items are separated by commitment
 
 ## Next
 
+- **Performance program (`docs/PERFORMANCE.md`, planned 2026-09-26, not started).** Evidence-based phased plan: P0 copy elimination + event hygiene, P1 single-pass algorithms (page-map cache, rotate in place, single-`getPage` thumbnails), P2 main-thread offload, P3 worker-level parallelism for Images (gated on measurements), P4 measurement harness. Threaded WASM (nightly + COOP/COEP) explicitly gated behind a future decision.
 - Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
 
 ## Future / not committed
