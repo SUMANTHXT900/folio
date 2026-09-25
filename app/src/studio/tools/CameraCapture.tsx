@@ -882,10 +882,11 @@ export function CameraCapture({
             </span>
 
             {/* Review: pending scan decision. Session state only — nothing
-              enters the page collection until Accept. */}
+              enters the page collection until Accept. Compact so the
+              viewport keeps maximum height while deciding. */}
             {scan.pending !== null && (
-              <div className="mt-3 rounded-2xl border border-brass-400/40 bg-paper-50 p-3 dark:bg-ink-800/60">
-                <div className="flex gap-3">
+              <div className="rounded-2xl border border-brass-400/40 bg-paper-50 p-2.5 dark:bg-ink-800/60">
+                <div className="flex gap-2.5">
                   <img
                     src={scan.pending.previewUrl}
                     alt={
@@ -893,7 +894,7 @@ export function CameraCapture({
                         ? `Processed scan preview: ${scan.pending.original.name}`
                         : `Original capture preview: ${scan.pending.original.name}`
                     }
-                    className="h-28 w-20 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
+                    className="h-20 w-14 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
                   />
                   <div className="min-w-0 flex-1">
                     {scan.pending.result.status === 'processed' && (
@@ -949,42 +950,6 @@ export function CameraCapture({
               </div>
             )}
 
-            {/* Session strip: previews only, newest last with a brass ring. */}
-            {sessionPages.length > 0 && (
-              <div
-                className="mt-3 flex gap-2 overflow-x-auto pb-1"
-                aria-label="Pages captured this session"
-              >
-                {sessionPages.map((thumb, i) => (
-                  <div
-                    key={thumb.id}
-                    className={`relative h-16 w-12 shrink-0 overflow-hidden rounded-lg border bg-ink-950 ${
-                      i === sessionPages.length - 1
-                        ? 'border-brass-400 ring-2 ring-brass-400/40'
-                        : 'border-paper-300 dark:border-ink-700'
-                    }`}
-                    title={thumb.name}
-                  >
-                    {thumb.previewUrl ? (
-                      <img
-                        src={thumb.previewUrl}
-                        alt={`Captured page ${i + 1}: ${thumb.name}`}
-                        loading="lazy"
-                        decoding="async"
-                        draggable={false}
-                        className="h-full w-full object-contain"
-                      />
-                    ) : (
-                      <div className="h-full w-full animate-pulse" />
-                    )}
-                    <span className="absolute bottom-0.5 left-1 rounded bg-ink-900/80 px-1 font-mono text-[10px] text-paper-50">
-                      {i + 1}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
             {/* Camera dock: three equal cells (torch · Capture · Undo) so the
               shutter sits truly centered. Torch renders ONLY when the active
               track reports it; a rejected apply disables the control with a
@@ -992,7 +957,7 @@ export function CameraCapture({
             <div
               role="group"
               aria-label="Camera controls"
-              className="mt-3 grid grid-cols-3 items-center gap-2 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center sm:gap-5"
+              className="mt-3 grid grid-cols-3 items-center gap-2 sm:flex sm:justify-center sm:gap-5"
             >
               <div className="flex justify-start sm:order-1">
                 {caps.torch && !torchDead && (
@@ -1056,6 +1021,44 @@ export function CameraCapture({
               <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">
                 {controlNote}
               </p>
+            )}
+
+            {/* Session strip: previews only, newest last with a brass ring.
+              Lives at the very bottom (below the dock) with horizontal
+              scroll only, so captured pages never squeeze the viewport. */}
+            {sessionPages.length > 0 && (
+              <div
+                className="flex gap-1.5 overflow-x-auto pb-[env(safe-area-inset-bottom)]"
+                aria-label="Pages captured this session"
+              >
+                {sessionPages.map((thumb, i) => (
+                  <div
+                    key={thumb.id}
+                    className={`relative h-14 w-10 shrink-0 overflow-hidden rounded-lg border bg-ink-950 sm:h-16 sm:w-12 ${
+                      i === sessionPages.length - 1
+                        ? 'border-brass-400 ring-2 ring-brass-400/40'
+                        : 'border-paper-300 dark:border-ink-700'
+                    }`}
+                    title={thumb.name}
+                  >
+                    {thumb.previewUrl ? (
+                      <img
+                        src={thumb.previewUrl}
+                        alt={`Captured page ${i + 1}: ${thumb.name}`}
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                        className="h-full w-full object-contain"
+                      />
+                    ) : (
+                      <div className="h-full w-full animate-pulse" />
+                    )}
+                    <span className="absolute bottom-0.5 left-1 rounded bg-ink-900/80 px-1 font-mono text-[10px] text-paper-50">
+                      {i + 1}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
 
             <div className="flex flex-wrap items-center gap-2 text-sm">

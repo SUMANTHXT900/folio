@@ -832,15 +832,14 @@ async function main() {
           torch: document.querySelector('[aria-label^="Turn flashlight"]') !== null,
         };
       });
-    // Strip lives between viewport and dock: below the framing area,
-    // above the shutter row.
+    // Strip lives below the dock: under the framing area and the
+    // shutter row, scrolling horizontally at the very bottom.
     const hudSane = (g) =>
       g.viewport !== null &&
       g.shutter !== null &&
       g.shutter.top >= g.viewport.bottom - 1 &&
       (g.pill === null || (g.pill.top >= g.viewport.top && g.pill.bottom <= g.viewport.bottom)) &&
-      (g.strip === null ||
-        (g.strip.top >= g.viewport.bottom - 1 && g.strip.bottom <= g.shutter.top + 1)) &&
+      (g.strip === null || g.strip.top >= g.shutter.bottom - 1) &&
       g.torch === false;
     // Desktop composition (current 1280px viewport): reopen the scanner,
     // then wait until the measured viewport box is non-zero (the hook

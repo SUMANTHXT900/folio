@@ -213,3 +213,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Remaining.** Real-device Android validation; M4 untouched; no version bump.
 
 - **Deploy.** Viewport/page-card fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-25 — Deploy-skew build failure + scanner strip reorder (no version bump)
+
+- **Objective.** Fix the real-phone "Failed to fetch dynamically imported module" build failure and the strip-above-dock squeeze reported with screenshots.
+- **Work.** Shared `ErrorBlock` now detects stale code-split chunks and offers an explicit Reload (raw URL kept as diagnostics); `vite.config.ts` keeps outdated precaches so new service workers stop deleting previous deployments chunks under open pages (new BUGS F-12). Scanner: session strip moved below the dock (bottom-most, safe-area there), strip thumbs h-14/w-10 on phones, review panel compacted — viewport keeps maximum height. E2E layering assertion updated for the new order (caught the intent immediately: first wrote it backwards, the check failed honestly, corrected).
+- **Verification.** Unit **214 passed** (4 new stale-chunk tests, incl. a null-safety bug the tests caught in the helper); canonical E2E **41/41 + 4 SKIP in ~38s**; typecheck/lint/format clean; production build clean. Real-device re-check still PENDING.
+- **Remaining.** Real-device Android validation; M4 untouched; no version bump.

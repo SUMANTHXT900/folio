@@ -396,6 +396,28 @@ export function ResultMeta({ lines }: { lines: Array<string | null | undefined |
 
 /* Structured error block: friendly primary message + secondary engine detail.
    Never dumps raw JSON. Cancellation is rendered by callers, not here. */
+/**
+ * Detects a stale code-split chunk: the open page belongs to an older
+ * deployment whose hashed chunks no longer exist on hosting (typically
+ * right after a release, when a new service worker has cleaned old
+ * precaches). Retrying the operation can never succeed — only a reload
+ * to the current shell helps. Keep in sync with the lazy-route
+ * recovery copy in `StudioApp.tsx` (`RouteErrorBoundary`).
+ */
+const STALE_CHUNK_RE =
+  /Failed to fetch dynamically imported module|Loading chunk [\w-]+ failed|ChunkLoadError|Importing a module script failed|error loading dynamically imported module/i;
+
+export function isStaleChunkError(error: unknown): boolean {
+  if (error === null || error === undefined) return false;
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+        ? (error as { message: string }).message
+        : '';
+  return STALE_CHUNK_RE.test(message);
+}
+
 export function ErrorBlock({
   error,
   fallback = 'Something went wrong. Please try again.',
@@ -404,6 +426,29 @@ export function ErrorBlock({
   fallback?: string;
 }) {
   if (error === null || error === undefined) return null;
+  if (isStaleChunkError(error)) {
+    const raw = error instanceof Error ? error.message : fallback;
+    return (
+      <div className="mt-4" role="alert">
+        <p className="text-sm font-medium text-ink-900 dark:text-paper-100">
+          A new version of Folio was released while this page was open.
+        </p>
+        <p className="mt-1 text-sm text-ink-500 dark:text-ink-300">
+          Reload to continue with the latest version, then try again.
+        </p>
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="mt-2 rounded-xl bg-ink-900 px-4 py-2 text-sm font-medium text-paper-50 transition-opacity hover:opacity-90 dark:bg-paper-50 dark:text-ink-900"
+        >
+          Reload app
+        </button>
+        <p className="mt-2 font-mono text-[11px] text-ink-400/80 break-words dark:text-ink-300/70">
+          {raw}
+        </p>
+      </div>
+    );
+  }
   const code = (error as { code?: string }).code;
   const details = (error as { details?: string }).details;
   const engineMessage = (error as { engineMessage?: string }).engineMessage;

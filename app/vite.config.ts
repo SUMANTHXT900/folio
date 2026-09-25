@@ -32,6 +32,13 @@ export default defineConfig({
         // so `wasm` is included alongside the default asset types.
         globPatterns: ['**/*.{js,mjs,css,html,svg,png,wasm,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        // Keep outdated precaches: when a new service worker activates it
+        // must NOT delete the previous deployment's hashed chunks, or an
+        // already-open page from that deployment fails its next lazy
+        // import with "Failed to fetch dynamically imported module"
+        // (BUGS F-12). Browser quota eviction is the backstop; the
+        // ErrorBlock stale-chunk recovery covers any remaining skew.
+        cleanupOutdatedCaches: false,
       },
     }),
   ],
