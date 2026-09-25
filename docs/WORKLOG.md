@@ -264,3 +264,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Objective.** Phone reports: gallery imports → 100 MB+ PDFs (camera captures tiny); Images reorder/preview UX behind Rearrange.
 - **Work.** `imageImport.ts`: PNGs always convert to white-filled JPEG (budget-clamped, `.jpg` rename); `ImagesTool.addUploads` routed through normalized `importFiles` with progress text (raw `addFiles` retired from the tool). `PageGrid.tsx` rewritten to the Rearrange pattern (framer rows, handle drag, ↑/↓, preview modal on existing object URLs); `reorderPages` helper + hook `reorder`; dnd-kit uninstalled, `pageDrag.*` deleted. E2E: PNG-rename updates, pointer-drag + preview checks replace dnd-kit keyboard trio; upload block waits for both commits (async-race fix found by the suite).
 - **Verification.** Unit **229**; E2E **45/45 + 4 SKIP twice**; typecheck/lint/format clean. No version bump.
+
+- **Deploy.** PNG fix + page-list parity deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Gallery re-test: PNG screenshots should now build at JPEG scale.
