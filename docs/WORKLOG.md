@@ -211,3 +211,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Findings.** The desktop E2E HUD check caught a real race the fix also hardens: measuring between unhide and the observer refire yielded a zero box — now impossible by construction, and the E2E waits for a non-zero box. Debug confirmed the measured layout renders the fake 640×480 stream at exactly 710×532.5 with no bars.
 - **Verification.** Unit **210 passed** (4 new viewport math); canonical E2E **41/41 + 4 SKIP in ~39s**; typecheck/lint/format clean; production build clean (zero testbench strings). Real-device re-check still PENDING.
 - **Remaining.** Real-device Android validation; M4 untouched; no version bump.
+
+- **Deploy.** Viewport/page-card fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
