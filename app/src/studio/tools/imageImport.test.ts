@@ -48,7 +48,25 @@ describe('planNormalization', () => {
 });
 
 describe('prepareImportFile', () => {
-  it('retains original bytes for within-budget images', async () => {
+  it('converts within-budget PNGs to JPEG (engine has no DCT path for PNG)', async () => {
+    const decode = vi.fn(async () => ({ width: 1280, height: 960 }));
+    const resizeToJpeg = vi.fn(async () => new Uint8Array([9, 9, 9]));
+    const png = new File([new ArrayBuffer(2048)], 'screenshot.PNG', { type: 'image/png' });
+    const out = await prepareImportFile(png, { decode, resizeToJpeg });
+    expect(out.retainedOriginal).toBe(false);
+    expect(out.name).toBe('screenshot.jpg');
+    expect(out.file.type).toBe('image/jpeg');
+    expect(out.width).toBe(1280);
+    expect(out.height).toBe(960);
+    expect(resizeToJpeg).toHaveBeenCalledTimes(1);
+    expect(resizeToJpeg).toHaveBeenCalledWith(
+      expect.anything(),
+      { width: 1280, height: 960 },
+      0.92,
+    );
+  });
+
+  it('still retains within-budget JPEGs untouched', async () => {
     const decode = vi.fn(async () => ({ width: 1280, height: 960 }));
     const resizeToJpeg = vi.fn();
     const renderer: ImportRenderer = { decode, resizeToJpeg };

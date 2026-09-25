@@ -133,3 +133,11 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Root cause.** The viewport flexes to leftover column space, so every in-flow sibling added post-capture stole from it directly.
 - **Fix.** Top bar is single-row nowrap (truncating title, short "Pages (n)" CTA <400px, `shrink-0` buttons; device picker moved to the bottom hint row); the import note became a floating auto-dismissing (5s) pill over the viewport instead of an in-flow strip; the session strip stays in-flow below the dock (E2E layering contract) but slimmer with no duplicate safe-area padding.
 - **Verification.** New E2E check: narrow-phone framing-box height before vs after first capture — 263px → 263px, pixel-identical; canonical E2E 44/44 + 4 SKIP.
+
+### F-16 — Gallery PNG imports build 100 MB+ PDFs (camera JPEGs stayed small)
+
+- **Status.** Resolved (PNG→JPEG at import). **Area.** App import path (`app/src/studio/tools/imageImport.ts`, `ImagesTool.tsx`). Engine untouched. **Severity.** High (same class as F-14, other half: scanner Import + Add-images gallery entries).
+- **Symptoms.** Camera captures (always JPEG → DCT passthrough) built tiny PDFs, but gallery imports (PNG screenshots/photos retained byte-identical within budget) embedded as uncompressed raw RGB — 100 MB+ outputs.
+- **Root cause.** `prepareImportFile` retained within-budget originals regardless of format; `addFiles` never normalized at all. PNG has no engine DCT path by design (lossless raw), so retained PNG bytes exploded.
+- **Fix.** PNGs always convert to white-filled JPEG at import (budget-clamped, `.jpg` rename — truthful, matches scan naming); `Add images`/DropZone now run the same normalized `importFiles` path with progress text instead of raw `addFiles`. JPEG behavior unchanged (originals retained).
+- **Verification.** New unit tests (PNG conversion identity, JPEG retention); E2E upload block updated for the rename + still builds; canonical E2E 45/45 + 4 SKIP.

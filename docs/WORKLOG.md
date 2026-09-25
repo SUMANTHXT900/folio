@@ -258,3 +258,9 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit 228; E2E **44/44 + 4 SKIP** (new: framing-box 263px → 263px across first capture, pixel-identical); typecheck/lint/format clean. No version bump.
 
 - **Deploy.** Viewfinder fix deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-26 — Gallery PNG size fix (F-16) + Rearrange-parity page list (D18)
+
+- **Objective.** Phone reports: gallery imports → 100 MB+ PDFs (camera captures tiny); Images reorder/preview UX behind Rearrange.
+- **Work.** `imageImport.ts`: PNGs always convert to white-filled JPEG (budget-clamped, `.jpg` rename); `ImagesTool.addUploads` routed through normalized `importFiles` with progress text (raw `addFiles` retired from the tool). `PageGrid.tsx` rewritten to the Rearrange pattern (framer rows, handle drag, ↑/↓, preview modal on existing object URLs); `reorderPages` helper + hook `reorder`; dnd-kit uninstalled, `pageDrag.*` deleted. E2E: PNG-rename updates, pointer-drag + preview checks replace dnd-kit keyboard trio; upload block waits for both commits (async-race fix found by the suite).
+- **Verification.** Unit **229**; E2E **45/45 + 4 SKIP twice**; typecheck/lint/format clean. No version bump.

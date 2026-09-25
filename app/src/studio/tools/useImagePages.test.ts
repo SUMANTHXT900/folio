@@ -141,7 +141,7 @@ describe('useImagePages', () => {
             public height: number,
           ) {}
           getContext() {
-            return { drawImage: vi.fn() };
+            return { drawImage: vi.fn(), fillRect: vi.fn(), fillStyle: '' };
           }
           async convertToBlob() {
             return new Blob([new Uint8Array([9, 9])], { type: 'image/jpeg' });

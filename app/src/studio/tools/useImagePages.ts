@@ -11,8 +11,8 @@ import {
   createPage,
   isImageFile,
   movePage,
-  movePageTo,
   removePage,
+  reorderPages,
   rotatePage,
   type ImagePage,
   type ImageSource,
@@ -20,11 +20,6 @@ import {
 import { prepareImportFile, runImportQueue, type PrepareImportResult } from './imageImport';
 
 export type { ImagePage };
-
-export interface AddFilesResult {
-  added: number;
-  skipped: number;
-}
 
 export interface ImportSummary {
   added: number;
@@ -90,7 +85,7 @@ export function useImagePages() {
 
   /** Adds picked files; non-JPEG/PNG entries are skipped and counted. */
   const addFiles = useCallback(
-    (files: File[], source: ImageSource): AddFilesResult => {
+    (files: File[], source: ImageSource): { added: number; skipped: number } => {
       const good = files.filter(isImageFile);
       addEntries(good.map((file) => ({ file, name: file.name || 'image', source })));
       return { added: good.length, skipped: files.length - good.length };
@@ -145,8 +140,8 @@ export function useImagePages() {
     setPages((prev) => movePage(prev, id, dir));
   }, []);
 
-  const moveTo = useCallback((id: string, index: number) => {
-    setPages((prev) => movePageTo(prev, id, index));
+  const reorder = useCallback((ids: string[]) => {
+    setPages((prev) => reorderPages(prev, ids));
   }, []);
 
   const remove = useCallback((id: string) => {
@@ -168,5 +163,15 @@ export function useImagePages() {
     });
   }, []);
 
-  return { pages, addFiles, addEntries, importFiles, move, moveTo, remove, rotate, clear };
+  return {
+    pages,
+    addFiles,
+    addEntries,
+    importFiles,
+    move,
+    remove,
+    rotate,
+    clear,
+    reorder,
+  };
 }

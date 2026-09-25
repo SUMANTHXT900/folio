@@ -9,10 +9,14 @@
  * temporary decode/canvas before the next file, and yields to the event
  * loop between files so the UI can paint progress.
  *
- * Images already inside the pixel budget keep their ORIGINAL bytes —
+ * JPEGs already inside the pixel budget keep their ORIGINAL bytes —
  * no unnecessary recompression, no quality loss. Oversized images are
- * re-encoded once at the existing capture quality (~q0.92). Aspect
- * ratio is always preserved; small images are never upscaled.
+ * re-encoded once at the existing capture quality (~q0.92). PNGs are
+ * ALWAYS converted to JPEG (white-filled, budget-clamped): the engine
+ * embeds PNGs as uncompressed raw RGB, so a retained 2 MB screenshot
+ * would become ~15 MB in the PDF (real-phone report: 100 MB+ outputs
+ * from gallery imports while JPEG camera captures stayed small).
+ * Aspect ratio is always preserved; small images are never upscaled.
  */
 
 /** Working long edge for imported images (engineering constant). */
@@ -59,6 +63,13 @@ export function planNormalization(
   };
 }
 
+/** PNG inputs (MIME or extension): the engine has no DCT path for PNG,
+ * so retained PNG bytes would embed as raw RGB — always convert. */
+export function isPngFile(file: File): boolean {
+  if (file.type === 'image/png') return true;
+  if (file.type === 'image/jpeg') return false;
+  return /\.png$/i.test(file.name);
+}
 /** Minimal renderer seam so planning logic is testable without a DOM. */
 export interface ImportRenderer {
   decode(file: File | Blob): Promise<ImageDimensions>;
@@ -90,6 +101,10 @@ export const browserImportRenderer: ImportRenderer = {
       const ctx = (canvas as HTMLCanvasElement | OffscreenCanvas).getContext('2d') as
         CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
       if (ctx === null) throw new Error('2D canvas unavailable for import normalization.');
+      // White-fill first: transparent PNG pixels must composite to white
+      // (JPEG has no alpha; an unfilled canvas bakes them to black).
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, target.width, target.height);
       ctx.drawImage(bitmap, 0, 0, target.width, target.height);
       if (canvas instanceof HTMLCanvasElement) {
         const blob = await new Promise<Blob | null>((resolve) =>
@@ -112,6 +127,8 @@ export const browserImportRenderer: ImportRenderer = {
  * Prepares ONE selected file for import. Decodes a single bitmap,
  * decides by pixel dimensions, and either retains the original bytes or
  * re-encodes once — no temporary object URLs, no retained canvas.
+ * PNGs always re-encode (white-filled JPEG): retained PNG bytes would
+ * embed as uncompressed raw RGB downstream.
  */
 export async function prepareImportFile(
   file: File,
@@ -125,7 +142,7 @@ export async function prepareImportFile(
     throw new Error(`could not read image dimensions for ${file.name}`);
   }
   const target = planNormalization(dims, maxLongEdge);
-  if (target === null) {
+  if (target === null && !isPngFile(file)) {
     return {
       file,
       name: file.name,
@@ -134,14 +151,15 @@ export async function prepareImportFile(
       height: dims.height,
     };
   }
-  const bytes = await renderer.resizeToJpeg(file, target, quality);
+  const size = target ?? dims;
+  const bytes = await renderer.resizeToJpeg(file, size, quality);
   const name = file.name.replace(/\.(jpe?g|png)$/i, '') + '.jpg';
   return {
     file: new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' }),
     name,
     retainedOriginal: false,
-    width: target.width,
-    height: target.height,
+    width: size.width,
+    height: size.height,
   };
 }
 

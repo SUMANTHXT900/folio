@@ -52,8 +52,7 @@ const ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
  * (never in React state); pages hold File/Blob handles + preview URLs.
  */
 export default function ImagesTool() {
-  const { pages, addFiles, addEntries, importFiles, move, moveTo, remove, rotate, clear } =
-    useImagePages();
+  const { pages, addEntries, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [cameraMode, setCameraMode] = useState(false);
   // Session boundary: ids captured since the scanner was opened. Retake
@@ -65,6 +64,7 @@ export default function ImagesTool() {
   const [error, setError] = useState<unknown>(null);
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
+  const [importing, setImporting] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
   const moreInputRef = useRef<HTMLInputElement>(null);
   const [cameraSupported] = useState(
@@ -74,12 +74,31 @@ export default function ImagesTool() {
       typeof navigator.mediaDevices.getUserMedia === 'function',
   );
 
-  const addUploads = (incoming: File[]) => {
-    const result = addFiles(incoming, 'upload');
-    if (result.skipped > 0) {
-      setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
-    } else {
-      setError(null);
+  const addUploads = async (incoming: File[]) => {
+    // Same normalized path as scanner imports: pixel-budget resize +
+    // PNG→JPEG conversion, one file at a time. Raw gallery PNGs would
+    // otherwise embed as uncompressed RGB downstream (100 MB+ PDFs).
+    setImporting('Preparing images…');
+    try {
+      const summary = await importFiles(incoming, 'upload', {
+        onProgress: (completed, total) =>
+          setImporting(`Preparing images… ${completed} of ${total}`),
+      });
+      if (summary.skipped > 0) {
+        setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
+      } else if (summary.failed > 0) {
+        setError(
+          new Error(
+            summary.firstError !== null
+              ? `Couldn't add ${summary.failed} image(s): ${summary.firstError}`
+              : `Couldn't add ${summary.failed} image(s).`,
+          ),
+        );
+      } else {
+        setError(null);
+      }
+    } finally {
+      setImporting(null);
     }
   };
 
@@ -327,7 +346,7 @@ export default function ImagesTool() {
               <PageGrid
                 pages={pages}
                 onMove={move}
-                onMoveTo={moveTo}
+                onReorder={reorder}
                 onRemove={onRemovePage}
                 onRotate={rotate}
               />
@@ -344,13 +363,18 @@ export default function ImagesTool() {
                 multiple
                 className="hidden"
                 onChange={(e) => {
-                  addUploads(Array.from(e.target.files ?? []));
+                  void addUploads(Array.from(e.target.files ?? []));
                   e.target.value = '';
                 }}
               />
+              {importing !== null && (
+                <p role="status" className="text-xs text-ink-400 dark:text-ink-300">
+                  {importing}
+                </p>
+              )}
               <Button variant="ghost" onClick={() => moreInputRef.current?.click()}>
                 Add images
-              </Button>
+              </Button>{' '}
               {cameraSupported && !cameraMode && (
                 <Button
                   variant="ghost"

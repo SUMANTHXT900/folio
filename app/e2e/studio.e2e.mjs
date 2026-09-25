@@ -493,13 +493,16 @@ async function main() {
           ?.click();
       }, ariaLabel);
     await upload(page, 'input[type="file"]', [red, blue]);
-    await page.waitForFunction(() => document.body.innerText.includes('Build PDF'), {
-      timeout: 30000,
-    });
+    // Uploads normalize sequentially (PNG→JPEG conversion included):
+    // wait for BOTH commits, not just the Build button (first commit).
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
+      { timeout: 120000 },
+    );
     let cards = await cardOrder();
     check(
       'images page manager shows two previews in upload order',
-      cards.length === 2 && cards[0].includes('red-wide.png') && cards[1].includes('blue-tall.jpg'),
+      cards.length === 2 && cards[0].includes('red-wide.jpg') && cards[1].includes('blue-tall.jpg'),
       cards.join(' | '),
     );
     // Guaranteed reorder mechanism: move blue earlier → blue first.
@@ -515,61 +518,79 @@ async function main() {
     cards = await cardOrder();
     check(
       'images move controls reorder pages',
-      cards[0].includes('blue-tall.jpg') && cards[1].includes('red-wide.png'),
+      cards[0].includes('blue-tall.jpg') && cards[1].includes('red-wide.jpg'),
       cards.join(' | '),
     );
-    // Keyboard drag (dnd-kit KeyboardSensor): lift the first card, move
-    // right, drop — exercises the same sortable path as pointer/touch drag.
-    // Key steps need settle time: lift measurement and indicator commits
-    // are async renders, so back-to-back presses race them.
+    // Preview modal (Rearrange parity): click the first row's thumbnail
+    // → dialog with the full image → Close dismisses it.
     await page.evaluate(() => {
-      document
-        .querySelector('ul[aria-label="Pages in PDF order"] > li button[aria-label^="Drag"]')
-        ?.focus();
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Preview blue-tall.jpg')
+        ?.click();
     });
-    await page.keyboard.press('Space');
-    // Settle time: lift measurement and indicator commits are async
-    // renders — back-to-back presses race them (proven 3/3 with sleeps).
-    await new Promise((r) => setTimeout(r, 400));
-    let overlayShown = false;
+    let previewShown = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[data-drag-overlay]') !== null, {
+      await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, {
         timeout: 10000,
       });
-      overlayShown = true;
+      previewShown = true;
     } catch {
-      overlayShown = false;
+      previewShown = false;
     }
-    check('images keyboard drag lifts a DragOverlay', overlayShown);
-    await page.keyboard.press('ArrowRight');
-    await new Promise((r) => setTimeout(r, 500));
-    let indicatorShown = false;
+    check('images preview opens a dialog for the page', previewShown);
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Close')?.click();
+    });
+    let previewClosed = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[data-drop-indicator]') !== null, {
+      await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null, {
         timeout: 10000,
       });
-      indicatorShown = true;
+      previewClosed = true;
     } catch {
-      indicatorShown = false;
+      previewClosed = false;
     }
-    check('images drag shows an insertion indicator', indicatorShown);
-    await page.keyboard.press('Space');
-    await page.waitForFunction(
-      () =>
-        document
-          .querySelector('ul[aria-label="Pages in PDF order"] > li')
-          ?.getAttribute('aria-label')
-          ?.includes('red-wide.png'),
-      { timeout: 10000 },
-    );
+    check('images preview dialog closes', previewClosed);
+    // Pointer drag on the handle (framer-motion Reorder, same path as
+    // touch long-press): drag the first row below the second → order
+    // flips. Settle before measuring: reorder commits on drop.
+    const handleBox = await page.evaluate(() => {
+      const btn = document.querySelector(
+        'ul[aria-label="Pages in PDF order"] > li [aria-label^="Drag"]',
+      );
+      const r = btn?.getBoundingClientRect();
+      return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
+    });
+    let dragReordered = false;
+    if (handleBox !== null) {
+      await page.mouse.move(handleBox.x, handleBox.y);
+      await page.mouse.down();
+      await page.mouse.move(handleBox.x, handleBox.y + 140, { steps: 15 });
+      await new Promise((r) => setTimeout(r, 400));
+      await page.mouse.up();
+      try {
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector('ul[aria-label="Pages in PDF order"] > li')
+              ?.getAttribute('aria-label')
+              ?.includes('red-wide.jpg'),
+          { timeout: 10000 },
+        );
+        dragReordered = true;
+      } catch {
+        dragReordered = false;
+      }
+    }
+    check('images handle drag reorders pages', dragReordered);
     cards = await cardOrder();
     check(
-      'images keyboard drag reorders pages',
-      cards[0].includes('red-wide.png') && cards[1].includes('blue-tall.jpg'),
+      'images drag result keeps both pages',
+      cards.length === 2 && cards[0].includes('red-wide.jpg') && cards[1].includes('blue-tall.jpg'),
       cards.join(' | '),
     );
     // Rotate red 90° (badge appears; build exercises the canvas re-encode path).
-    await clickButton('Rotate red-wide.png 90 degrees clockwise');
+    await clickButton('Rotate red-wide.jpg 90 degrees clockwise');
     let rotated = false;
     try {
       await page.waitForFunction(() => document.body.innerText.includes('90°'), {
@@ -594,7 +615,7 @@ async function main() {
     cards = await cardOrder();
     check(
       'images remove + add-more keep the collection consistent',
-      cards.length === 2 && cards[0].includes('red-wide.png'),
+      cards.length === 2 && cards[0].includes('red-wide.jpg'),
       cards.join(' | '),
     );
     await page.evaluate(() => {

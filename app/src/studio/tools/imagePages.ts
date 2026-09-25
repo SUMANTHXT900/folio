@@ -96,6 +96,28 @@ export function movePageTo(pages: ImagePage[], id: string, to: number): ImagePag
   return next;
 }
 
+/**
+ * Applies a full id order (framer-motion `Reorder.Group` result).
+ * Unknown ids are ignored; pages missing from the order keep their
+ * relative order at the end. Returns a new array; never mutates.
+ */
+export function reorderPages(pages: ImagePage[], ids: string[]): ImagePage[] {
+  const byId = new Map(pages.map((p) => [p.id, p]));
+  const seen = new Set<string>();
+  const next: ImagePage[] = [];
+  for (const id of ids) {
+    const page = byId.get(id);
+    if (page !== undefined && !seen.has(id)) {
+      next.push(page);
+      seen.add(id);
+    }
+  }
+  for (const page of pages) {
+    if (!seen.has(page.id)) next.push(page);
+  }
+  return next;
+}
+
 /** Cycles one page's rotation 0 → 90 → 180 → 270 → 0. */
 export function rotatePage(pages: ImagePage[], id: string): ImagePage[] {
   return pages.map((p) =>

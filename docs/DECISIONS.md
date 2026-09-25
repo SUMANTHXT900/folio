@@ -137,3 +137,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** Engine-wide `/FlateDecode` on raw (rejected: still ~2x the JPEGs). Lowering the app import budget/quality (rejected: punishes everyones quality to dodge an engine bug). User-facing quality slider (deferred: Compress tool territory).
 - **Consequences.** Output size ≈ sum of input JPEG sizes; EXIF-rotated/progressive inputs still shrink ~10x via the fallback. Tests pin byte identity, DCT filter presence, and fallback dims.
 - **Status.** Decided, implemented, verified (Rust 354 passing incl. 8 new passthrough/parser tests, E2E 43/43 + 4 SKIP).
+
+## D18 — Images page manager uses the Rearrange list UX; PNGs normalize to JPEG at import
+
+- **Decision.** `PageGrid` rewritten from a dnd-kit card grid to the Rearrange pattern: vertical rows (grip-handle framer-motion drag with pan-y scroll, position numbers, ↑/↓ arrows, click-to-preview modal reusing the page object URL — no new URLs), `reorderPages` pure helper + hook `reorder` for full-list commits. dnd-kit deps uninstalled; `pageDrag.ts` deleted. Separately: every Images entry path (scanner Import, Add-images, DropZone) runs pixel-budget normalization with mandatory PNG→JPEG conversion (white-filled, `.jpg` rename).
+- **Reason.** Real-phone reports: (1) gallery PNG imports built 100 MB+ PDFs while camera JPEGs stayed small (F-16); (2) the grid reorder/preview UX lagged Rearrange and the user asked for parity.
+- **Alternatives considered.** Keeping the dnd-kit grid and adding a preview modal (rejected: two drag systems to maintain; user explicitly asked for the Rearrange UX). PNG→JPEG only in the scanner (rejected: Add-images had the identical flaw).
+- **Consequences.** Upload fixture names change (`red-wide.png` → `red-wide.jpg`) — E2E updated; E2E drag coverage moves from dnd-kit keyboard to handle pointer-drag; unit count changes (pageDrag suite gone, reorder/PNG suites added).
+- **Status.** Decided, implemented, verified (unit 229, E2E 45/45 + 4 SKIP twice).

@@ -14,6 +14,7 @@ import {
   movePage,
   movePageTo,
   removePage,
+  reorderPages,
   rotatePage,
   type ImagePage,
 } from './imagePages';
@@ -142,5 +143,23 @@ describe('isImageFile', () => {
     expect(isImageFile({ type: '', name: 'c.jpeg' })).toBe(true);
     expect(isImageFile({ type: 'image/gif', name: 'd.gif' })).toBe(false);
     expect(isImageFile({ type: 'application/pdf', name: 'e.pdf' })).toBe(false);
+  });
+});
+
+describe('reorderPages', () => {
+  const pages = () => [page('a'), page('b'), page('c'), page('d')];
+
+  it('applies a full id order (Reorder.Group result)', () => {
+    expect(ids(reorderPages(pages(), ['c', 'a', 'd', 'b']))).toEqual(['c', 'a', 'd', 'b']);
+  });
+
+  it('ignores unknown ids and appends missing pages in place', () => {
+    expect(ids(reorderPages(pages(), ['c', 'zzz', 'a']))).toEqual(['c', 'a', 'b', 'd']);
+  });
+
+  it('never mutates the input', () => {
+    const before = pages();
+    reorderPages(before, ['d', 'c', 'b', 'a']);
+    expect(ids(before)).toEqual(['a', 'b', 'c', 'd']);
   });
 });
