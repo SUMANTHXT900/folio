@@ -1065,6 +1065,90 @@ async function main() {
     }
   }
 
+  // ---- Images: no-document fallback auto-accepts without nagging ----
+  // A fake camera streaming blank frames can never yield a boundary, so
+  // the fallback path triggers deterministically: the page must appear
+  // on its own (no "Use original" decision), with a transient note and
+  // no blocking review panel.
+  {
+    const blankY4m = path.join(os.tmpdir(), 'folio-scan-blank.y4m');
+    {
+      const w = 640;
+      const h = 480;
+      const fd = fs.openSync(blankY4m, 'w');
+      fs.writeSync(fd, `YUV4MPEG2 W${w} H${h} F30:1 Ip A1:1 C420\n`);
+      const uvSize = (w / 2) * (h / 2);
+      for (let f = 0; f < 30; f += 1) {
+        fs.writeSync(fd, 'FRAME\n');
+        fs.writeSync(fd, Buffer.alloc(w * h, 22));
+        fs.writeSync(fd, Buffer.alloc(uvSize, 128));
+        fs.writeSync(fd, Buffer.alloc(uvSize, 128));
+      }
+      fs.closeSync(fd);
+    }
+    const blankBrowser = await puppeteer.launch({
+      executablePath: CHROME,
+      headless: 'shell',
+      protocolTimeout: 600000,
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--mute-audio',
+        '--disable-extensions',
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        `--use-file-for-fake-video-capture=${blankY4m}`,
+      ],
+    });
+    const { page, consoleErrors } = await newPage(blankBrowser);
+    await gotoTool(page, 'images');
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.includes('Scan with camera'))
+        ?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Capture page')
+        ?.click();
+    });
+    // The page commits itself: no blocking "Use original" review.
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 1,
+      { timeout: 120000 },
+    );
+    const fallback = await page.evaluate(() => ({
+      note: document.body.innerText.includes('Added as photo'),
+      blockingReview: [...document.querySelectorAll('button')].some(
+        (b) => b.textContent === 'Use original' || b.textContent === 'Use scan',
+      ),
+      cards: [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
+        (li) => li.getAttribute('aria-label') ?? '',
+      ),
+    }));
+    check(
+      'images fallback auto-accepts the photo with a note and no blocking review',
+      fallback.note && !fallback.blockingReview && fallback.cards[0].includes('scan-'),
+      fallback.cards.join(' | '),
+    );
+    if (consoleErrors.length > 0)
+      console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
+    await page.close();
+    await blankBrowser.close();
+    try {
+      fs.unlinkSync(blankY4m);
+    } catch {
+      // Best effort temp cleanup.
+    }
+  }
+
   // ---- Compress: disabled with future note ----
   {
     const { page, consoleErrors } = await newPage(browser);

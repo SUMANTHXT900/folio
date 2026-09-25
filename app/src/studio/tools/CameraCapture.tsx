@@ -33,6 +33,7 @@ import {
   type CameraCapabilities,
 } from './cameraCapabilities';
 import { buildVideoConstraints } from './cameraConstraints';
+import { prepareImportFile } from './imageImport';
 import { useContainBox } from './scanViewport';
 import { useScanProcessor } from './scan/useScanProcessor';
 
@@ -502,6 +503,37 @@ export function CameraCapture({
   };
 
   /**
+   * Fallback auto-accept: when detection finds no reliable boundary, the
+   * photo the user just framed IS the page — interrupting every capture
+   * with a "Use original / Discard" decision is pure nagging (real-device
+   * feedback: most captures fall back). The file is normalized through
+   * the same pixel-budget path as imports, committed to the collection,
+   * and announced non-blockingly. Undo/session removal still applies.
+   * Processed and error reviews keep their explicit panels.
+   */
+  const autoAcceptGen = useRef(0);
+  useEffect(() => {
+    const pending = scan.pending;
+    if (pending === null || pending.result.status !== 'original') return;
+    const gen = (autoAcceptGen.current += 1);
+    void (async () => {
+      let file = pending.original;
+      let name = pending.original.name;
+      try {
+        const prepared = await prepareImportFile(pending.original);
+        file = prepared.file as File;
+        name = prepared.name;
+      } catch {
+        // Normalization is best-effort: true original on failure.
+      }
+      if (autoAcceptGen.current !== gen) return; // Superseded/discarded.
+      onScanAccept({ file, original: null, name });
+      scan.discard();
+      setImportNote('Added as photo — no boundary found.');
+    })();
+  }, [scan.pending]);
+
+  /**
    * Low-res live tick (~160px, best-effort): guidance only. Skipped
    * while a capture scan or review is active (latest-frame semantics
    * live in the hook); live corners are NEVER reused for the final scan.
@@ -902,11 +934,6 @@ export function CameraCapture({
                         Scan ready — perspective-corrected
                       </p>
                     )}
-                    {scan.pending.result.status === 'original' && (
-                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                        No reliable document boundary found
-                      </p>
-                    )}
                     {scan.pending.result.status === 'error' && (
                       <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
                         Scanner unavailable
@@ -915,8 +942,6 @@ export function CameraCapture({
                     <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
                       {scan.pending.result.status === 'processed' &&
                         'The corrected scan is shown. The original photo is kept for fallback.'}
-                      {scan.pending.result.status === 'original' &&
-                        'Use the original photo as the page, or retake.'}
                       {scan.pending.result.status === 'error' &&
                         'Use the original photo, or retry the scan.'}
                     </p>
@@ -924,24 +949,28 @@ export function CameraCapture({
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {scan.pending.result.status === 'processed' && (
-                    <Button onClick={() => acceptReview(true)}>Use scan</Button>
+                    <>
+                      <Button onClick={() => acceptReview(true)}>Use scan</Button>
+                      <Button variant="ghost" onClick={() => acceptReview(false)}>
+                        Use original
+                      </Button>
+                    </>
                   )}
-                  <Button
-                    variant={scan.pending.result.status === 'processed' ? 'ghost' : 'primary'}
-                    onClick={() => acceptReview(false)}
-                  >
-                    Use original
-                  </Button>
                   {scan.pending.result.status === 'error' && (
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        const current = scan.pending;
-                        if (current !== null) scan.processCapture(current.original);
-                      }}
-                    >
-                      Retry
-                    </Button>
+                    <>
+                      <Button
+                        variant="primary"
+                        onClick={() => {
+                          const current = scan.pending;
+                          if (current !== null) scan.processCapture(current.original);
+                        }}
+                      >
+                        Retry
+                      </Button>
+                      <Button variant="ghost" onClick={() => acceptReview(false)}>
+                        Use original
+                      </Button>
+                    </>
                   )}
                   <Button variant="ghost" onClick={() => scan.discard()}>
                     Discard
@@ -1061,12 +1090,13 @@ export function CameraCapture({
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="text-xs text-ink-400 dark:text-ink-300">
-                Captures and imports join the page list below.
-                {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}
-              </span>
-            </div>
+            {caps.supportsTapToFocus && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-xs text-ink-400 dark:text-ink-300">
+                  Tap the preview to refocus.
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -25,7 +25,7 @@
 ## Current work
 
 - Hardening milestone done (P0–P6, see WORKLOG): incremental Rust embed, staged-transfer ownership, single-Blob download, negotiated camera constraints. No version bump.
-- M3.x mobile import + scanner harden done (see WORKLOG 2026-09-25): memory-safe sequential import normalization (pixel budget, `MAX_IMPORT_LONG_EDGE = 2500`), immersive portaled scanner surface (fixed full-bleed on phones, centered panel on desktop), Import moved into the scanner bar, scan-mode selector removed. New import/UI tests; canonical E2E **41/41 + 4 SKIP**.
+- M3.x mobile import + scanner harden done (see WORKLOG 2026-09-25): memory-safe sequential import normalization (pixel budget, `MAX_IMPORT_LONG_EDGE = 2500`), immersive portaled scanner surface (fixed full-bleed on phones, centered panel on desktop), Import moved into the scanner bar, scan-mode selector removed. New import/UI tests; canonical E2E **42/42 + 4 SKIP**.
 - **Real-device Android validation is PENDING**: the 30-photo crash scenario must be re-tested on the affected phone before v2.0 release validation.
 
 ## Pending work
@@ -60,7 +60,7 @@ None. No blocked items.
 | Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
 | Frontend unit tests (`npm test`)                              | 214 passing (import normalization + bulk import + scanner surface + stale-chunk recovery)                                                                       |
 | Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
-| Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 41/41 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
+| Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 42/42 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |
 
 These values were established during the v1.7.0 integration verification (fresh-clone runs included), re-confirmed by the Phase 3 verification in `docs/DEVELOPMENT.md`, re-confirmed for v1.7.1 (F-7–F-10, UI-only), and updated for v1.8.0 (Images → PDF page assembly: +16 frontend tests, +4 canonical E2E checks). The 25/25 full-corpus result remains the benchmark for runs _with_ the optional corpus; the 25/25 + 4 SKIP result is the expected fresh-clone result _without_ it. If any number changes, update this table in the same commit.
