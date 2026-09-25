@@ -201,3 +201,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Findings.** The track zoom range has no focal-length meaning (`getCapabilities().zoom` is a device-internal scale; the phone showed "1×" while the ultrawide lens was active) — recorded as BUGS F-11 with a ROADMAP revisit item.
 - **Verification.** Unit **206 passed**; canonical E2E **41/41 + 4 SKIP in 42.5s** (scanner surface check now also asserts zero zoom controls and the View pages CTA); typecheck/lint/format clean. Real-device Android re-check still PENDING.
 - **Remaining.** Real-device validation; M4 untouched; no version bump.
+
+- **Deploy.** Scanner-shell fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
