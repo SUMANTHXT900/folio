@@ -231,3 +231,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Findings.** The support-max selection picked half pages; area-order + merge fixed it (verified: spread found at support 0.99). Synthetic bench still fast (12 MP detect ~90–170 ms). Output size without passthrough is inherent (raw RGB ≈ w×h×3/page) — documented honestly, not fixed here.
 - **Verification.** Scan Rust **34 passed** (4 new fixtures + 2 merge tests); unit **214 passed**; canonical E2E **42/42 + 4 SKIP in ~37s** (new: blank-camera fallback auto-accepts with note, no blocking review); typecheck/lint/format clean; production build clean. Real-device re-check still PENDING.
 - **Remaining.** Real-device Android validation (the actual notebook photos); M4 untouched; no version bump.
+
+- **Deploy.** Detection + UX fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`). Scan WASM 514 → 541 KB (still « 8 MB precache budget).
