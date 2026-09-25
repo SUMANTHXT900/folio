@@ -89,10 +89,9 @@ async function startAndReady(
   result: { current: ReturnType<typeof useScanProcessor> },
   worker: FakeWorker,
   file: File,
-  mode: 'document' | 'grayscale' | 'blackwhite' = 'document',
 ): Promise<void> {
   act(() => {
-    result.current.processCapture(file, mode);
+    result.current.processCapture(file);
   });
   await act(async () => undefined);
   act(() => {
@@ -142,7 +141,7 @@ describe('useScanProcessor', () => {
   it('offers the original on no-detection fallback', async () => {
     const worker = new FakeWorker();
     const { result } = renderHook(() => useScanProcessor(() => worker as unknown as Worker));
-    await startAndReady(result, worker, captureFile(), 'grayscale');
+    await startAndReady(result, worker, captureFile());
     const { jobId } = worker.processJob();
     act(() => {
       worker.deliver({ protocol: 1, kind: 'result', jobId, resultJson: fallbackJson() });
@@ -182,11 +181,11 @@ describe('useScanProcessor', () => {
     const { result } = renderHook(() => useScanProcessor(() => worker as unknown as Worker));
     // Queue both captures; readiness arrives after both are registered.
     act(() => {
-      result.current.processCapture(captureFile('scan-001.jpg'), 'document');
+      result.current.processCapture(captureFile('scan-001.jpg'));
     });
     await act(async () => undefined);
     act(() => {
-      result.current.processCapture(captureFile('scan-002.jpg'), 'document');
+      result.current.processCapture(captureFile('scan-002.jpg'));
     });
     await act(async () => undefined);
     act(() => {

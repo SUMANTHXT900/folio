@@ -6,7 +6,7 @@
  * (tracks stopped, onDone called). Real frame capture and capability
  * controls are manual-device-matrix only (Phase 3 adds capability tests).
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CameraCapture } from './CameraCapture';
 
@@ -61,6 +61,12 @@ afterEach(() => {
 });
 
 const noop = () => undefined;
+const noopImport = async () => ({
+  added: 0,
+  failed: 0,
+  cancelled: false,
+  firstError: null,
+});
 
 describe('CameraCapture failure states', () => {
   it('maps permission denial to friendly copy with retry + back actions', async () => {
@@ -72,7 +78,7 @@ describe('CameraCapture failure states', () => {
     const onDone = vi.fn();
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
@@ -96,7 +102,7 @@ describe('CameraCapture failure states', () => {
     });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -113,7 +119,7 @@ describe('CameraCapture scanner UI', () => {
     const onDone = vi.fn();
     const { unmount } = render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
@@ -145,7 +151,7 @@ describe('CameraCapture scanner UI', () => {
     mockMedia({ getUserMedia: async () => fakeStream });
     const { unmount } = render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -163,7 +169,7 @@ describe('CameraCapture responsive HUD', () => {
     mockMedia({ getUserMedia: async () => fakeStream });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -191,7 +197,7 @@ describe('CameraCapture responsive HUD', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -214,6 +220,94 @@ describe('CameraCapture responsive HUD', () => {
   });
 });
 
+describe('CameraCapture scanner surface (M3.x)', () => {
+  it('has Import in the scanner bar and no scan-mode selector', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    expect(screen.getByLabelText('Import images from files')).toBeTruthy();
+    // The mode selector is gone entirely: no Original/Document/
+    // Grayscale/B&W group anywhere in the scanner.
+    expect(screen.queryByLabelText('Capture mode')).toBeNull();
+    expect(screen.queryByLabelText(/scan mode/i)).toBeNull();
+    expect(screen.queryByText('Grayscale')).toBeNull();
+    expect(screen.queryByText('B&W')).toBeNull();
+    // Immersive root: fixed interaction surface (mobile) with safe-area.
+    const root = document.querySelector('[data-scanner-root]') as HTMLElement | null;
+    expect(root).not.toBeNull();
+    expect(root?.className).toContain('fixed');
+    expect(root?.className).toContain('flex');
+    // Desktop keeps a bounded centered panel instead of the phone overlay.
+    expect(root?.className).toContain('md:w-[46rem]');
+    expect(root?.className).toContain('md:left-1/2');
+    // Safe-area handling ships as utility classes on the immersive root.
+    expect(root?.className).toContain('safe-area-inset-top');
+    expect(root?.className).toContain('safe-area-inset-bottom');
+  });
+
+  it('runs a picker import with progress and cancel wiring', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    let captured: {
+      files: File[];
+      progress: (completed: number, total: number, name: string) => void;
+      signal: AbortSignal;
+      finish: () => void;
+    } | null = null;
+    const onImportFiles = vi.fn(
+      async (
+        files: File[],
+        progress: (completed: number, total: number, name: string) => void,
+        signal: AbortSignal,
+      ) => {
+        await new Promise<void>((resolve) => {
+          captured = { files, progress, signal, finish: resolve };
+          signal.addEventListener('abort', () => resolve());
+        });
+        return { added: files.length, failed: 0, cancelled: signal.aborted, firstError: null };
+      },
+    );
+    render(
+      <CameraCapture
+        onImportFiles={onImportFiles}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    const input = document.querySelector(
+      'input[type="file"][data-import-input]',
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const files = [new File(['a'], 'a.jpg', { type: 'image/jpeg' })];
+    Object.defineProperty(input, 'files', { value: files, configurable: true });
+    fireEvent.change(input);
+    await waitFor(() => expect(captured).not.toBeNull());
+    const session = captured as unknown as {
+      progress: (completed: number, total: number, name: string) => void;
+      signal: AbortSignal;
+    };
+    // Progress overlay renders with the imported count.
+    act(() => {
+      session.progress(1, 3, 'a.jpg');
+    });
+    expect(await screen.findByText(/Preparing images… 1 of 3/)).toBeTruthy();
+    // Cancel aborts the signal (import resolves as cancelled).
+    fireEvent.click(screen.getByLabelText('Cancel import'));
+    await waitFor(() => expect(session.signal.aborted).toBe(true));
+    await screen.findByText(/Import cancelled/);
+  });
+});
+
 describe('CameraCapture capability controls', () => {
   const fullCaps = {
     zoom: { min: 1, max: 4, step: 0.5 },
@@ -226,7 +320,7 @@ describe('CameraCapture capability controls', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -253,7 +347,7 @@ describe('CameraCapture capability controls', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -273,7 +367,7 @@ describe('CameraCapture capability controls', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -291,7 +385,7 @@ describe('CameraCapture capability controls', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -313,7 +407,7 @@ describe('CameraCapture capability controls', () => {
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -342,7 +436,7 @@ describe('CameraCapture capability controls', () => {
     });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -379,7 +473,7 @@ describe('CameraCapture lifecycle hardening', () => {
     });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -427,7 +521,7 @@ describe('CameraCapture lifecycle hardening', () => {
     });
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
@@ -450,7 +544,7 @@ describe('CameraCapture lifecycle hardening', () => {
     const onDone = vi.fn();
     render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
@@ -482,7 +576,7 @@ describe('CameraCapture lifecycle hardening', () => {
     });
     const { unmount } = render(
       <CameraCapture
-        onCapture={noop}
+        onImportFiles={noopImport}
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}

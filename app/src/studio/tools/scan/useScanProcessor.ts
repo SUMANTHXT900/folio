@@ -20,18 +20,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ScanWorkerClient, type ScanResult, type ScanWorkerFactory } from './scanWorkerClient';
-import type { ScanModeName } from './scanProtocol';
 
-/** UI scan modes. `original` bypasses the worker (v1.9 direct capture). */
-export type ScannerMode = 'original' | 'document' | 'grayscale' | 'blackwhite';
-
-export const SCANNER_MODES: ScannerMode[] = ['original', 'document', 'grayscale', 'blackwhite'];
-
-const CORE_MODE: Record<Exclude<ScannerMode, 'original'>, ScanModeName> = {
-  document: 'original',
-  grayscale: 'grayscale',
-  blackwhite: 'blackwhite',
-};
+/**
+ * The hardened scanner has ONE capture experience (product decision):
+ * document scans in normal color. There is no UI mode selector — the
+ * core pipeline mode is fixed at the color path (`CORE_MODE`).
+ */
+const CORE_MODE = 'original' as const;
 
 export interface PendingReview {
   /** Original full-res capture (retained for Use original / retry). */
@@ -52,7 +47,6 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const clientRef = useRef<ScanWorkerClient | null>(null);
   const genRef = useRef(0);
   const livePendingRef = useRef(false);
-  const [mode, setMode] = useState<ScannerMode>('document');
   const [processing, setProcessing] = useState(false);
   const [pending, setPending] = useState<PendingReview | null>(null);
   const [liveDetected, setLiveDetected] = useState(false);
@@ -106,17 +100,16 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
    * into the page collection.
    */
   const processCapture = useCallback(
-    (original: File, scannerMode: ScannerMode) => {
+    (original: File) => {
       const gen = genRef.current;
       revokePending(pendingRef.current);
       setPending(null);
       setLiveDetected(false);
-      if (scannerMode === 'original') return;
       setProcessing(true);
       void (async () => {
         try {
           const bytes = new Uint8Array(await original.arrayBuffer());
-          const result = await client().process(bytes, CORE_MODE[scannerMode]);
+          const result = await client().process(bytes, CORE_MODE);
           if (genRef.current !== gen) return; // Stale: drop silently.
           const previewBlob =
             result.status === 'processed' && result.bytes !== null
@@ -133,7 +126,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
               jobId: 'local',
               width: 0,
               height: 0,
-              mode: CORE_MODE[scannerMode],
+              mode: CORE_MODE,
               corners: null,
               confidence: 0,
               reason: null,
@@ -202,8 +195,6 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   }, []);
 
   return {
-    mode,
-    setMode,
     processing,
     pending,
     liveDetected,

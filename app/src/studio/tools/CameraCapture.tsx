@@ -24,7 +24,8 @@
  * presented as live (B3).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Card, ErrorBlock } from '../components/ui';
+import { createPortal } from 'react-dom';
+import { Button, ErrorBlock } from '../components/ui';
 import {
   NO_CAPABILITIES,
   readTrackCapabilities,
@@ -32,14 +33,16 @@ import {
   type CameraCapabilities,
 } from './cameraCapabilities';
 import { buildVideoConstraints } from './cameraConstraints';
-import { SCANNER_MODES, useScanProcessor, type ScannerMode } from './scan/useScanProcessor';
+import { useScanProcessor } from './scan/useScanProcessor';
 
-const MODE_LABELS: Record<ScannerMode, string> = {
-  original: 'Original',
-  document: 'Document',
-  grayscale: 'Grayscale',
-  blackwhite: 'B&W',
-};
+/** Import state for the scanner's image-picker flow. */
+interface ImportState {
+  total: number;
+  completed: number;
+  currentName: string;
+}
+
+const IMPORT_ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
 
 type CameraStatus = 'starting' | 'live' | 'failed' | 'disconnected' | 'preview-blocked';
 
@@ -110,16 +113,20 @@ function ScannerOverlay({ grid }: { grid: boolean }) {
 }
 
 export function CameraCapture({
-  onCapture,
   onScanAccept,
+  onImportFiles,
   onRetake,
   onDone,
   sessionPages,
 }: {
-  /** A directly captured page (Original mode — v1.9 path, no worker). */
-  onCapture: (file: File) => void;
   /** An accepted scan (processed file + optional original to retain). */
   onScanAccept: (entry: { file: File; original: File | null; name: string }) => void;
+  /** Bulk import from the native picker; reports per-file progress. */
+  onImportFiles: (
+    files: File[],
+    progress: (completed: number, total: number, name: string) => void,
+    signal: AbortSignal,
+  ) => Promise<{ added: number; failed: number; cancelled: boolean; firstError: string | null }>;
   /** Drops the most recent capture of the current session. */
   onRetake: () => void;
   /** Leaves camera mode (stream stopped first). */
@@ -454,11 +461,7 @@ export function CameraCapture({
   const capture = async () => {
     const file = await captureFrame();
     if (file === null) return;
-    if (scan.mode === 'original') {
-      onCapture(file);
-    } else {
-      scan.processCapture(file, scan.mode);
-    }
+    scan.processCapture(file);
   };
 
   const acceptReview = (useProcessed: boolean) => {
@@ -473,7 +476,7 @@ export function CameraCapture({
    * live in the hook); live corners are NEVER reused for the final scan.
    */
   useEffect(() => {
-    if (status !== 'live' || scan.mode === 'original') return;
+    if (status !== 'live') return;
     const id = window.setInterval(() => {
       const video = videoRef.current;
       if (
@@ -504,178 +507,279 @@ export function CameraCapture({
     }, 500);
     return () => window.clearInterval(id);
     // Stable primitives only: the scan object identity changes per render.
-  }, [status, scan.mode, scan.processing, scan.pending, scan.requestLive]);
+  }, [status, scan.processing, scan.pending, scan.requestLive]);
 
   const ratio = aspect.w / aspect.h;
 
-  return (
-    <Card>
-      {/* CameraTopBar: close | title | view + device controls. */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <button
-          onClick={leave}
-          aria-label="Done scanning"
-          className="rounded-lg px-2 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700 min-h-[36px]"
-        >
-          ‹ Done
-        </button>
-        <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
-          Scan document
-          {sessionPages.length > 0 && (
-            <span className="ml-2 rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300">
-              {sessionPages.length} captured
-            </span>
-          )}
-        </p>
-        <button
-          onClick={() => setGrid((g) => !g)}
-          aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
-          aria-pressed={grid}
-          title="Alignment grid"
-          className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
-            grid
-              ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
-              : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
-          }`}
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-          >
-            <path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16" />
-          </svg>
-        </button>
-        <button
-          onClick={() => {
-            setDeviceId('');
-            setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
-          }}
-          aria-label="Switch camera"
-          title="Switch camera"
-          className="flex h-9 w-9 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-            <circle cx="12" cy="13" r="4" />
-          </svg>
-        </button>
-        {devices.length > 1 && (
-          <select
-            value={deviceId}
-            onChange={(e) => setDeviceId(e.target.value)}
-            className="h-9 rounded-lg border border-paper-300 bg-transparent px-2 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
-            aria-label="Choose camera"
-          >
-            <option value="">Auto</option>
-            {devices.map((d, i) => (
-              <option key={d.deviceId} value={d.deviceId}>
-                {d.label || `Camera ${i + 1}`}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
+  // -- Import (native picker; pages commit one at a time) ---------------
 
-      {status === 'starting' && (
-        <div className="flex aspect-[4/3] items-center justify-center rounded-xl bg-paper-200/60 dark:bg-ink-900/60">
-          <p className="text-sm text-ink-400 dark:text-ink-300">Starting camera…</p>
-        </div>
-      )}
+  const [importState, setImportState] = useState<ImportState | null>(null);
+  const [importNote, setImportNote] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
 
-      {(status === 'failed' || status === 'disconnected' || status === 'preview-blocked') &&
-        failure && (
-          <div className="space-y-3">
-            <ErrorBlock error={new Error(failure)} />
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => void start(facing, deviceId)}>
-                Try again
-              </Button>
-              <Button variant="ghost" onClick={leave}>
-                Back to pages
-              </Button>
-            </div>
-          </div>
-        )}
+  const runImport = async (files: File[]) => {
+    if (files.length === 0) return;
+    const controller = new AbortController();
+    importAbortRef.current = controller;
+    setImportNote(null);
+    setImportState({ total: files.length, completed: 0, currentName: '' });
+    try {
+      const summary = await onImportFiles(
+        files,
+        (completed, total, name) => setImportState({ total, completed, currentName: name }),
+        controller.signal,
+      );
+      if (summary.cancelled) {
+        setImportNote(`Import cancelled — kept ${summary.added} prepared image(s).`);
+      } else if (summary.failed > 0) {
+        setImportNote(
+          summary.firstError !== null
+            ? `Couldn't import ${summary.failed} image(s). First: ${summary.firstError}`
+            : `Couldn't import ${summary.failed} image(s).`,
+        );
+      } else if (summary.added === 0) {
+        setImportNote('No usable images were selected.');
+      }
+    } finally {
+      importAbortRef.current = null;
+      setImportState(null);
+    }
+  };
 
-      {status !== 'failed' && status !== 'disconnected' && status !== 'preview-blocked' && (
-        <div className={status === 'starting' ? 'hidden' : ''}>
-          {/* Capture mode: Original bypasses the scan worker (v1.9 direct
-              capture); Document/Grayscale/B&W process through it. */}
-          <div
-            className="mb-3 flex gap-1 rounded-xl border border-paper-300 p-1 dark:border-ink-700"
-            role="group"
-            aria-label="Capture mode"
+  const cancelImport = () => {
+    importAbortRef.current?.abort();
+  };
+
+  return createPortal(
+    <>
+      {/* Desktop backdrop: dims the tool page behind the centered panel
+          (mobile is full-bleed, so no backdrop is needed there). */}
+      <div aria-hidden className="fixed inset-0 z-[55] hidden bg-ink-950/45 md:block" />
+      <div
+        data-scanner-root
+        className={
+          // Immersive surface: full-bleed on phones (covers app chrome),
+          // centered bounded panel on desktop. Rendered via portal
+          // (document.body) so `fixed` is viewport-true — an inline element
+          // inside the route-transition transform would size to that
+          // ancestor instead of the screen.
+          'fixed inset-0 z-[60] flex flex-col bg-paper-50 dark:bg-ink-950 ' +
+          'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] ' +
+          'md:inset-auto md:left-1/2 md:top-1/2 md:h-[min(85vh,52rem)] md:w-[46rem] md:max-w-[94vw] ' +
+          'md:-translate-x-1/2 md:-translate-y-1/2 md:rounded-2xl md:border md:border-paper-300 ' +
+          'md:pt-0 md:pb-0 md:shadow-2xl dark:md:border-ink-700'
+        }
+      >
+        {/* CameraTopBar: done | title | import | grid | switch | device. */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-paper-300/70 px-3 py-2 dark:border-ink-800/70">
+          <button
+            onClick={leave}
+            aria-label="Done scanning"
+            className="min-h-[36px] rounded-lg px-2 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
           >
-            {SCANNER_MODES.map((value) => {
-              const label = MODE_LABELS[value];
-              return (
-                <button
-                  key={value}
-                  onClick={() => scan.setMode(value)}
-                  aria-label={`${label} scan mode`}
-                  aria-pressed={scan.mode === value}
-                  disabled={scan.processing || scan.pending !== null}
-                  className={`flex-1 rounded-lg px-2 py-1.5 text-xs transition-colors disabled:opacity-40 ${
-                    scan.mode === value
-                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-100 dark:text-ink-900'
-                      : 'text-ink-500 hover:bg-paper-200 dark:text-ink-300 dark:hover:bg-ink-700'
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {/* Viewport: exact frame aspect, letterboxed — the full frame
-              stays visible and matches the captured image. */}
-          <div className="flex justify-center">
-            <div
-              className="relative w-full overflow-hidden rounded-xl bg-ink-950"
-              style={{
-                aspectRatio: `${aspect.w} / ${aspect.h}`,
-                maxHeight: '62vh',
-                width: ratio < 1 ? `min(100%, calc(62vh * ${ratio}))` : '100%',
-              }}
-              onClick={tapToFocus}
+            ‹ Done
+          </button>
+          <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
+            Scan document
+            {sessionPages.length > 0 && (
+              <span className="ml-2 rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300">
+                {sessionPages.length} captured
+              </span>
+            )}
+          </p>
+          {/* Import lives in the scanner bar: no scrolling to reach it. */}
+          <input
+            ref={importInputRef}
+            type="file"
+            accept={IMPORT_ACCEPT}
+            multiple
+            className="hidden"
+            data-import-input
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = '';
+              void runImport(files);
+            }}
+          />
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={importState !== null}
+            aria-label="Import images from files"
+            className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-paper-300 px-2.5 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:border-brass-400/40 hover:text-ink-900 disabled:opacity-40 dark:border-ink-700 dark:text-ink-200 dark:hover:text-paper-100"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
             >
-              <video
-                ref={videoRef}
-                playsInline
-                muted
-                autoPlay
-                onLoadedMetadata={syncAspect}
-                onResize={syncAspect}
-                className="absolute inset-0 h-full w-full object-contain"
-                style={facing === 'user' ? { transform: 'scaleX(-1)' } : undefined}
-              />
-              <ScannerOverlay grid={grid} />
-              {/* Tap-to-focus marker: positional feedback for a requested
-                  refocus cycle — rendered only when actually requested. */}
-              {focusPoint !== null && (
-                <span
-                  aria-hidden
-                  data-focus-point
-                  className="absolute h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-brass-300"
-                  style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%` }}
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Import
+          </button>
+          <button
+            onClick={() => setGrid((g) => !g)}
+            aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
+            aria-pressed={grid}
+            title="Alignment grid"
+            className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
+              grid
+                ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+                : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+            }`}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            >
+              <path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16" />
+            </svg>
+          </button>
+          <button
+            onClick={() => {
+              setDeviceId('');
+              setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+            }}
+            aria-label="Switch camera"
+            title="Switch camera"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+          </button>
+          {devices.length > 1 && (
+            <select
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              className="h-9 rounded-lg border border-paper-300 bg-transparent px-2 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
+              aria-label="Choose camera"
+            >
+              <option value="">Auto</option>
+              {devices.map((d, i) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Camera ${i + 1}`}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Import progress: always visible (camera live OR failed), so the
+          import path works even without a working camera. */}
+        {importState !== null && (
+          <div
+            role="status"
+            data-import-progress
+            className="flex items-center gap-3 border-b border-paper-300/70 bg-brass-400/10 px-3 py-2 dark:border-ink-800/70"
+          >
+            <p className="min-w-0 flex-1 truncate text-xs text-ink-700 dark:text-paper-100">
+              Preparing images… {importState.completed} of {importState.total}
+              {importState.currentName ? ` · ${importState.currentName}` : ''}
+            </p>
+            <button
+              onClick={cancelImport}
+              className="rounded-lg border border-paper-300 px-2.5 py-1 text-[11px] font-medium text-ink-600 transition-colors hover:border-brass-400/40 dark:border-ink-700 dark:text-ink-200"
+              aria-label="Cancel import"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {importNote !== null && importState === null && (
+          <p
+            role="status"
+            className="border-b border-paper-300/70 px-3 py-1.5 text-xs text-ink-400 dark:text-ink-300"
+          >
+            {importNote}
+          </p>
+        )}
+
+        {status === 'starting' && (
+          <div className="flex aspect-[4/3] items-center justify-center rounded-xl bg-paper-200/60 dark:bg-ink-900/60">
+            <p className="text-sm text-ink-400 dark:text-ink-300">Starting camera…</p>
+          </div>
+        )}
+
+        {(status === 'failed' || status === 'disconnected' || status === 'preview-blocked') &&
+          failure && (
+            <div className="space-y-3">
+              <ErrorBlock error={new Error(failure)} />
+              <div className="flex gap-2">
+                <Button variant="ghost" onClick={() => void start(facing, deviceId)}>
+                  Try again
+                </Button>
+                <Button variant="ghost" onClick={leave}>
+                  Back to pages
+                </Button>
+              </div>
+            </div>
+          )}
+
+        {status !== 'failed' && status !== 'disconnected' && status !== 'preview-blocked' && (
+          <div
+            className={
+              (status === 'starting' ? 'hidden ' : '') +
+              'flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'
+            }
+          >
+            {/* Viewport: exact frame aspect, letterboxed — the full frame
+              stays visible and matches the captured image. Flexes to the
+              remaining height; the page itself never scrolls on mobile. */}
+            <div className="flex min-h-0 flex-1 justify-center">
+              <div
+                className="relative w-full self-center overflow-hidden rounded-xl bg-ink-950"
+                style={{
+                  aspectRatio: `${aspect.w} / ${aspect.h}`,
+                  maxHeight: '100%',
+                  width: ratio < 1 ? `min(100%, calc((100dvh - 240px) * ${ratio}))` : '100%',
+                  maxWidth: `calc((100dvh - 240px) * ${ratio})`,
+                }}
+                onClick={tapToFocus}
+              >
+                <video
+                  ref={videoRef}
+                  playsInline
+                  muted
+                  autoPlay
+                  onLoadedMetadata={syncAspect}
+                  onResize={syncAspect}
+                  className="absolute inset-0 h-full w-full object-contain"
+                  style={facing === 'user' ? { transform: 'scaleX(-1)' } : undefined}
                 />
-              )}
-              {/* Detection pill: low-res worker verdict, framing aid only —
+                <ScannerOverlay grid={grid} />
+                {/* Tap-to-focus marker: positional feedback for a requested
+                  refocus cycle — rendered only when actually requested. */}
+                {focusPoint !== null && (
+                  <span
+                    aria-hidden
+                    data-focus-point
+                    className="absolute h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-brass-300"
+                    style={{ left: `${focusPoint.x}%`, top: `${focusPoint.y}%` }}
+                  />
+                )}
+                {/* Detection pill: low-res worker verdict, framing aid only —
                   never the final transform geometry. */}
-              {scan.mode !== 'original' && (
                 <p
                   aria-hidden
                   data-detection-pill
@@ -687,223 +791,222 @@ export function CameraCapture({
                 >
                   {scan.liveDetected ? 'Document detected ✓' : 'Frame the page in the guide'}
                 </p>
-              )}
-              {scan.processing && (
-                <div className="absolute inset-0 flex items-center justify-center bg-ink-950/60">
-                  <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
-                    Processing scan…
-                  </p>
-                </div>
-              )}
+                {scan.processing && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-ink-950/60">
+                    <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
+                      Processing scan…
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
 
-          {/* Screen-reader mirror of the in-viewport detection pill. */}
-          {scan.mode !== 'original' && (
+            {/* Screen-reader mirror of the in-viewport detection pill. */}
             <span className="sr-only" role="status">
               {scan.liveDetected ? 'Document detected — capture when ready' : 'Framing guide'}
             </span>
-          )}
 
-          {/* Review: pending scan decision. Session state only — nothing
+            {/* Review: pending scan decision. Session state only — nothing
               enters the page collection until Accept. */}
-          {scan.pending !== null && (
-            <div className="mt-3 rounded-2xl border border-brass-400/40 bg-paper-50 p-3 dark:bg-ink-800/60">
-              <div className="flex gap-3">
-                <img
-                  src={scan.pending.previewUrl}
-                  alt={
-                    scan.pending.result.status === 'processed'
-                      ? `Processed scan preview: ${scan.pending.original.name}`
-                      : `Original capture preview: ${scan.pending.original.name}`
-                  }
-                  className="h-28 w-20 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
-                />
-                <div className="min-w-0 flex-1">
+            {scan.pending !== null && (
+              <div className="mt-3 rounded-2xl border border-brass-400/40 bg-paper-50 p-3 dark:bg-ink-800/60">
+                <div className="flex gap-3">
+                  <img
+                    src={scan.pending.previewUrl}
+                    alt={
+                      scan.pending.result.status === 'processed'
+                        ? `Processed scan preview: ${scan.pending.original.name}`
+                        : `Original capture preview: ${scan.pending.original.name}`
+                    }
+                    className="h-28 w-20 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
+                  />
+                  <div className="min-w-0 flex-1">
+                    {scan.pending.result.status === 'processed' && (
+                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                        Scan ready — perspective-corrected
+                      </p>
+                    )}
+                    {scan.pending.result.status === 'original' && (
+                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                        No reliable document boundary found
+                      </p>
+                    )}
+                    {scan.pending.result.status === 'error' && (
+                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                        Scanner unavailable
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
+                      {scan.pending.result.status === 'processed' &&
+                        'The corrected scan is shown. The original photo is kept for fallback.'}
+                      {scan.pending.result.status === 'original' &&
+                        'Use the original photo as the page, or retake.'}
+                      {scan.pending.result.status === 'error' &&
+                        'Use the original photo, or retry the scan.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
                   {scan.pending.result.status === 'processed' && (
-                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                      Scan ready — perspective-corrected
-                    </p>
+                    <Button onClick={() => acceptReview(true)}>Use scan</Button>
                   )}
-                  {scan.pending.result.status === 'original' && (
-                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                      No reliable document boundary found
-                    </p>
-                  )}
-                  {scan.pending.result.status === 'error' && (
-                    <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                      Scanner unavailable
-                    </p>
-                  )}
-                  <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
-                    {scan.pending.result.status === 'processed' &&
-                      'The corrected scan is shown. The original photo is kept for fallback.'}
-                    {scan.pending.result.status === 'original' &&
-                      'Use the original photo as the page, or retake.'}
-                    {scan.pending.result.status === 'error' &&
-                      'Use the original photo, or retry the scan.'}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {scan.pending.result.status === 'processed' && (
-                  <Button onClick={() => acceptReview(true)}>Use scan</Button>
-                )}
-                <Button
-                  variant={scan.pending.result.status === 'processed' ? 'ghost' : 'primary'}
-                  onClick={() => acceptReview(false)}
-                >
-                  Use original
-                </Button>
-                {scan.pending.result.status === 'error' && (
                   <Button
-                    variant="ghost"
-                    onClick={() => {
-                      const current = scan.pending;
-                      if (current !== null) scan.processCapture(current.original, scan.mode);
-                    }}
+                    variant={scan.pending.result.status === 'processed' ? 'ghost' : 'primary'}
+                    onClick={() => acceptReview(false)}
                   >
-                    Retry
+                    Use original
                   </Button>
-                )}
-                <Button variant="ghost" onClick={() => scan.discard()}>
-                  Retake
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Session strip: previews only, newest last with a brass ring. */}
-          {sessionPages.length > 0 && (
-            <div
-              className="mt-3 flex gap-2 overflow-x-auto pb-1"
-              aria-label="Pages captured this session"
-            >
-              {sessionPages.map((thumb, i) => (
-                <div
-                  key={thumb.id}
-                  className={`relative h-16 w-12 shrink-0 overflow-hidden rounded-lg border bg-ink-950 ${
-                    i === sessionPages.length - 1
-                      ? 'border-brass-400 ring-2 ring-brass-400/40'
-                      : 'border-paper-300 dark:border-ink-700'
-                  }`}
-                  title={thumb.name}
-                >
-                  {thumb.previewUrl ? (
-                    <img
-                      src={thumb.previewUrl}
-                      alt={`Captured page ${i + 1}: ${thumb.name}`}
-                      loading="lazy"
-                      decoding="async"
-                      draggable={false}
-                      className="h-full w-full object-contain"
-                    />
-                  ) : (
-                    <div className="h-full w-full animate-pulse" />
+                  {scan.pending.result.status === 'error' && (
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        const current = scan.pending;
+                        if (current !== null) scan.processCapture(current.original);
+                      }}
+                    >
+                      Retry
+                    </Button>
                   )}
-                  <span className="absolute bottom-0.5 left-1 rounded bg-ink-900/80 px-1 font-mono text-[10px] text-paper-50">
-                    {i + 1}
-                  </span>
+                  <Button variant="ghost" onClick={() => scan.discard()}>
+                    Retake
+                  </Button>
                 </div>
-              ))}
-            </div>
-          )}
+              </div>
+            )}
 
-          {/* Camera dock: torch · shutter · retake on row one (mobile),
+            {/* Session strip: previews only, newest last with a brass ring. */}
+            {sessionPages.length > 0 && (
+              <div
+                className="mt-3 flex gap-2 overflow-x-auto pb-1"
+                aria-label="Pages captured this session"
+              >
+                {sessionPages.map((thumb, i) => (
+                  <div
+                    key={thumb.id}
+                    className={`relative h-16 w-12 shrink-0 overflow-hidden rounded-lg border bg-ink-950 ${
+                      i === sessionPages.length - 1
+                        ? 'border-brass-400 ring-2 ring-brass-400/40'
+                        : 'border-paper-300 dark:border-ink-700'
+                    }`}
+                    title={thumb.name}
+                  >
+                    {thumb.previewUrl ? (
+                      <img
+                        src={thumb.previewUrl}
+                        alt={`Captured page ${i + 1}: ${thumb.name}`}
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                        className="h-full w-full object-contain"
+                      />
+                    ) : (
+                      <div className="h-full w-full animate-pulse" />
+                    )}
+                    <span className="absolute bottom-0.5 left-1 rounded bg-ink-900/80 px-1 font-mono text-[10px] text-paper-50">
+                      {i + 1}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Camera dock: torch · shutter · retake on row one (mobile),
               zoom spans row two; desktop composes one centered cluster
               (torch · wide zoom · shutter · retake). Torch/zoom render
               ONLY when the active track reports them; a rejected apply
               disables the control with a note. Safe-area padded. */}
-          <div
-            role="group"
-            aria-label="Camera controls"
-            className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-3 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center"
-          >
-            {caps.torch && !torchDead && (
-              <button
-                onClick={() => void toggleTorch()}
-                aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
-                aria-pressed={torchOn}
-                title="Flashlight"
-                className={`flex h-11 w-11 items-center justify-center rounded-full border transition-colors sm:order-1 ${
-                  torchOn
-                    ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
-                    : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
-                }`}
-              >
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+            <div
+              role="group"
+              aria-label="Camera controls"
+              className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-3 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center"
+            >
+              {caps.torch && !torchDead && (
+                <button
+                  onClick={() => void toggleTorch()}
+                  aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
+                  aria-pressed={torchOn}
+                  title="Flashlight"
+                  className={`flex h-11 w-11 items-center justify-center rounded-full border transition-colors sm:order-1 ${
+                    torchOn
+                      ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+                      : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+                  }`}
                 >
-                  <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
-                </svg>
-              </button>
-            )}
-            <button
-              onClick={() => void capture()}
-              disabled={capturing || scan.processing || scan.pending !== null}
-              aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
-              className="mx-auto flex h-16 w-16 items-center justify-center justify-self-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800 sm:order-3 sm:mx-2"
-            >
-              <span
-                aria-hidden
-                className={`h-10 w-10 rounded-full transition-colors ${
-                  capturing ? 'bg-brass-400' : 'bg-brass-500'
-                }`}
-              />
-            </button>
-            <button
-              onClick={onRetake}
-              disabled={sessionPages.length === 0}
-              aria-label="Retake last capture"
-              title="Retake last capture"
-              className="flex h-11 min-w-11 items-center justify-center justify-self-end rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300 sm:order-4"
-            >
-              Retake
-            </button>
-            {caps.zoom !== null && !zoomDead && zoom !== null && (
-              <label className="col-span-3 flex h-11 min-w-0 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700 sm:order-2 sm:col-span-1 sm:w-72 sm:flex-none">
-                <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
-                <input
-                  type="range"
-                  min={caps.zoom.min}
-                  max={caps.zoom.max}
-                  step={caps.zoom.step}
-                  value={zoom}
-                  onChange={(e) => void applyZoom(Number(e.target.value))}
-                  aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
-                  aria-valuetext={`${zoom.toFixed(1)} times zoom`}
-                  className="min-w-0 flex-1 accent-brass-500"
-                />
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
+                  </svg>
+                </button>
+              )}
+              <button
+                onClick={() => void capture()}
+                disabled={capturing || scan.processing || scan.pending !== null}
+                aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
+                className="mx-auto flex h-16 w-16 items-center justify-center justify-self-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800 sm:order-3 sm:mx-2"
+              >
                 <span
                   aria-hidden
-                  className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300"
-                >
-                  {zoom.toFixed(1)}×
-                </span>
-              </label>
+                  className={`h-10 w-10 rounded-full transition-colors ${
+                    capturing ? 'bg-brass-400' : 'bg-brass-500'
+                  }`}
+                />
+              </button>
+              <button
+                onClick={onRetake}
+                disabled={sessionPages.length === 0}
+                aria-label="Retake last capture"
+                title="Retake last capture"
+                className="flex h-11 min-w-11 items-center justify-center justify-self-end rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300 sm:order-4"
+              >
+                Retake
+              </button>
+              {caps.zoom !== null && !zoomDead && zoom !== null && (
+                <label className="col-span-3 flex h-11 min-w-0 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700 sm:order-2 sm:col-span-1 sm:w-72 sm:flex-none">
+                  <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
+                  <input
+                    type="range"
+                    min={caps.zoom.min}
+                    max={caps.zoom.max}
+                    step={caps.zoom.step}
+                    value={zoom}
+                    onChange={(e) => void applyZoom(Number(e.target.value))}
+                    aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
+                    aria-valuetext={`${zoom.toFixed(1)} times zoom`}
+                    className="min-w-0 flex-1 accent-brass-500"
+                  />
+                  <span
+                    aria-hidden
+                    className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300"
+                  >
+                    {zoom.toFixed(1)}×
+                  </span>
+                </label>
+              )}
+            </div>
+            {controlNote !== null && (
+              <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">
+                {controlNote}
+              </p>
             )}
-          </div>
-          {controlNote !== null && (
-            <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">
-              {controlNote}
-            </p>
-          )}
 
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-xs text-ink-400 dark:text-ink-300">
-              Frame the page in the guide — captures join the page list below.
-              {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}
-            </span>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-xs text-ink-400 dark:text-ink-300">
+                Frame the page in the guide — captures and imports join the page list.
+                {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}
+              </span>
+            </div>
           </div>
-        </div>
-      )}
-    </Card>
+        )}
+      </div>
+    </>,
+    document.body,
   );
 }

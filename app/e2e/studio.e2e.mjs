@@ -101,11 +101,67 @@ function skip(name, reason) {
   console.log(`SKIP  ${name} — ${reason}`);
 }
 
+/**
+ * Installs the download-capture patch: anchors with a `download`
+ * attribute record `{href, name}` into `window.__downloads` and do NOT
+ * trigger a real browser download. This keeps every test artifact
+ * in-page (bytes, magic, size asserted via fetch) so no OS download
+ * ever fires — external download managers (IDM) can never intercept,
+ * stall, or pop up during a run.
+ */
+function installDownloadCapture(page) {
+  return page.evaluateOnNewDocument(() => {
+    localStorage.clear();
+    const origClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () {
+      if (this.hasAttribute('download') && this.href) {
+        (window.__downloads = window.__downloads || []).push({
+          href: this.href,
+          name: this.getAttribute('download') || 'download',
+        });
+        return;
+      }
+      return origClick.call(this);
+    };
+  });
+}
+
+const downloadCursors = new WeakMap();
+
+/** Waits for the next captured download and probes it fully in-page. */
+async function waitForCapturedDownload(page, timeoutMs) {
+  const start = Date.now();
+  const cursor = downloadCursors.get(page) ?? 0;
+  for (;;) {
+    const probe = await page.evaluate(async (index) => {
+      const entries = window.__downloads || [];
+      if (entries.length <= index) return null;
+      const entry = entries[index];
+      const res = await fetch(entry.href);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return {
+        name: entry.name,
+        size: buf.length,
+        magic: String.fromCharCode(...buf.slice(0, 5)),
+      };
+    }, cursor);
+    if (probe !== null) {
+      downloadCursors.set(page, cursor + 1);
+      return probe;
+    }
+    if (Date.now() - start > timeoutMs) {
+      console.log('[download-capture] timed out with no captured download');
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 async function newPage(browser) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
-  await page.evaluateOnNewDocument(() => localStorage.clear());
+  await installDownloadCapture(page);
   const consoleErrors = [];
   const failedRequests = [];
   page.on('console', (msg) => {
@@ -141,15 +197,8 @@ async function bodyText(page) {
 
 async function main() {
   fs.mkdirSync(path.join(__dirname, 'after'), { recursive: true });
-  const dlDir = path.join(__dirname, 'downloads');
-  fs.mkdirSync(dlDir, { recursive: true });
-  for (const f of fs.readdirSync(dlDir)) {
-    try {
-      fs.unlinkSync(path.join(dlDir, f));
-    } catch {
-      // Ignore.
-    }
-  }
+  // Downloads are captured in-page (see installDownloadCapture) — no OS
+  // downloads, nothing for external download managers to intercept.
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: 'shell',
@@ -162,12 +211,6 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await page.goto(`${DEV_URL}/#/`, { waitUntil: 'networkidle0', timeout: 60000 });
     await new Promise((r) => setTimeout(r, 1200));
-    // Browser-level download routing (page sessions cannot set this).
-    const dlSession = await browser.target().createCDPSession();
-    await dlSession.send('Browser.setDownloadBehavior', {
-      behavior: 'allow',
-      downloadPath: path.join(__dirname, 'downloads'),
-    });
     const text = await bodyText(page);
     for (const name of [
       'Merge',
@@ -205,20 +248,19 @@ async function main() {
       /2 files · ready to merge/.test(count),
       count.split('\n')[0],
     );
-    // Start merge but do NOT await download navigation; intercept via CDP download path.
-    const dlDir = path.join(__dirname, 'downloads');
+    // Start merge; the anchor download is captured in-page (no OS download).
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Merge '))
         ?.click();
     });
-    const beforeMerge = new Set(fs.readdirSync(dlDir));
-    const mergedFile = await waitForDownload(dlDir, 120000, beforeMerge);
-    check('merge downloads a real PDF', mergedFile !== null, mergedFile);
-    if (mergedFile !== null) {
-      const header = fs.readFileSync(path.join(dlDir, mergedFile)).subarray(0, 5).toString();
-      check('merge output is a PDF', header === '%PDF-', header);
-    }
+    const merged = await waitForCapturedDownload(page, 300000);
+    check('merge downloads a real PDF', merged !== null, merged ? merged.name : null);
+    check(
+      'merge output is a PDF',
+      merged !== null && merged.magic === '%PDF-',
+      merged ? merged.magic : 'missing',
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -245,8 +287,6 @@ async function main() {
     const kept = await page.evaluate(() => document.body.innerText);
     const keptRe = new RegExp(`${SMALL_PAGES - 1}/${SMALL_PAGES} kept`);
     check(`split toggles to ${SMALL_PAGES - 1}/${SMALL_PAGES} kept`, keptRe.test(kept));
-    const dlDir = path.join(__dirname, 'downloads');
-    const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Create PDF'))
@@ -259,8 +299,12 @@ async function main() {
     await page.evaluate(() => {
       document.querySelector('a[download]')?.click();
     });
-    const splitFile = await waitForDownload(dlDir, 120000, before);
-    check('split pick-mode downloads 21-page PDF', splitFile !== null, splitFile);
+    const splitFile = await waitForCapturedDownload(page, 120000);
+    check(
+      'split pick-mode downloads 21-page PDF',
+      splitFile !== null && splitFile.name.endsWith('.pdf'),
+      splitFile ? splitFile.name : null,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -308,8 +352,6 @@ async function main() {
       downs[0]?.click();
     });
     await new Promise((r) => setTimeout(r, 400));
-    const dlDir = path.join(__dirname, 'downloads');
-    const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent === 'Save rearranged PDF')
@@ -321,8 +363,12 @@ async function main() {
     await page.evaluate(() => {
       document.querySelector('a[download]')?.click();
     });
-    const out = await waitForDownload(dlDir, 120000, before);
-    check('rearrange saves reordered PDF', out !== null, out);
+    const rearranged = await waitForCapturedDownload(page, 120000);
+    check(
+      'rearrange saves reordered PDF',
+      rearranged !== null && rearranged.name.endsWith('.pdf') && rearranged.magic === '%PDF-',
+      rearranged ? rearranged.name : null,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -347,8 +393,6 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button[aria-label="Rotate right"]')][0]?.click();
     });
-    const dlDir = path.join(__dirname, 'downloads');
-    const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent === 'Download rotated PDF')
@@ -360,8 +404,12 @@ async function main() {
     await page.evaluate(() => {
       document.querySelector('a[download]')?.click();
     });
-    const out = await waitForDownload(dlDir, 120000, before);
-    check('rotate downloads rotated PDF', out !== null, out);
+    const rotated = await waitForCapturedDownload(page, 120000);
+    check(
+      'rotate downloads rotated PDF',
+      rotated !== null && rotated.magic === '%PDF-',
+      rotated ? rotated.name : null,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -514,8 +562,6 @@ async function main() {
       cards.length === 2 && cards[0].includes('red-wide.png'),
       cards.join(' | '),
     );
-    const dlDir = path.join(__dirname, 'downloads');
-    const before = new Set(fs.readdirSync(dlDir));
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Build PDF'))
@@ -527,8 +573,12 @@ async function main() {
     await page.evaluate(() => {
       document.querySelector('a[download]')?.click();
     });
-    const out = await waitForDownload(dlDir, 120000, before);
-    check('images tool builds a PDF', out !== null, out);
+    const imagesOut = await waitForCapturedDownload(page, 120000);
+    check(
+      'images tool builds a PDF',
+      imagesOut !== null && imagesOut.magic === '%PDF-',
+      imagesOut ? imagesOut.name : null,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -613,13 +663,6 @@ async function main() {
       ],
     });
     const { page, consoleErrors } = await newPage(camBrowser);
-    // Route downloads for this browser session (the main suite only
-    // configures its own browser).
-    const camDlSession = await camBrowser.target().createCDPSession();
-    await camDlSession.send('Browser.setDownloadBehavior', {
-      behavior: 'allow',
-      downloadPath: path.join(__dirname, 'downloads'),
-    });
     await gotoTool(page, 'images');
     const scanWithCamera = async () => {
       await page.evaluate(() => {
@@ -663,7 +706,35 @@ async function main() {
       cards.length === 1 && cards[0].includes('scan-'),
       cards.join(' | '),
     );
-    // Scan more in Grayscale mode: collection preserved, second page added.
+    // Scanner surface: mode selector is gone; Import lives in the bar.
+    // Desktop keeps a bounded, centered panel (not a full-bleed phone
+    // layout); the phone-width geometry check follows below.
+    const scannerSurface = await page.evaluate(() => {
+      const root = document.querySelector('[data-scanner-root]');
+      if (root === null) return { hasRoot: false };
+      const r = root.getBoundingClientRect();
+      return {
+        hasRoot: true,
+        fixed: getComputedStyle(root).position === 'fixed',
+        boundedPanel: r.width < window.innerWidth - 40 && r.height <= window.innerHeight,
+        hasImport: [...document.querySelectorAll('button')].some(
+          (b) => b.getAttribute('aria-label') === 'Import images from files',
+        ),
+        modeButtons: [...document.querySelectorAll('button')].filter((b) =>
+          /scan mode/i.test(b.getAttribute('aria-label') ?? ''),
+        ).length,
+      };
+    });
+    check(
+      'images scanner: Import in bar, no mode selector, centered panel on desktop',
+      scannerSurface.hasRoot &&
+        scannerSurface.fixed &&
+        scannerSurface.boundedPanel &&
+        scannerSurface.hasImport &&
+        scannerSurface.modeButtons === 0,
+      JSON.stringify(scannerSurface),
+    );
+    // Scan more (no mode step): collection preserved, second page added.
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
@@ -674,11 +745,6 @@ async function main() {
       },
       { timeout: 30000 },
     );
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.getAttribute('aria-label') === 'Grayscale scan mode')
-        ?.click();
-    });
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
@@ -815,6 +881,30 @@ async function main() {
     );
     hud = await hudGeometry();
     check('images scanner HUD layers cleanly on narrow phone', hudSane(hud), JSON.stringify(hud));
+    // Immersive check at phone width: the scanner owns the viewport
+    // (portaled, position: fixed) so camera controls never require page
+    // scroll — the exact failure this hardened pass fixes.
+    const phoneSurface = await page.evaluate(() => {
+      const root = document.querySelector('[data-scanner-root]');
+      if (root === null) return { fixed: false, covers: false, noScroll: false };
+      const r = root.getBoundingClientRect();
+      return {
+        fixed: getComputedStyle(root).position === 'fixed',
+        covers:
+          Math.round(r.top) <= 0 &&
+          Math.round(r.bottom) >= window.innerHeight - 2 &&
+          Math.round(r.left) <= 0 &&
+          Math.round(r.right) >= window.innerWidth - 2,
+        // Body scroll is locked out of the interaction: the dock and
+        // strip live inside the fixed surface, above the fold.
+        noScroll: r.height >= window.innerHeight - 2,
+      };
+    });
+    check(
+      'images scanner is a fixed full-viewport surface on phones',
+      phoneSurface.fixed && phoneSurface.covers && phoneSurface.noScroll,
+      JSON.stringify(phoneSurface),
+    );
     await page.setViewport({ width: 1280, height: 900 });
     // Scanned pages build a real PDF. Proven in-page (second browser
     // sessions don't route OS downloads): fetch the result blob and
@@ -840,12 +930,122 @@ async function main() {
       probe !== null && probe.magic === '%PDF-' && probe.bytes > 10000,
       probe ? `${probe.magic} ${probe.bytes} bytes` : 'missing',
     );
+    // --- Scanner import: memory-safe bulk import (M3.x regression) ---
+    // Oversized phone-like JPEGs (3000x2000 > 2500px budget) imported
+    // through the scanner's Import button: sequential normalization,
+    // progress visible, pages land in order, no crash, no console errors.
+    const importDir = path.join(os.tmpdir(), 'folio-e2e-import');
+    fs.mkdirSync(importDir, { recursive: true });
+    const importFiles = [];
+    {
+      const gen = await camBrowser.newPage();
+      await gen.setViewport({ width: 3000, height: 2000 });
+      for (let i = 0; i < 6; i += 1) {
+        await gen.setContent(
+          `<canvas id="c" width="3000" height="2000"></canvas>
+           <script>
+             const ctx = document.getElementById('c').getContext('2d');
+             const img = ctx.createImageData(3000, 2000);
+             for (let p = 0; p < img.data.length; p += 4) {
+               const n = (p * 7919 + ${i} * 104729) % 61;
+               img.data[p] = 60 + n;
+               img.data[p + 1] = 90 + (n % 40);
+               img.data[p + 2] = 120 + (n % 30);
+               img.data[p + 3] = 255;
+             }
+             ctx.putImageData(img, 0, 0);
+           </script>`,
+        );
+        const dataUrl = await gen.evaluate(() =>
+          document.getElementById('c').toDataURL('image/jpeg', 0.92),
+        );
+        const file = path.join(importDir, `phone-${String(i + 1).padStart(2, '0')}.jpg`);
+        fs.writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+        importFiles.push(file);
+      }
+      await gen.close();
+    }
+    const importTotalBytes = importFiles.reduce((sum, f) => sum + fs.statSync(f).size, 0);
+    const pagesBeforeImport = await page.evaluate(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length,
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Import images from files')
+        ?.click();
+    });
+    await upload(page, 'input[data-import-input]', importFiles);
+    // Progress strip appears (progress may be fast; absence at the final
+    // check is fine, so this is best-effort within the same tick).
+    const importProgressSeen = await page
+      .waitForFunction(() => document.querySelector('[data-import-progress]') !== null, {
+        timeout: 15000,
+      })
+      .then(() => true)
+      .catch(() => false);
+    await page.waitForFunction(
+      (expected) =>
+        document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === expected,
+      { timeout: 180000 },
+      pagesBeforeImport + importFiles.length,
+    );
+    await page.waitForFunction(() => document.querySelector('[data-import-progress]') === null, {
+      timeout: 180000,
+    });
+    const importedNames = await page.evaluate(() =>
+      [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')]
+        .slice(-6)
+        .map((li) => li.getAttribute('aria-label') ?? ''),
+    );
+    check(
+      'import progress surface is shown during bulk import',
+      importProgressSeen,
+      `seen=${importProgressSeen}`,
+    );
+    check(
+      'scanner import commits oversized images in order without crashing',
+      importedNames.length === 6 &&
+        importedNames.every((label, i) =>
+          label.includes(`phone-${String(i + 1).padStart(2, '0')}.jpg`),
+        ),
+      `${(importTotalBytes / 1048576).toFixed(1)} MB · ${importedNames.join(' | ')}`,
+    );
+    // Imported pages build a real PDF (mixed camera + imported pages).
+    // Adding pages clears the previous completion card, so Build PDF is
+    // available again with the full collection.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.startsWith('Build PDF'))
+        ?.click();
+    });
+    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+      timeout: 600000,
+    });
+    const importBuild = await page.evaluate(async () => {
+      const a = document.querySelector('a[download]');
+      if (!a) return null;
+      const res = await fetch(a.href);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return {
+        bytes: buf.length,
+        magic: String.fromCharCode(...buf.slice(0, 5)),
+        meta: document.body.innerText.match(/\d+ images? → \d+-page PDF/)?.[0] ?? null,
+      };
+    });
+    check(
+      'imported + scanned pages build one PDF in order',
+      importBuild !== null &&
+        importBuild.magic === '%PDF-' &&
+        importBuild.meta === '9 images → 9-page PDF',
+      importBuild ? `${importBuild.meta} · ${importBuild.bytes} bytes` : 'missing',
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
     await camBrowser.close();
     try {
       fs.unlinkSync(y4m);
+      fs.rmSync(importDir, { recursive: true, force: true });
     } catch {
       // Best effort temp cleanup.
     }
@@ -962,45 +1162,6 @@ async function main() {
   if (failed.length > 0) {
     console.log('Failed:', failed.map((f) => f.name).join(', '));
     process.exit(1);
-  }
-}
-
-async function waitForDownload(dir, timeoutMs, before = new Set()) {
-  const start = Date.now();
-  for (;;) {
-    const files = fs.readdirSync(dir);
-    const fresh = files.filter((f) => !before.has(f));
-    // A stuck `.crdownload` still counts as progress: keep waiting for it
-    // to resolve instead of reporting "no download". Slow blob writes
-    // under load can take minutes for ~10 MB files.
-    const done = fresh.filter((f) => !f.endsWith('.crdownload'));
-    if (done.length > 0) {
-      // Wait for the file to stop growing (download complete).
-      const full = path.join(dir, done[0]);
-      let s1 = -1;
-      let s2 = -2;
-      try {
-        s2 = fs.statSync(full).size;
-      } catch {
-        break;
-      }
-      while (s1 !== s2 && Date.now() - start < timeoutMs) {
-        await new Promise((r) => setTimeout(r, 500));
-        s1 = s2;
-        try {
-          s2 = fs.statSync(full).size;
-        } catch {
-          break;
-        }
-      }
-      return done[0];
-    }
-    if (Date.now() - start > timeoutMs) {
-      const pending = fresh.join(', ');
-      console.log(`[download-wait] timed out with pending: ${pending || '(none started)'}`);
-      return null;
-    }
-    await new Promise((r) => setTimeout(r, 500));
   }
 }
 

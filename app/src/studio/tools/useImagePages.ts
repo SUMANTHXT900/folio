@@ -17,12 +17,27 @@ import {
   type ImagePage,
   type ImageSource,
 } from './imagePages';
+import { prepareImportFile, runImportQueue, type PrepareImportResult } from './imageImport';
 
 export type { ImagePage };
 
 export interface AddFilesResult {
   added: number;
   skipped: number;
+}
+
+export interface ImportSummary {
+  added: number;
+  skipped: number;
+  failed: number;
+  cancelled: boolean;
+  /** First per-file error message, if any. */
+  firstError: string | null;
+}
+
+export interface ImportCallbacks {
+  onProgress?: (completed: number, total: number, result: PrepareImportResult) => void;
+  signal?: AbortSignal;
 }
 
 export function useImagePages() {
@@ -83,6 +98,49 @@ export function useImagePages() {
     [addEntries],
   );
 
+  /**
+   * Memory-safe bulk import (M3.x): prepares ONE file at a time
+   * (pixel-budget normalization via `imageImport.ts`) and commits each
+   * normalized page immediately — never a batch of decoded bitmaps.
+   * Pages already committed survive cancellation; the AbortSignal stops
+   * the run before the next file.
+   */
+  const importFiles = useCallback(
+    async (
+      files: File[],
+      source: ImageSource,
+      callbacks: ImportCallbacks = {},
+    ): Promise<ImportSummary> => {
+      const good = files.filter(isImageFile);
+      const skipped = files.length - good.length;
+      let added = 0;
+      let firstError: string | null = null;
+      const { outcomes, cancelled } = await runImportQueue(
+        good,
+        (file) => prepareImportFile(file),
+        (completed, total, result) => {
+          addEntries([{ file: result.file, name: result.name, source }]);
+          added += 1;
+          callbacks.onProgress?.(completed, total, result);
+        },
+        () => callbacks.signal?.aborted === true,
+      );
+      for (const outcome of outcomes) {
+        if (outcome.error !== null && firstError === null) {
+          firstError = outcome.error;
+        }
+      }
+      return {
+        added,
+        skipped,
+        failed: outcomes.filter((o) => o.error !== null).length,
+        cancelled,
+        firstError,
+      };
+    },
+    [addEntries],
+  );
+
   const move = useCallback((id: string, dir: -1 | 1) => {
     setPages((prev) => movePage(prev, id, dir));
   }, []);
@@ -110,5 +168,5 @@ export function useImagePages() {
     });
   }, []);
 
-  return { pages, addFiles, addEntries, move, moveTo, remove, rotate, clear };
+  return { pages, addFiles, addEntries, importFiles, move, moveTo, remove, rotate, clear };
 }

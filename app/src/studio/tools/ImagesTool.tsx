@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import {
   ToolHeading,
   DropZone,
@@ -52,7 +52,8 @@ const ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
  * (never in React state); pages hold File/Blob handles + preview URLs.
  */
 export default function ImagesTool() {
-  const { pages, addFiles, addEntries, move, moveTo, remove, rotate, clear } = useImagePages();
+  const { pages, addFiles, addEntries, importFiles, move, moveTo, remove, rotate, clear } =
+    useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [cameraMode, setCameraMode] = useState(false);
   // Session boundary: ids captured since the scanner was opened. Retake
@@ -82,10 +83,33 @@ export default function ImagesTool() {
     }
   };
 
+  /**
+   * Scanner import: memory-safe sequential normalization (one decode at
+   * a time, pixel-budget resize) with per-file progress and cancellation.
+   */
+  const onCameraImport = async (
+    files: File[],
+    progress: (completed: number, total: number, name: string) => void,
+    signal: AbortSignal,
+  ) => {
+    setError(null);
+    const summary = await importFiles(files, 'camera', {
+      signal,
+      onProgress: (completed, total, result) => {
+        progress(completed, total, result.name);
+      },
+    });
+    if (summary.failed > 0 && summary.firstError !== null) {
+      setError(new Error(`Couldn't import ${summary.failed} image(s): ${summary.firstError}`));
+    }
+    return summary;
+  };
+
   const onCapture = (file: File) => {
     const [id] = addEntries([{ file, name: file.name, source: 'camera' }]);
     if (id !== undefined) setSessionIds((prev) => [...prev, id]);
   };
+  void onCapture;
 
   /**
    * Accepted scan: the processed (or original) file becomes the page;
@@ -124,6 +148,17 @@ export default function ImagesTool() {
   // Session thumbnails for the scanner strip (URLs only, no byte copies).
   // Filters the live collection so removals are reflected immediately.
   const sessionPages = pages.filter((p) => sessionIds.includes(p.id));
+
+  // A completed PDF is stale the moment the collection or page-size
+  // policy changes (import/capture/remove/reorder/rotate/clear). Clearing
+  // the completion card brings Build PDF back AND releases the previous
+  // output Blob (P2) — post-build imports are a first-class flow now that
+  // the scanner can import from inside the camera surface. (On mount the
+  // state is already empty; these setters are no-ops.)
+  useEffect(() => {
+    setDone(null);
+    setMeta([]);
+  }, [pages, pageSize]);
 
   const onBuild = async () => {
     if (pages.length === 0) return;
@@ -248,8 +283,8 @@ export default function ImagesTool() {
         <div className="space-y-5">
           {cameraMode ? (
             <CameraCapture
-              onCapture={onCapture}
               onScanAccept={onScanAccept}
+              onImportFiles={onCameraImport}
               onRetake={onRetake}
               onDone={() => {
                 setCameraMode(false);

@@ -8,7 +8,7 @@
  */
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useImagePages } from './useImagePages';
+import { useImagePages, type ImportSummary } from './useImagePages';
 
 let counter = 0;
 const created: string[] = [];
@@ -119,5 +119,135 @@ describe('useImagePages', () => {
     });
     expect(res).toEqual({ added: 1, skipped: 1 });
     expect(result.current.pages).toHaveLength(1);
+  });
+
+  describe('importFiles (memory-safe bulk import)', () => {
+    // jsdom has no createImageBitmap; stub the browser decoder so the
+    // REAL queue + normalization path runs against synthetic dimensions.
+    const stubDecode = (dims: { width: number; height: number }) => {
+      Object.defineProperty(globalThis, 'createImageBitmap', {
+        value: vi.fn(async () => ({
+          width: dims.width,
+          height: dims.height,
+          close: vi.fn(),
+        })),
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(globalThis, 'OffscreenCanvas', {
+        value: class {
+          constructor(
+            public width: number,
+            public height: number,
+          ) {}
+          getContext() {
+            return { drawImage: vi.fn() };
+          }
+          async convertToBlob() {
+            return new Blob([new Uint8Array([9, 9])], { type: 'image/jpeg' });
+          }
+        },
+        configurable: true,
+        writable: true,
+      });
+    };
+
+    afterEach(() => {
+      // @ts-expect-error test-only cleanup of stubbed globals
+      delete globalThis.createImageBitmap;
+      // @ts-expect-error test-only cleanup of stubbed globals
+      delete globalThis.OffscreenCanvas;
+    });
+
+    it('commits normalized pages one at a time with progress', async () => {
+      stubDecode({ width: 4000, height: 3000 });
+      const { result } = renderHook(() => useImagePages());
+      const progress: Array<[number, number]> = [];
+      let summary: ImportSummary = {
+        added: 0,
+        skipped: 0,
+        failed: 0,
+        cancelled: false,
+        firstError: null,
+      };
+      await act(async () => {
+        summary = await result.current.importFiles(
+          [upload('a.jpg'), upload('b.jpg'), upload('c.jpg')],
+          'camera',
+          { onProgress: (completed, total) => progress.push([completed, total]) },
+        );
+      });
+      expect(summary.added).toBe(3);
+      expect(summary.failed).toBe(0);
+      expect(result.current.pages).toHaveLength(3);
+      expect(progress).toEqual([
+        [1, 3],
+        [2, 3],
+        [3, 3],
+      ]);
+      // Each page got exactly one preview URL; all are live.
+      expect(created).toEqual(['blob:mock-1', 'blob:mock-2', 'blob:mock-3']);
+      expect(revoked).toEqual([]);
+    });
+
+    it('keeps already-committed pages on cancellation', async () => {
+      stubDecode({ width: 100, height: 100 });
+      const { result } = renderHook(() => useImagePages());
+      const controller = new AbortController();
+      let summary: ImportSummary = {
+        added: 0,
+        skipped: 0,
+        failed: 0,
+        cancelled: false,
+        firstError: null,
+      };
+      await act(async () => {
+        const job = result.current.importFiles(
+          [upload('a.jpg'), upload('b.jpg'), upload('c.jpg')],
+          'camera',
+          {
+            signal: controller.signal,
+            onProgress: (completed) => {
+              if (completed === 1) controller.abort();
+            },
+          },
+        );
+        summary = await job;
+      });
+      expect(summary.cancelled).toBe(true);
+      expect(summary.added).toBe(1);
+      expect(result.current.pages).toHaveLength(1);
+      // The committed page's preview URL survives; none were revoked.
+      expect(revoked).toEqual([]);
+    });
+
+    it('isolates per-file failures and reports the first error', async () => {
+      Object.defineProperty(globalThis, 'createImageBitmap', {
+        value: vi.fn(async (f: File) => {
+          if (f.name.startsWith('bad')) throw new Error('unsupported format');
+          return { width: 100, height: 100, close: vi.fn() };
+        }),
+        configurable: true,
+        writable: true,
+      });
+      const { result } = renderHook(() => useImagePages());
+      let summary: ImportSummary = {
+        added: 0,
+        skipped: 0,
+        failed: 0,
+        cancelled: false,
+        firstError: null,
+      };
+      await act(async () => {
+        summary = await result.current.importFiles(
+          [upload('a.jpg'), upload('bad.jpg'), upload('c.jpg')],
+          'camera',
+        );
+      });
+      expect(summary.added).toBe(2);
+      expect(summary.failed).toBe(1);
+      expect(summary.firstError).toContain('unsupported format');
+      expect(result.current.pages.map((p) => p.name)).toEqual(['a.jpg', 'c.jpg']);
+    });
   });
 });
