@@ -182,3 +182,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit 205 (15 new: 10 import normalization/queue + 7 hook import + updated scanner tests). Canonical E2E 42/42 + 4 SKIP, zero console errors; import regression in E2E: 6 × 3000×2000 JPEGs (2.4 MB) committed in order, build → `9 images → 9-page PDF`, 76 MB output, no crash. typecheck/lint/format clean; production build clean (36 precache entries, 4702 KB). Rust untouched (346 tests green at e2b42e6).
 - **Real-device status.** Android validation **PENDING** — the affected phone must run: 10/20/30/50 imported photos, 30 camera captures, mixed, import-while-scanning, cancel halfway, remove imported pages, build. iOS Safari pending. No claims made.
 - **Remaining.** M4 untouched; no version bump; IDM-bypass is test-harness only (no product change).
+
+- **Deploy.** M3.x build deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
