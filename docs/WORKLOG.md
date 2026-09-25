@@ -203,3 +203,11 @@ Chronological record of meaningful development events. Each entry records object
 - **Remaining.** Real-device validation; M4 untouched; no version bump.
 
 - **Deploy.** Scanner-shell fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-25 — Scanner viewport + page-manager UX fixes (real-device screenshots)
+
+- **Objective.** Fix phone-verified defects: letterboxed viewfinder with misregistered guide after captures, truncated scanner top bar, noisy page-manager cards.
+- **Work.** New `scanViewport.ts`: the viewport wrapper flexes to leftover space and a ResizeObserver measures its real pixel box; a pure, unit-tested `containRect()` computes the exact painted rect for the negotiated video ratio, and video + overlay both render exactly that rect — zero letterbox bars by construction (replaces fragile `aspect-ratio` + `100dvh - 240px` CSS that diverged whenever strip/review/topbar changed the chrome). Ratio source priority: track settings → video dims → 3:4. Zero-size measurements are never stored (hidden-state guard). `PageGrid.tsx`: document-shaped 3:4 previews, single-line name (size in tooltip), h-9 controls. `ImagesTool.tsx`: non-wrapping header (truncate + shrink-0 Clear). Scanner topbar: title/import text hide below ~400–430px (icons + aria-labels remain). Removed the redundant bottom hint row (pill + sr live region suffice).
+- **Findings.** The desktop E2E HUD check caught a real race the fix also hardens: measuring between unhide and the observer refire yielded a zero box — now impossible by construction, and the E2E waits for a non-zero box. Debug confirmed the measured layout renders the fake 640×480 stream at exactly 710×532.5 with no bars.
+- **Verification.** Unit **210 passed** (4 new viewport math); canonical E2E **41/41 + 4 SKIP in ~39s**; typecheck/lint/format clean; production build clean (zero testbench strings). Real-device re-check still PENDING.
+- **Remaining.** Real-device Android validation; M4 untouched; no version bump.

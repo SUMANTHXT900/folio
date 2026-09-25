@@ -842,7 +842,9 @@ async function main() {
       (g.strip === null ||
         (g.strip.top >= g.viewport.bottom - 1 && g.strip.bottom <= g.shutter.top + 1)) &&
       g.torch === false;
-    // Desktop composition (current 1280px viewport): reopen the scanner.
+    // Desktop composition (current 1280px viewport): reopen the scanner,
+    // then wait until the measured viewport box is non-zero (the hook
+    // intentionally never stores the hidden-state zero box).
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
@@ -850,6 +852,14 @@ async function main() {
       () => {
         const v = document.querySelector('video');
         return v !== null && v.videoWidth > 100;
+      },
+      { timeout: 30000 },
+    );
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        const r = v?.parentElement?.getBoundingClientRect();
+        return r !== undefined && r.width > 10 && r.height > 10;
       },
       { timeout: 30000 },
     );

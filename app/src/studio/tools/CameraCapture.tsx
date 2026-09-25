@@ -33,6 +33,7 @@ import {
   type CameraCapabilities,
 } from './cameraCapabilities';
 import { buildVideoConstraints } from './cameraConstraints';
+import { useContainBox } from './scanViewport';
 import { useScanProcessor } from './scan/useScanProcessor';
 
 /** Import state for the scanner's image-picker flow. */
@@ -153,9 +154,11 @@ export function CameraCapture({
   const [torchDead, setTorchDead] = useState(false);
   const [controlNote, setControlNote] = useState<string | null>(null);
   const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
-  // Real frame aspect (letterboxed, never cropped). Defaults to 4:3
-  // until the stream reports dimensions; tracks orientation changes.
-  const [aspect, setAspect] = useState({ w: 4, h: 3 });
+  // Real frame aspect. Source priority: negotiated track settings
+  // (exact, available before first frame) → video element dims →
+  // 3:4 fallback. Track settings win because `videoWidth` can lag
+  // behind a camera switch while the old frame is still painted.
+  const [aspect, setAspect] = useState({ w: 3, h: 4 });
 
   // Document scanner (M3): capture → worker → review state machine.
   // `original` mode bypasses it entirely (v1.9 direct capture).
@@ -233,6 +236,15 @@ export function CameraCapture({
             `[folio-camera] negotiated ${s.width ?? '?'}x${s.height ?? '?'}@${s.frameRate ?? '?'}fps` +
               (s.deviceId ? ` device=${s.deviceId.slice(0, 8)}` : ''),
           );
+          // Most reliable ratio source: the negotiated frame size itself.
+          if (
+            typeof s.width === 'number' &&
+            typeof s.height === 'number' &&
+            s.width > 0 &&
+            s.height > 0
+          ) {
+            setAspect({ w: s.width, h: s.height });
+          }
         }
         const detected = readTrackCapabilities(videoTrack);
         setCaps(detected);
@@ -529,6 +541,7 @@ export function CameraCapture({
   }, [status, scan.processing, scan.pending, scan.requestLive]);
 
   const ratio = aspect.w / aspect.h;
+  const viewport = useContainBox<HTMLDivElement>(ratio);
 
   // -- Import (native picker; pages commit one at a time) ---------------
 
@@ -613,9 +626,9 @@ export function CameraCapture({
             Back
           </button>
           <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
-            Scan document
+            <span className="hidden min-[430px]:inline">Scan document</span>
             {sessionPages.length > 0 && (
-              <span className="ml-2 rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300">
+              <span className="rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300 min-[430px]:ml-2">
                 {sessionPages.length} captured
               </span>
             )}
@@ -652,7 +665,7 @@ export function CameraCapture({
             >
               <path d="M12 5v14M5 12h14" />
             </svg>
-            Import
+            <span className="hidden min-[400px]:inline">Import</span>
           </button>
           {/* Primary CTA once pages exist: the user must always know how to
               reach the page list (where Build PDF / rearrange live). */}
@@ -798,18 +811,25 @@ export function CameraCapture({
               'flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'
             }
           >
-            {/* Viewport: exact frame aspect, letterboxed — the full frame
-              stays visible and matches the captured image. Flexes to the
-              remaining height; the page itself never scrolls on mobile. */}
-            <div className="flex min-h-0 flex-1 justify-center">
+            {/* Viewport: the wrapper flexes to leftover space; the content
+              box is MEASURED (see scanViewport.ts) so video and overlay
+              always share the exact painted rect — zero letterbox bars by
+              construction, guide always registered. Shrinks instead of
+              pushing content off-screen when the strip/review appear. */}
+            <div
+              ref={viewport.ref}
+              className="flex min-h-[12rem] flex-1 items-center justify-center"
+            >
               <div
-                className="relative w-full self-center overflow-hidden rounded-xl bg-ink-950"
-                style={{
-                  aspectRatio: `${aspect.w} / ${aspect.h}`,
-                  maxHeight: '100%',
-                  width: ratio < 1 ? `min(100%, calc((100dvh - 240px) * ${ratio}))` : '100%',
-                  maxWidth: `calc((100dvh - 240px) * ${ratio})`,
-                }}
+                className="relative overflow-hidden rounded-xl bg-ink-950"
+                style={
+                  viewport.rect === null
+                    ? { width: '100%', aspectRatio: `${aspect.w} / ${aspect.h}` }
+                    : {
+                        width: `${viewport.rect.w}px`,
+                        height: `${viewport.rect.h}px`,
+                      }
+                }
                 onClick={tapToFocus}
               >
                 <video
@@ -819,7 +839,7 @@ export function CameraCapture({
                   autoPlay
                   onLoadedMetadata={syncAspect}
                   onResize={syncAspect}
-                  className="absolute inset-0 h-full w-full object-contain"
+                  className="absolute inset-0 h-full w-full"
                   style={facing === 'user' ? { transform: 'scaleX(-1)' } : undefined}
                 />
                 <ScannerOverlay grid={grid} />
@@ -1040,7 +1060,7 @@ export function CameraCapture({
 
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="text-xs text-ink-400 dark:text-ink-300">
-                Frame the page in the guide — captures and imports join the page list.
+                Captures and imports join the page list below.
                 {caps.supportsTapToFocus ? ' Tap the preview to refocus.' : ''}
               </span>
             </div>

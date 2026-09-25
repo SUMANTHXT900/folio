@@ -44,7 +44,7 @@ interface PageGridProps {
 }
 
 const controlBtn =
-  'flex h-10 min-w-10 items-center justify-center rounded-lg px-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 disabled:opacity-25 dark:text-ink-300 dark:hover:bg-ink-700 dark:hover:text-paper-100';
+  'flex h-9 min-w-9 items-center justify-center rounded-lg px-1.5 text-sm text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 disabled:opacity-25 dark:text-ink-300 dark:hover:bg-ink-700 dark:hover:text-paper-100';
 
 const GripIcon = (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
@@ -103,7 +103,9 @@ const PageCard = memo(function PageCard({
           }`}
         />
       )}
-      <div className="relative flex aspect-square items-center justify-center overflow-hidden bg-paper-200/60 dark:bg-ink-900/60">
+      {/* Compact preview: document-shaped 3:4 box matches typical scans,
+          so there is no dead band around the content. */}
+      <div className="relative flex aspect-[3/4] items-center justify-center overflow-hidden bg-paper-200/60 dark:bg-ink-900/60">
         {page.previewUrl ? (
           <img
             src={page.previewUrl}
@@ -111,32 +113,29 @@ const PageCard = memo(function PageCard({
             loading="lazy"
             decoding="async"
             draggable={false}
-            className="max-h-full max-w-full object-contain transition-transform duration-200"
+            className="h-full w-full object-contain transition-transform duration-200"
             style={{ transform: `rotate(${page.rotationDeg}deg)` }}
           />
         ) : (
           <div className="h-full w-full animate-pulse" />
         )}
-        <span className="absolute left-2 top-2 rounded-full bg-ink-900/80 px-2 py-0.5 font-mono text-xs text-paper-50 tabular-nums dark:bg-paper-100/90 dark:text-ink-900">
+        <span className="absolute left-1.5 top-1.5 rounded-full bg-ink-900/80 px-1.5 py-px font-mono text-[11px] text-paper-50 tabular-nums dark:bg-paper-100/90 dark:text-ink-900">
           {position + 1}
         </span>
         <span
-          className="absolute right-2 top-2 rounded-full bg-ink-900/70 px-2 py-0.5 text-[11px] text-paper-50 dark:bg-paper-100/85 dark:text-ink-900"
+          className="absolute right-1.5 top-1.5 rounded-full bg-ink-900/70 px-1.5 py-px text-[10px] leading-4 text-paper-50 dark:bg-paper-100/85 dark:text-ink-900"
           title={page.source === 'camera' ? 'Captured with camera' : 'Uploaded from files'}
         >
           {page.source === 'camera' ? '📷' : '📁'}
         </span>
         {page.rotationDeg !== 0 && (
-          <span className="absolute bottom-2 right-2 rounded-full bg-brass-500/90 px-2 py-0.5 font-mono text-[11px] text-white">
+          <span className="absolute bottom-1.5 right-1.5 rounded-full bg-brass-500/90 px-1.5 py-px font-mono text-[10px] leading-4 text-white">
             {page.rotationDeg}°
           </span>
         )}
       </div>
-      <div className="min-w-0 px-2 pt-1.5">
+      <div className="min-w-0 px-2 pb-1 pt-1" title={`${page.name} · ${formatBytes(page.size)}`}>
         <p className="truncate text-xs font-medium text-ink-900 dark:text-paper-100">{page.name}</p>
-        <p className="font-mono text-[11px] text-ink-400 dark:text-ink-300">
-          {formatBytes(page.size)}
-        </p>
       </div>
       <div className="flex items-center justify-between px-1 pb-1">
         <div className="flex items-center">

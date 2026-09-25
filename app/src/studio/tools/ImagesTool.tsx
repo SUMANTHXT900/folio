@@ -312,13 +312,13 @@ export default function ImagesTool() {
           )}
 
           <Card>
-            <div className="mb-3 flex items-center justify-between">
-              <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
                 {pages.length} page{pages.length === 1 ? '' : 's'} · top-to-bottom is PDF order
               </p>
               <button
                 onClick={onClearAll}
-                className="rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-ink-300 dark:hover:bg-red-950/30"
+                className="shrink-0 whitespace-nowrap rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-ink-300 dark:hover:bg-red-950/30"
               >
                 Clear all
               </button>
