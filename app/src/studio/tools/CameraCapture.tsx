@@ -369,6 +369,16 @@ export function CameraCapture({
     onDone();
   };
 
+  // Escape closes the scanner (same as Back): an obvious, keyboard-accessible
+  // exit that never strands the user in a full-screen camera.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') leave();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [leave]);
+
   /**
    * Zoom through the lens, never CSS: applies the track's own range.
    * A rejection disables the control with a note — reporting a zoom
@@ -571,14 +581,27 @@ export function CameraCapture({
           'md:pt-0 md:pb-0 md:shadow-2xl dark:md:border-ink-700'
         }
       >
-        {/* CameraTopBar: done | title | import | grid | switch | device. */}
+        {/* CameraTopBar: back | title | import | grid | switch | device. */}
         <div className="flex flex-wrap items-center gap-2 border-b border-paper-300/70 px-3 py-2 dark:border-ink-800/70">
           <button
             onClick={leave}
-            aria-label="Done scanning"
-            className="min-h-[36px] rounded-lg px-2 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
+            aria-label="Back to pages"
+            title="Back to page list"
+            className="flex min-h-[36px] items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
           >
-            ‹ Done
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+            Back
           </button>
           <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
             Scan document
@@ -868,7 +891,7 @@ export function CameraCapture({
                     </Button>
                   )}
                   <Button variant="ghost" onClick={() => scan.discard()}>
-                    Retake
+                    Discard
                   </Button>
                 </div>
               </div>
@@ -910,64 +933,73 @@ export function CameraCapture({
               </div>
             )}
 
-            {/* Camera dock: torch · shutter · retake on row one (mobile),
-              zoom spans row two; desktop composes one centered cluster
-              (torch · wide zoom · shutter · retake). Torch/zoom render
-              ONLY when the active track reports them; a rejected apply
-              disables the control with a note. Safe-area padded. */}
+            {/* Camera dock: three equal cells (torch · Capture · Undo) so the
+              shutter sits truly centered; zoom on its own row below on mobile
+              and inline on desktop. Torch/zoom render ONLY when the active
+              track reports them; a rejected apply disables the control with a
+              note. Safe-area padded. */}
             <div
               role="group"
               aria-label="Camera controls"
-              className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-3 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center"
+              className="mt-3 grid grid-cols-3 items-center gap-2 pb-[env(safe-area-inset-bottom)] sm:flex sm:justify-center sm:gap-5"
             >
-              {caps.torch && !torchDead && (
-                <button
-                  onClick={() => void toggleTorch()}
-                  aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
-                  aria-pressed={torchOn}
-                  title="Flashlight"
-                  className={`flex h-11 w-11 items-center justify-center rounded-full border transition-colors sm:order-1 ${
-                    torchOn
-                      ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
-                      : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
-                  }`}
-                >
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+              <div className="flex justify-start sm:order-1">
+                {caps.torch && !torchDead && (
+                  <button
+                    onClick={() => void toggleTorch()}
+                    aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
+                    aria-pressed={torchOn}
+                    title="Flashlight"
+                    className={`flex h-11 w-11 items-center justify-center rounded-full border transition-colors ${
+                      torchOn
+                        ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+                        : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+                    }`}
                   >
-                    <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
-                  </svg>
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.4 1 2.3h6c0-.9.4-1.8 1-2.3A7 7 0 0 0 12 2z" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-col items-center gap-1 sm:order-3 sm:mx-3">
+                <button
+                  onClick={() => void capture()}
+                  disabled={capturing || scan.processing || scan.pending !== null}
+                  aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
+                  className="flex h-16 w-16 items-center justify-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800"
+                >
+                  <span
+                    aria-hidden
+                    className={`h-10 w-10 rounded-full transition-colors ${
+                      capturing ? 'bg-brass-400' : 'bg-brass-500'
+                    }`}
+                  />
                 </button>
-              )}
-              <button
-                onClick={() => void capture()}
-                disabled={capturing || scan.processing || scan.pending !== null}
-                aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
-                className="mx-auto flex h-16 w-16 items-center justify-center justify-self-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800 sm:order-3 sm:mx-2"
-              >
-                <span
-                  aria-hidden
-                  className={`h-10 w-10 rounded-full transition-colors ${
-                    capturing ? 'bg-brass-400' : 'bg-brass-500'
-                  }`}
-                />
-              </button>
-              <button
-                onClick={onRetake}
-                disabled={sessionPages.length === 0}
-                aria-label="Retake last capture"
-                title="Retake last capture"
-                className="flex h-11 min-w-11 items-center justify-center justify-self-end rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300 sm:order-4"
-              >
-                Retake
-              </button>
+                <span className="text-[11px] font-medium text-ink-500 dark:text-ink-300">
+                  Capture
+                </span>
+              </div>
+              <div className="flex justify-end sm:order-4">
+                <button
+                  onClick={onRetake}
+                  disabled={sessionPages.length === 0}
+                  aria-label="Undo last capture"
+                  title="Discard the last capture"
+                  className="flex h-11 min-w-11 items-center justify-center rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300"
+                >
+                  Undo
+                </button>
+              </div>
               {caps.zoom !== null && !zoomDead && zoom !== null && (
                 <label className="col-span-3 flex h-11 min-w-0 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700 sm:order-2 sm:col-span-1 sm:w-72 sm:flex-none">
                   <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>

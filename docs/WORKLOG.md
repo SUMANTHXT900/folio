@@ -184,3 +184,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Remaining.** M4 untouched; no version bump; IDM-bypass is test-harness only (no product change).
 
 - **Deploy.** M3.x build deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-25 — Scanner UX polish + E2E suite fixes (M3.x follow-up)
+
+- **Objective.** Make the camera surface self-explanatory and stop the E2E suite from wasting time.
+- **Work.** Camera UX: Back button (chevron icon, aria "Back to pages", Escape-to-close), dock rebuilt as three equal cells so the shutter is truly centered with a visible "Capture" label, dock "Retake" renamed to "Undo" (aria "Undo last capture"), review "Retake" renamed to "Discard", import fixtures in the suite switched from per-pixel JS noise (the slowest step in the suite by far) to fast canvas fills. Removed the flaky timing-dependent "import progress surface" assertion (progress may flash by too quickly to observe reliably — the actual guarantee, pages committing in order, is asserted directly). Renamed "Done scanning" → "Back to pages" throughout tests/E2E for consistency with the new UX.
+- **Verification.** Unit 205 (5.3s). Canonical E2E 41/41 + 4 SKIP in **28.3s** (was several minutes — the per-pixel noise loops and the timing-dependent check were the main cost). typecheck/lint/format clean; production build clean (36 precache entries, zero testbench strings).
+- **Remaining.** Real-device Android validation still PENDING; M4 untouched; no version bump.

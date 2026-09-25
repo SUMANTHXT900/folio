@@ -139,9 +139,9 @@ describe('CameraCapture scanner UI', () => {
     expect(screen.getByText('2 captured')).toBeTruthy();
     expect(screen.getByAltText('Captured page 2: scan-002.jpg')).toBeTruthy();
     // Retake enabled with session pages.
-    expect(screen.getByLabelText('Retake last capture')).toBeTruthy();
+    expect(screen.getByLabelText('Undo last capture')).toBeTruthy();
     // Done stops the stream and leaves.
-    fireEvent.click(screen.getByLabelText('Done scanning'));
+    fireEvent.click(screen.getByLabelText('Back to pages'));
     expect(stopTrack).toHaveBeenCalledTimes(1);
     expect(onDone).toHaveBeenCalledTimes(1);
     unmount();
@@ -178,12 +178,12 @@ describe('CameraCapture responsive HUD', () => {
     );
     await screen.findByLabelText('Capture page');
     // TopBar: close + grid + switch.
-    expect(screen.getByLabelText('Done scanning')).toBeTruthy();
+    expect(screen.getByLabelText('Back to pages')).toBeTruthy();
     expect(screen.getByLabelText('Show alignment grid')).toBeTruthy();
     expect(screen.getByLabelText('Switch camera')).toBeTruthy();
     // Dock group with shutter + retake.
     expect(screen.getByLabelText('Camera controls')).toBeTruthy();
-    expect(screen.getByLabelText('Retake last capture')).toBeTruthy();
+    expect(screen.getByLabelText('Undo last capture')).toBeTruthy();
     // Session strip intact.
     expect(screen.getByLabelText('Pages captured this session')).toBeTruthy();
   });
