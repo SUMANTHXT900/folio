@@ -266,3 +266,9 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit **229**; E2E **45/45 + 4 SKIP twice**; typecheck/lint/format clean. No version bump.
 
 - **Deploy.** PNG fix + page-list parity deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Gallery re-test: PNG screenshots should now build at JPEG scale.
+
+## 2026-09-26 — Unified Images entry card
+
+- **Objective.** Phone report: empty-state upload + camera were two disconnected cards.
+- **Work.** `ImagesTool.tsx`: single "Add pages" surface with staggered Upload / Scan tiles (hover lift, tap compress, drag-over spotlight on the upload tile, whole card is a drop target). DropZone no longer used here; the single hidden file input keeps the E2E upload selector stable.
+- **Verification.** Unit 229; E2E **46/46 + 4 SKIP** (new: entry-card check); typecheck/lint/format clean. No version bump.

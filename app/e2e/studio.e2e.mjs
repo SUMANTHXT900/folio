@@ -478,6 +478,20 @@ async function main() {
   {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'images');
+    // Unified entry card: one surface, upload + camera tiles together.
+    const entryCard = await page.evaluate(() => {
+      const text = document.body.innerText;
+      return {
+        hasCard: text.includes('Add pages'),
+        hasUpload: text.includes('Upload images'),
+        hasCamera: text.includes('Scan with camera'),
+      };
+    });
+    check(
+      'images entry is one card with upload + camera options',
+      entryCard.hasCard && entryCard.hasUpload && entryCard.hasCamera,
+      JSON.stringify(entryCard),
+    );
     const red = path.join(__dirname, 'fixtures', 'red-wide.png');
     const blue = path.join(__dirname, 'fixtures', 'blue-tall.jpg');
     const cardOrder = () =>

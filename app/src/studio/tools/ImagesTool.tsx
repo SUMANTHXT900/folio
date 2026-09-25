@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   ToolHeading,
-  DropZone,
   Button,
   Card,
   DoneBanner,
@@ -264,38 +264,14 @@ export default function ImagesTool() {
 
       {pages.length === 0 && !cameraMode ? (
         <div className="space-y-4">
-          <DropZone
-            accept={ACCEPT}
-            multiple
+          <EntryCard
             onFiles={addUploads}
-            title="Drop your images here"
-            cta="Select images"
+            cameraSupported={cameraSupported}
+            onCamera={() => {
+              setSessionIds([]);
+              setCameraMode(true);
+            }}
           />
-          {cameraSupported && (
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setSessionIds([]);
-                setCameraMode(true);
-              }}
-              className="w-full"
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                <circle cx="12" cy="13" r="4" />
-              </svg>
-              Scan with camera
-            </Button>
-          )}
           {error !== null && <ErrorBlock error={error} />}
         </div>
       ) : (
@@ -442,5 +418,186 @@ export default function ImagesTool() {
         </div>
       )}
     </div>
+  );
+}
+
+const ease = [0.22, 1, 0.36, 1] as const;
+
+/**
+ * Unified entry card: upload and camera are two animated tiles in ONE
+ * surface instead of two disconnected cards. The whole card is a drop
+ * target (drag-over spotlights the upload tile); tiles stagger in,
+ * lift on hover, and compress on tap.
+ */
+function EntryCard({
+  onFiles,
+  cameraSupported,
+  onCamera,
+}: {
+  onFiles: (files: File[]) => void;
+  cameraSupported: boolean;
+  onCamera: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [over, setOver] = useState(false);
+
+  const tiles = (
+    <>
+      <motion.button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        initial={{ opacity: 0, y: 14 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease, delay: 0.08 }}
+        whileHover={{ y: -3 }}
+        whileTap={{ scale: 0.97 }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setOver(true);
+        }}
+        className={`group relative flex flex-1 flex-col items-center gap-2.5 overflow-hidden rounded-2xl border-2 border-dashed px-4 py-7 text-center transition-colors sm:py-9 ${
+          over
+            ? 'border-brass-400 bg-brass-400/[0.1] shadow-[0_0_0_5px_color-mix(in_srgb,var(--color-brass-400)_16%,transparent)]'
+            : 'border-brass-500/35 hover:border-brass-400/60 hover:bg-brass-400/[0.04] dark:border-brass-400/25'
+        }`}
+      >
+        <motion.span
+          animate={over ? { scale: 1.1, rotate: -4 } : { scale: 1, rotate: 0 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 17 }}
+          className={`flex items-center justify-center rounded-2xl p-3 shadow-sm ring-1 transition-colors ${
+            over
+              ? 'bg-brass-400 text-white ring-brass-400/40'
+              : 'bg-ink-900 text-paper-50 ring-black/5 group-hover:bg-brass-500 dark:bg-paper-100 dark:text-ink-900 dark:ring-white/10'
+          }`}
+          aria-hidden
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="9" cy="9" r="2" />
+            <path d="m21 15-3.5-3.5a2 2 0 0 0-3 0L6 20" />
+          </svg>
+        </motion.span>
+        <span>
+          <span className="block font-display text-base font-semibold text-ink-900 dark:text-paper-100">
+            Upload images
+          </span>
+          <span className="mt-1 block text-xs text-ink-500 dark:text-ink-300">
+            Gallery, screenshots, downloads
+          </span>
+        </span>
+        <AnimatePresence>
+          {over && (
+            <motion.span
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="text-[11px] font-semibold uppercase tracking-wider text-brass-600 dark:text-brass-300"
+            >
+              release to add
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </motion.button>
+
+      {cameraSupported && (
+        <motion.button
+          type="button"
+          onClick={onCamera}
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, ease, delay: 0.16 }}
+          whileHover={{ y: -3 }}
+          whileTap={{ scale: 0.97 }}
+          className="group relative flex flex-1 flex-col items-center gap-2.5 overflow-hidden rounded-2xl border border-brass-500/25 bg-brass-400/[0.07] px-4 py-7 text-center transition-colors hover:border-brass-400/50 hover:bg-brass-400/[0.12] sm:py-9 dark:border-brass-400/20"
+        >
+          <motion.span
+            className="flex items-center justify-center rounded-2xl bg-brass-500 p-3 text-white shadow-sm ring-1 ring-brass-500/30 transition-colors group-hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900"
+            aria-hidden
+            whileHover={{ rotate: 6 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 15 }}
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+          </motion.span>
+          <span>
+            <span className="block font-display text-base font-semibold text-ink-900 dark:text-paper-100">
+              Scan with camera
+            </span>
+            <span className="mt-1 block text-xs text-ink-500 dark:text-ink-300">
+              Auto-crop + enhance on device
+            </span>
+          </span>
+        </motion.button>
+      )}
+    </>
+  );
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length) onFiles(files);
+      }}
+      className="relative overflow-hidden rounded-2xl border border-paper-300/70 bg-paper-50/85 p-4 shadow-soft sm:p-5 dark:border-ink-700 dark:bg-ink-800/60"
+    >
+      {/* subtle grid */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-[0.05] dark:opacity-[0.07]"
+        style={{
+          backgroundImage:
+            'radial-gradient(circle at 1px 1px, var(--color-brass-500) 1px, transparent 0)',
+          backgroundSize: '20px 20px',
+        }}
+      />
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPT}
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          void onFiles(Array.from(e.target.files ?? []));
+          e.target.value = '';
+        }}
+      />
+      <p className="relative mb-3 text-center font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+        Add pages
+      </p>
+      <div className="relative flex flex-col gap-3 sm:flex-row">{tiles}</div>
+      <p className="relative mt-3 text-center text-[11px] text-ink-400 dark:text-ink-300">
+        100% on-device — files never leave your browser.
+      </p>
+    </motion.div>
   );
 }
