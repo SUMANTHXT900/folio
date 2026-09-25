@@ -1,4 +1,6 @@
 import { motion } from 'framer-motion';
+import { useState } from 'react';
+import { updateManager, usePwaUpdate } from '../pwa/usePwaUpdate';
 import { ToolHeading } from './components/ui';
 
 declare const __FOLIO_VERSION__: string;
@@ -73,6 +75,70 @@ const ENTRIES: Entry[] = [
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
+function UpdateCard() {
+  const state = usePwaUpdate();
+  const [showLog, setShowLog] = useState(false);
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease }}
+      aria-label="App updates"
+      className="mb-6 rounded-2xl border border-paper-300/70 dark:border-ink-700 bg-paper-50/85 dark:bg-ink-800/60 p-5 shadow-soft"
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="font-display text-base font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+            App updates
+          </h2>
+          <p className="mt-0.5 text-sm text-ink-500 dark:text-ink-300" role="status">
+            {state.statusText}
+          </p>
+        </div>
+        <span className="inline-flex items-center rounded-full border border-brass-500/25 bg-brass-400/[0.08] px-3 py-1 font-mono text-xs text-brass-600 dark:text-brass-300">
+          v{typeof __FOLIO_VERSION__ !== 'undefined' ? __FOLIO_VERSION__ : '1.1.0'}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void updateManager.checkForUpdates(true)}
+          disabled={!state.canCheck}
+          className="rounded-xl border border-paper-300 dark:border-ink-700 px-4 py-2 text-sm font-medium text-ink-700 dark:text-paper-100 transition-colors hover:bg-paper-200 dark:hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {state.checking ? 'Checking…' : 'Check for updates'}
+        </button>
+        {state.updateAvailable && (
+          <button
+            type="button"
+            onClick={() => updateManager.applyUpdate()}
+            className="rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-4 py-2 text-sm font-medium shadow-sm hover:opacity-90 transition-opacity"
+          >
+            Update now
+          </button>
+        )}
+        {state.log.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowLog((v) => !v)}
+            aria-expanded={showLog}
+            className="text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 dark:hover:text-paper-100 transition-colors px-2 py-2"
+          >
+            {showLog ? 'Hide details' : 'Details'}
+          </button>
+        )}
+      </div>
+      {showLog && state.log.length > 0 && (
+        <ol className="mt-3 space-y-1 rounded-xl bg-ink-900/[0.04] dark:bg-ink-950/60 p-3 font-mono text-[11px] leading-relaxed text-ink-500 dark:text-ink-300">
+          {state.log.map((line, i) => (
+            <li key={`${i}-${line.slice(0, 16)}`}>› {line}</li>
+          ))}
+        </ol>
+      )}
+    </motion.section>
+  );
+}
+
 export default function About() {
   return (
     <div className="py-2">
@@ -95,6 +161,12 @@ export default function About() {
         name="About Folio"
         desc="Private PDF tools — built so your documents never have to leave your hands."
       />
+
+      {/* App updates — one-tap escape from a hard-cached PWA (F-13).
+          The worker updates in the background; this card surfaces the
+          waiting version and applies it, with diagnostics for debugging
+          stale installs on phones. */}
+      <UpdateCard />
 
       {/* split layout: sticky mission left, scrolling content right */}
       <div className="grid lg:grid-cols-[minmax(280px,5fr)_minmax(320px,7fr)] gap-6 lg:gap-10">

@@ -233,3 +233,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Remaining.** Real-device Android validation (the actual notebook photos); M4 untouched; no version bump.
 
 - **Deploy.** Detection + UX fixes deployed to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`). Scan WASM 514 → 541 KB (still « 8 MB precache budget).
+
+## 2026-09-26 — PWA update manager (F-13, SYNAPSE pattern)
+
+- **Objective.** Post-deploy the installed PWA stayed stale with no in-app recourse (hard refresh only — undiscoverable on mobile). Port the update-manager pattern from SYNAPSE.
+- **Work.** New `app/src/pwa/` boundary: `updateManager.ts` (framework-free store over `virtual:pwa-register`: silent ~3s launch check, manual `registration.update()` + 5s settle wait, localhost/insecure-LAN guard, capped log), `usePwaUpdate.ts` hook, `UpdateBanner.tsx` (global one-tap `updateSW(true)` banner), About "App updates" card (Check / Update now / Details). `StudioApp` inits once. Dynamic import of the virtual module so tests/dev degrade gracefully. D16 recorded; F-13 filed + resolved.
+- **Findings.** First E2E run caught a real bug: uncached `getSnapshot` → React "Maximum update depth exceeded" infinite loop. Fixed with a cached snapshot invalidated on emit, plus a regression test asserting reference stability.
+- **Verification.** Unit **227 passed** (+14 manager incl. env classification, settle paths, offline/error, log cap, snapshot stability); canonical E2E **43/43 + 4 SKIP** (new: About card check → local status on dev, no stray banner); typecheck/lint/format clean; production build clean (37 precache entries). No version bump.

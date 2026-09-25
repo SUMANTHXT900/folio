@@ -4,7 +4,13 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
-None. No open defects are known as of Phase 1. If verification finds one, add it here first, then fix it.
+### F-13 — Hard-cached PWA with no update path after a deploy
+
+- **Status.** Resolved (update manager). **Area.** PWA/service-worker boundary (`app/src/pwa/`, `StudioApp.tsx`, `About.tsx`). **Severity.** High (after every deploy, mobile and desktop users sat on the stale precache with no in-app recourse — only a manual hard refresh, undiscoverable on phones).
+- **Symptoms.** New versions deployed to Cloudflare Pages never surfaced in the installed/open app; users had to know to hard-refresh. `registerType: 'autoUpdate'` updated the worker silently in the background while the open page kept serving old chunks.
+- **Root cause.** Nothing in the app ever called `registerSW` / listened for `onNeedRefresh`, so a waiting worker had no UI. Stale-chunk recovery (F-12) only fires after a lazy import already failed.
+- **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
+- **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
 
 ## Known limitations (by design, not defects)
 

@@ -234,6 +234,41 @@ async function main() {
     await page.close();
   }
 
+  // ---- About: update card offers a manual check (F-13) ----
+  // On the dev server (localhost) the manager classifies as local, so the
+  // check resolves to the local status instead of touching a worker.
+  {
+    const { page, consoleErrors } = await newPage(browser);
+    await gotoTool(page, 'about');
+    await page.waitForFunction(() => document.body.innerText.includes('App updates'), {
+      timeout: 30000,
+    });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Check for updates')
+        ?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Running locally'), {
+      timeout: 30000,
+    });
+    const updateCard = await page.evaluate(() => {
+      const text = document.body.innerText;
+      return {
+        hasCard: text.includes('App updates'),
+        localStatus: text.includes('Running locally'),
+        noBanner: document.querySelector('[role="alert"]') === null,
+      };
+    });
+    check(
+      'about update card checks and reports local status on dev',
+      updateCard.hasCard && updateCard.localStatus && updateCard.noBanner,
+      JSON.stringify(updateCard),
+    );
+    if (consoleErrors.length > 0)
+      console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
+    await page.close();
+  }
+
   // ---- Merge: two files → real merge → download ----
   {
     const { page, consoleErrors } = await newPage(browser);

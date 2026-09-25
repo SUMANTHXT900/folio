@@ -121,3 +121,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** Auto-insert processed pages (rejected: mis-detection writes bad pages). Manual corner adjust in v2.0 (deferred to v2.1, explicit). Auto-capture (deferred to v2.1, explicit).
 - **Consequences.** E2E uses a runtime-generated Y4M fake camera (canvas.captureStream yields 2x2 in headless); scan-build E2E probes the result blob in-page because second-browser download plumbing does not fire.
 - **Status.** Decided, implemented and verified in v2.0 M3 (180 unit tests, canonical E2E 35/35 + 4 SKIP).
+
+## D16 — PWA update manager: silent check + one-tap apply (SYNAPSE pattern)
+
+- **Decision.** A framework-free update store (`app/src/pwa/updateManager.ts`) wraps `virtual:pwa-register`: silent launch check (~3s), manual `registration.update()` with a 5s settle wait, localhost/insecure-LAN guard, capped diagnostic log. A global `UpdateBanner` (one-tap `updateSW(true)` → reload) and an About "App updates" card (Check for updates / Update now / Details log) share the store via `useSyncExternalStore` with a cached snapshot. Adapted from the SYNAPSE repo's update engine; restyled to the Folio design system (no terminal theatrics — a subtle mono log only).
+- **Reason.** `registerType: 'autoUpdate'` updates the worker in the background but never tells the open page, so post-deploy users sat on a stale precache with no recourse but a manual hard refresh (near-impossible to discover on mobile) — F-13. Stale-chunk recovery (F-12) only fires after a failure; the manager is the proactive layer.
+- **Alternatives considered.** `useRegisterSW` hook from `virtual:pwa-register/react` (rejected: hook-local state can't feed both the banner and About without prop drilling; the external store does). Forcing `reload` on every launch (rejected: destroys session state when no update exists).
+- **Consequences.** New `app/src/pwa/` boundary; `virtual:pwa-register` is dynamically imported so unit tests and the dev server (no SW) degrade to `local`/`unsupported` instead of crashing; E2E asserts the About card on localhost.
+- **Status.** Decided, implemented, verified (14 manager unit tests, canonical E2E 43/43 + 4 SKIP).

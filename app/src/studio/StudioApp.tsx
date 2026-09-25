@@ -3,6 +3,8 @@ import React from 'react';
 import { motion, AnimatePresence, useScroll, useSpring, MotionConfig } from 'framer-motion';
 import Home from './Home';
 import About from './About';
+import UpdateBanner from '../pwa/UpdateBanner';
+import { updateManager } from '../pwa/usePwaUpdate';
 
 // lazy tools — keep hash routing snappy by code-splitting per tool
 const MergeTool = lazy(() => import('./tools/MergeTool'));
@@ -242,6 +244,12 @@ export default function StudioApp() {
       ?.setAttribute('content', dark ? '#17130e' : '#faf7f2');
   }, [dark]);
 
+  // PWA update manager: register the worker once, then a silent
+  // launch check (SYNAPSE pattern). The banner + About card share state.
+  useEffect(() => {
+    updateManager.init();
+  }, []);
+
   // memoize rendered page node — avoids re-creating on unrelated state changes
   const pageNode = useMemo(() => {
     if (isTool) {
@@ -303,6 +311,7 @@ export default function StudioApp() {
 
         <Footer />
         {showMobileNav && <MobileNav route={route} />}
+        <UpdateBanner />
       </div>
     </MotionConfig>
   );
