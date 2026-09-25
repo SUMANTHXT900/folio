@@ -248,3 +248,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Objective.** 13 photos → 81 MB PDF on a real phone. Root cause confirmed in code: the engine embedded uncompressed raw RGB (no `/Filter`), discarding JPEG compression at the engine boundary.
 - **Work.** `engine/.../images_to_pdf`: SOF parser gate (baseline C0/C1 only; progressive/YCCK/truncated/probe-mismatch fall through), byte-identical `/DCTDecode` passthrough (RGB/Gray/Adobe-CMYK+inverting Decode), one internal q82 re-encode fallback, PNG raw path untouched. No wire change (no new option, protocol frozen). Fixture bug caught by own test (short APP14) — fixed.
 - **Verification.** Rust **354 passing** (8 new), fmt/clippy clean; frontend **228**, E2E **43/43 + 4 SKIP** (DCT renders identically); WASM rebuilt (1.6 MB). No version bump.
+
+- **Deploy.** Passthrough build deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Re-test the 13-photo flow on the phone: expect ~15–25 MB instead of 81 MB, identical image quality.
