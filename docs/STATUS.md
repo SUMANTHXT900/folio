@@ -39,6 +39,7 @@ None. No blocked items.
 ## Known limitations
 
 - **Compress is disabled** in the Studio UI — reserved for a future update. The button exists but the action stays disabled rather than pretending to work.
+- **Scanner zoom control removed** — the track-reported zoom range is not a focal-length multiplier (devices showed "1×" while actually using the ultrawide lens), so the control was removed rather than lie; revisit with focal-accurate handling (`docs/BUGS.md` F-11, `docs/ROADMAP.md`).
 - **Password-protected PDFs are unsupported** (`UNSUPPORTED_FORMAT`): the engine reports them cleanly instead of failing obscurely.
 - **Metadata `set` with `""` is rejected** — use `Clear`. Read preserves `Some("")` distinctly from absent.
 - **`pdf.inspect` does no text extraction, rendering, or image extraction** — structural inspection only (page count, version, encryption, metadata, optional per-page geometry).

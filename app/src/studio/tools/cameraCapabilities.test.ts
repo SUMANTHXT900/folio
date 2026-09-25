@@ -32,7 +32,7 @@ describe('readTrackCapabilities', () => {
     expect(readTrackCapabilities(track({}))).toEqual(NO_CAPABILITIES);
   });
 
-  it('parses a full mobile-style capability set', () => {
+  it('parses a full mobile-style capability set (no zoom — removed)', () => {
     const caps = readTrackCapabilities(
       track({
         zoom: { min: 1, max: 8, step: 0.1 },
@@ -42,26 +42,13 @@ describe('readTrackCapabilities', () => {
         exposureMode: ['continuous', 'manual'],
       }),
     );
-    expect(caps.zoom).toEqual({ min: 1, max: 8, step: 0.1 });
+    // Zoom is deliberately not part of the model: the track range is not
+    // a focal-length multiplier (see BUGS F-11) — the control was removed.
+    expect(caps).not.toHaveProperty('zoom');
     expect(caps.torch).toBe(true);
     expect(caps.focusModes).toEqual(['continuous', 'single-shot', 'manual']);
     expect(caps.supportsContinuousFocus).toBe(true);
     expect(caps.supportsTapToFocus).toBe(true);
-  });
-
-  it('rejects unusable zoom shapes', () => {
-    expect(readTrackCapabilities(track({ zoom: { min: 2, max: 2, step: 0.1 } })).zoom).toBeNull();
-    expect(readTrackCapabilities(track({ zoom: { min: 5, max: 1, step: 1 } })).zoom).toBeNull();
-    expect(readTrackCapabilities(track({ zoom: { min: NaN, max: 4, step: 0.1 } })).zoom).toBeNull();
-    expect(readTrackCapabilities(track({ zoom: true })).zoom).toBeNull();
-  });
-
-  it('derives a sane step when the reported step is missing', () => {
-    expect(readTrackCapabilities(track({ zoom: { min: 1, max: 5 } })).zoom).toEqual({
-      min: 1,
-      max: 5,
-      step: 0.4,
-    });
   });
 
   it('requires torch === true (not truthy)', () => {

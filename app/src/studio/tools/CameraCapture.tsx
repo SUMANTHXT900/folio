@@ -149,8 +149,6 @@ export function CameraCapture({
   // Hardware capabilities of the ACTIVE track only — recalculated on
   // every (re)start so switching cameras never shows stale controls.
   const [caps, setCaps] = useState<CameraCapabilities>(NO_CAPABILITIES);
-  const [zoom, setZoom] = useState<number | null>(null);
-  const [zoomDead, setZoomDead] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [torchDead, setTorchDead] = useState(false);
   const [controlNote, setControlNote] = useState<string | null>(null);
@@ -185,7 +183,6 @@ export function CameraCapture({
     streamRef.current = null;
     trackRef.current = null;
     setCaps(NO_CAPABILITIES);
-    setZoom(null);
     setTorchOn(false);
     setFailure(message);
     setStatus('disconnected');
@@ -208,8 +205,6 @@ export function CameraCapture({
       // Fresh capability state per session: never carry controls over from
       // the previous camera.
       setCaps(NO_CAPABILITIES);
-      setZoom(null);
-      setZoomDead(false);
       setTorchOn(false);
       setTorchDead(false);
       setControlNote(null);
@@ -241,7 +236,6 @@ export function CameraCapture({
         }
         const detected = readTrackCapabilities(videoTrack);
         setCaps(detected);
-        if (detected.zoom !== null) setZoom(detected.zoom.min);
         // Silent best-effort: continuous focus/exposure where reported.
         void requestContinuousModes(videoTrack);
         // Unexpected track death (B2): unplug, OS revoke, browser kill.
@@ -379,22 +373,37 @@ export function CameraCapture({
     return () => window.removeEventListener('keydown', onKey);
   }, [leave]);
 
-  /**
-   * Zoom through the lens, never CSS: applies the track's own range.
-   * A rejection disables the control with a note — reporting a zoom
-   * capability never promised it would apply.
-   */
-  const applyZoom = async (value: number) => {
-    const track = trackRef.current;
-    if (!track || caps.zoom === null) return;
-    try {
-      await track.applyConstraints({ advanced: [{ zoom: value } as MediaTrackConstraintSet] });
-      setZoom(value);
-    } catch {
-      setZoomDead(true);
-      setControlNote('Zoom is not adjustable on this camera right now.');
-    }
-  };
+  // Hard scroll lock while the scanner owns the screen: without it the
+  // page behind can still be scrolled (revealing app chrome/nav) even on
+  // top of a fixed overlay. Body is pinned at its current offset and
+  // restored on exit — the standard mobile-safe modal lock.
+  useEffect(() => {
+    const scrollY = window.scrollY;
+    const body = document.body;
+    const prev = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+      overflow: body.style.overflow,
+    };
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.left = '0';
+    body.style.right = '0';
+    body.style.width = '100%';
+    body.style.overflow = 'hidden';
+    return () => {
+      body.style.position = prev.position;
+      body.style.top = prev.top;
+      body.style.left = prev.left;
+      body.style.right = prev.right;
+      body.style.width = prev.width;
+      body.style.overflow = prev.overflow;
+      if (scrollY !== 0) window.scrollTo(0, scrollY);
+    };
+  }, []);
 
   /** Torch toggle through constraints; rejection disables it with a note. */
   const toggleTorch = async () => {
@@ -574,7 +583,7 @@ export function CameraCapture({
           // (document.body) so `fixed` is viewport-true — an inline element
           // inside the route-transition transform would size to that
           // ancestor instead of the screen.
-          'fixed inset-0 z-[60] flex flex-col bg-paper-50 dark:bg-ink-950 ' +
+          'fixed inset-0 z-[60] flex flex-col overscroll-contain bg-paper-50 dark:bg-ink-950 ' +
           'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] ' +
           'md:inset-auto md:left-1/2 md:top-1/2 md:h-[min(85vh,52rem)] md:w-[46rem] md:max-w-[94vw] ' +
           'md:-translate-x-1/2 md:-translate-y-1/2 md:rounded-2xl md:border md:border-paper-300 ' +
@@ -645,6 +654,29 @@ export function CameraCapture({
             </svg>
             Import
           </button>
+          {/* Primary CTA once pages exist: the user must always know how to
+              reach the page list (where Build PDF / rearrange live). */}
+          {sessionPages.length > 0 && (
+            <button
+              onClick={leave}
+              aria-label="Finish scanning and view pages"
+              className="flex min-h-[36px] items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
+            >
+              View pages ({sessionPages.length})
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M9 18l6-6-6-6" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={() => setGrid((g) => !g)}
             aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
@@ -934,10 +966,9 @@ export function CameraCapture({
             )}
 
             {/* Camera dock: three equal cells (torch · Capture · Undo) so the
-              shutter sits truly centered; zoom on its own row below on mobile
-              and inline on desktop. Torch/zoom render ONLY when the active
-              track reports them; a rejected apply disables the control with a
-              note. Safe-area padded. */}
+              shutter sits truly centered. Torch renders ONLY when the active
+              track reports it; a rejected apply disables the control with a
+              note. Safe-area padded. (Zoom control removed — see BUGS F-11.) */}
             <div
               role="group"
               aria-label="Camera controls"
@@ -1000,28 +1031,6 @@ export function CameraCapture({
                   Undo
                 </button>
               </div>
-              {caps.zoom !== null && !zoomDead && zoom !== null && (
-                <label className="col-span-3 flex h-11 min-w-0 items-center gap-2 rounded-xl border border-paper-300 px-3 dark:border-ink-700 sm:order-2 sm:col-span-1 sm:w-72 sm:flex-none">
-                  <span className="text-xs text-ink-500 dark:text-ink-300">Zoom</span>
-                  <input
-                    type="range"
-                    min={caps.zoom.min}
-                    max={caps.zoom.max}
-                    step={caps.zoom.step}
-                    value={zoom}
-                    onChange={(e) => void applyZoom(Number(e.target.value))}
-                    aria-label={`Camera zoom, ${zoom.toFixed(1)} times`}
-                    aria-valuetext={`${zoom.toFixed(1)} times zoom`}
-                    className="min-w-0 flex-1 accent-brass-500"
-                  />
-                  <span
-                    aria-hidden
-                    className="font-mono text-xs text-ink-500 tabular-nums dark:text-ink-300"
-                  >
-                    {zoom.toFixed(1)}×
-                  </span>
-                </label>
-              )}
             </div>
             {controlNote !== null && (
               <p role="status" className="mt-2 text-xs text-ink-400 dark:text-ink-300">

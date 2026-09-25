@@ -188,7 +188,7 @@ describe('CameraCapture responsive HUD', () => {
     expect(screen.getByLabelText('Pages captured this session')).toBeTruthy();
   });
 
-  it('keeps torch compact and zoom bound to real capabilities', async () => {
+  it('keeps torch compact and renders no zoom control (F-11)', async () => {
     const track = videoTrack({
       zoom: { min: 2, max: 6, step: 1 },
       torch: true,
@@ -206,17 +206,11 @@ describe('CameraCapture responsive HUD', () => {
     );
     const torch = await screen.findByLabelText('Turn flashlight on');
     expect(torch.className).toContain('rounded-full');
-    const slider = (await screen.findByLabelText(/Camera zoom/)) as HTMLInputElement;
-    expect(slider.min).toBe('2');
-    expect(slider.max).toBe('6');
-    expect(slider.step).toBe('1');
-    // Current value displayed alongside the slider.
-    expect(screen.getByText('2.0×')).toBeTruthy();
-    fireEvent.change(slider, { target: { value: '5' } });
-    await waitFor(() =>
-      expect(track.applyConstraints).toHaveBeenCalledWith({ advanced: [{ zoom: 5 }] }),
-    );
-    expect(screen.getByText('5.0×')).toBeTruthy();
+    // Zoom control removed: the track's range is not a focal-length
+    // multiplier (BUGS F-11), so nothing zoom-like may render even when
+    // the device reports a zoom range.
+    expect(screen.queryByLabelText(/Camera zoom/)).toBeNull();
+    expect(screen.queryByText('1.0×')).toBeNull();
   });
 });
 
@@ -310,12 +304,11 @@ describe('CameraCapture scanner surface (M3.x)', () => {
 
 describe('CameraCapture capability controls', () => {
   const fullCaps = {
-    zoom: { min: 1, max: 4, step: 0.5 },
     torch: true,
     focusMode: ['continuous', 'single-shot'],
   };
 
-  it('renders zoom + torch only when reported, and applies through constraints', async () => {
+  it('renders torch only when reported, and applies through constraints', async () => {
     const track = videoTrack(fullCaps);
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
@@ -327,22 +320,14 @@ describe('CameraCapture capability controls', () => {
         sessionPages={[]}
       />,
     );
-    const slider = (await screen.findByLabelText(/Camera zoom/)) as HTMLInputElement;
-    expect(slider.min).toBe('1');
-    expect(slider.max).toBe('4');
-    expect(slider.step).toBe('0.5');
-    fireEvent.change(slider, { target: { value: '2.5' } });
-    await waitFor(() =>
-      expect(track.applyConstraints).toHaveBeenCalledWith({ advanced: [{ zoom: 2.5 }] }),
-    );
-    fireEvent.click(screen.getByLabelText('Turn flashlight on'));
+    fireEvent.click(await screen.findByLabelText('Turn flashlight on'));
     await waitFor(() =>
       expect(track.applyConstraints).toHaveBeenCalledWith({ advanced: [{ torch: true }] }),
     );
     expect(screen.getByLabelText('Turn flashlight off')).toBeTruthy();
   });
 
-  it('hides zoom + torch on capability-free tracks (laptop-webcam shape)', async () => {
+  it('hides torch on capability-free tracks (laptop-webcam shape)', async () => {
     const track = videoTrack(undefined);
     mockMedia({ getUserMedia: async () => streamWith(track) });
     render(
@@ -360,7 +345,7 @@ describe('CameraCapture capability controls', () => {
     expect(screen.queryByText(/Tap the preview to refocus/)).toBeNull();
   });
 
-  it('disables zoom with a note when applyConstraints rejects', async () => {
+  it('disables torch with a note when applyConstraints rejects', async () => {
     const track = videoTrack(fullCaps, async () => {
       throw new DOMException('rejected', 'NotAllowedError');
     });
@@ -374,10 +359,9 @@ describe('CameraCapture capability controls', () => {
         sessionPages={[]}
       />,
     );
-    const slider = await screen.findByLabelText(/Camera zoom/);
-    fireEvent.change(slider, { target: { value: '3' } });
-    await screen.findByText(/Zoom is not adjustable/);
-    expect(screen.queryByLabelText(/Camera zoom/)).toBeNull();
+    fireEvent.click(await screen.findByLabelText('Turn flashlight on'));
+    await screen.findByText(/flashlight is not available/);
+    expect(screen.queryByLabelText(/flashlight/)).toBeNull();
   });
 
   it('tap-to-focus fires only with single-shot support', async () => {
@@ -443,10 +427,67 @@ describe('CameraCapture capability controls', () => {
         sessionPages={[]}
       />,
     );
-    await screen.findByLabelText(/Camera zoom/);
+    await screen.findByLabelText('Turn flashlight on');
     fireEvent.click(screen.getByLabelText('Switch camera'));
-    await waitFor(() => expect(screen.queryByLabelText(/Camera zoom/)).toBeNull());
-    expect(screen.queryByLabelText(/flashlight/)).toBeNull();
+    await waitFor(() => expect(screen.queryByLabelText(/flashlight/)).toBeNull());
+  });
+});
+
+describe('CameraCapture scanner shell (M3.x follow-up)', () => {
+  it('locks page scroll while open and restores it on exit', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    const { unmount } = render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    // The page behind can no longer scroll under the scanner surface.
+    expect(document.body.style.position).toBe('fixed');
+    expect(document.body.style.overflow).toBe('hidden');
+    unmount();
+    expect(document.body.style.position).toBe('');
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('offers a primary View pages CTA once pages exist', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    const onDone = vi.fn();
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={onDone}
+        sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    const cta = screen.getByLabelText('Finish scanning and view pages');
+    expect(cta.textContent).toContain('View pages (1)');
+    fireEvent.click(cta);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes on Escape (keyboard-accessible exit)', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    const onDone = vi.fn();
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={onDone}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -10,7 +10,7 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 
 - **L1 — Compress disabled.** The Studio action stays disabled; no engine or UI implementation exists yet. See `docs/ROADMAP.md`.
 - **L2 — Password-protected PDFs unsupported.** Reported as `UNSUPPORTED_FORMAT`, never attempted. UI copy: "This PDF needs a password, which is not supported yet."
-- **L3 — Metadata empty-string set rejected.** Reading preserves `Some("")` distinctly from absent; *setting* `""` is rejected — use `Clear` (engine rule, `engine/src/processing/pdf/metadata/`).
+- **L3 — Metadata empty-string set rejected.** Reading preserves `Some("")` distinctly from absent; _setting_ `""` is rejected — use `Clear` (engine rule, `engine/src/processing/pdf/metadata/`).
 - **L4 — Inspect is structural only.** No text extraction, rendering, or image extraction (`engine/src/processing/pdf/inspect/mod.rs`).
 - **L5 — Images → PDF is JPEG/PNG only.** Other formats fail as `UNSUPPORTED_FORMAT` (engine rule, `image` crate features `jpeg`+`png`).
 
@@ -95,3 +95,11 @@ None. No open defects are known as of Phase 1. If verification finds one, add it
 - **Fix.** Progress renders engine `percentage`/`message` directly (see `docs/WORKLOG.md` v1.7.0 entry).
 - **Verification.** E2E merge assertions on real progress labels.
 - **Related lesson.** `docs/LESSONS.md` L-5.
+
+### F-11 — Zoom slider reported wrong scale (control removed)
+
+- **Status.** Resolved by removal (revisit with focal-accurate handling). **Area.** Scanner camera dock (`app/src/studio/tools/CameraCapture.tsx`, `cameraCapabilities.ts`). **Severity.** Medium (the control lied to users about the optical state).
+- **Symptoms.** The zoom slider showed "1.0×" while the device was actually using its ultrawide lens (real ~0.6×) — the track's reported zoom range is a device-internal scale, not a focal-length multiplier, so any displayed value was misleading.
+- **Root cause.** `MediaStreamTrack.getCapabilities().zoom` exposes an arbitrary per-device numeric range with no guaranteed mapping to focal length or lens choice; browsers/phones may switch physical lenses behind a single "1×" value.
+- **Fix.** The zoom control (slider, state, `applyConstraints({ advanced: [{ zoom }] })` path, capability model field) was removed entirely; the camera dock keeps torch only. Documented for re-introduction (ROADMAP "Future / not committed") once a focal-accurate approach is available.
+- **Verification.** Unit tests assert no zoom control renders even when the track reports a zoom range (`CameraCapture.test.tsx`, `cameraCapabilities.test.ts`); canonical E2E asserts `zoomControls === 0` in the scanner surface check.

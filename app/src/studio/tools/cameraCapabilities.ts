@@ -10,17 +10,14 @@
  * control must handle rejection gracefully (disable + note, never
  * crash). Detection is necessary; only a successful apply proves
  * the feature works.
+ *
+ * Zoom is deliberately absent: the track's reported zoom range is not a
+ * focal-length multiplier (devices report "1×" while actually using the
+ * ultrawide lens), so any slider lied to users. The control was removed
+ * (docs/BUGS.md F-11) and returns only with focal-accurate handling.
  */
 
-export interface ZoomRange {
-  min: number;
-  max: number;
-  step: number;
-}
-
 export interface CameraCapabilities {
-  /** Zoom range when genuinely usable, else null. */
-  zoom: ZoomRange | null;
   /** True only when the torch constraint is exposed. */
   torch: boolean;
   /** Focus modes the track reports (e.g. continuous, single-shot, manual). */
@@ -37,7 +34,6 @@ export interface CameraCapabilities {
 }
 
 export const NO_CAPABILITIES: CameraCapabilities = {
-  zoom: null,
   torch: false,
   focusModes: [],
   supportsContinuousFocus: false,
@@ -45,7 +41,6 @@ export const NO_CAPABILITIES: CameraCapabilities = {
 };
 
 interface RawCapabilities {
-  zoom?: unknown;
   torch?: unknown;
   focusMode?: unknown;
   focusDistance?: unknown;
@@ -76,29 +71,11 @@ export function readTrackCapabilities(
     ? raw.focusMode.filter((m): m is string => typeof m === 'string')
     : [];
   return {
-    zoom: normalizeZoom(raw.zoom),
     torch: raw.torch === true,
     focusModes,
     supportsContinuousFocus: focusModes.includes('continuous'),
     supportsTapToFocus: focusModes.includes('single-shot'),
   };
-}
-
-function normalizeZoom(value: unknown): ZoomRange | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const { min, max, step } = value as { min?: unknown; max?: unknown; step?: unknown };
-  if (
-    typeof min !== 'number' ||
-    typeof max !== 'number' ||
-    !Number.isFinite(min) ||
-    !Number.isFinite(max) ||
-    max <= min
-  ) {
-    return null;
-  }
-  const saneStep =
-    typeof step === 'number' && Number.isFinite(step) && step > 0 ? step : (max - min) / 10;
-  return { min, max, step: saneStep };
 }
 
 /**

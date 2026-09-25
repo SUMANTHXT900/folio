@@ -723,15 +723,23 @@ async function main() {
         modeButtons: [...document.querySelectorAll('button')].filter((b) =>
           /scan mode/i.test(b.getAttribute('aria-label') ?? ''),
         ).length,
+        // Zoom removed (BUGS F-11): no zoom control may ever render.
+        zoomControls: document.querySelectorAll('[aria-label*="Camera zoom"]').length,
+        // Primary exit CTA must exist once pages were accepted.
+        hasViewPages: [...document.querySelectorAll('button')].some(
+          (b) => b.getAttribute('aria-label') === 'Finish scanning and view pages',
+        ),
       };
     });
     check(
-      'images scanner: Import in bar, no mode selector, centered panel on desktop',
+      'images scanner: Import in bar, no mode selector, no zoom, View pages CTA, centered desktop panel',
       scannerSurface.hasRoot &&
         scannerSurface.fixed &&
         scannerSurface.boundedPanel &&
         scannerSurface.hasImport &&
-        scannerSurface.modeButtons === 0,
+        scannerSurface.modeButtons === 0 &&
+        scannerSurface.zoomControls === 0 &&
+        scannerSurface.hasViewPages,
       JSON.stringify(scannerSurface),
     );
     // Scan more (no mode step): collection preserved, second page added.
@@ -796,7 +804,8 @@ async function main() {
     check('images stale scan result never becomes a page', count === 2, `pages=${count}`);
     // Responsive HUD geometry: dock below viewport, pill inside it,
     // strip below the dock — at desktop and narrow-phone widths.
-    // (Torch/zoom stay hidden: the fake track reports no capabilities.)
+    // (Torch stays hidden: the fake track reports no capabilities. The
+    // zoom control was removed — BUGS F-11 — so nothing zoom-like renders.)
     const hudGeometry = () =>
       page.evaluate(() => {
         const rect = (el) => {
@@ -896,8 +905,12 @@ async function main() {
           Math.round(r.left) <= 0 &&
           Math.round(r.right) >= window.innerWidth - 2,
         // Body scroll is locked out of the interaction: the dock and
-        // strip live inside the fixed surface, above the fold.
-        noScroll: r.height >= window.innerHeight - 2,
+        // strip live inside the fixed surface, above the fold, and the
+        // page behind cannot scroll (no app chrome/nav reveals).
+        noScroll:
+          r.height >= window.innerHeight - 2 &&
+          document.body.style.position === 'fixed' &&
+          document.body.style.overflow === 'hidden',
       };
     });
     check(

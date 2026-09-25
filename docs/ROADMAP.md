@@ -30,3 +30,5 @@ The following appear in the product surface or history as aspirations. None are 
 - **Sign & annotate** — listed in the About page version tree as a planned "v1.2.0" (e-signatures, form-fill overlay, watermarks/page numbers). About-page aspiration only.
 - **Batch & OCR** — listed in the About page version tree as a planned "v2.0.0" (batch queue, local OCR). About-page aspiration only.
 - Engine-adjacent ideas mentioned in code comments as "later lessons" (text extraction, rendering inside the engine, compression, encryption): explicitly out of scope for the current engine, recorded here only so they are not mistaken for plans.
+
+- **Scanner zoom (revisit)** — the zoom control was removed because the track-reported range is not a focal-length multiplier (docs/BUGS.md F-11); revisit only with focal-accurate lens handling.
