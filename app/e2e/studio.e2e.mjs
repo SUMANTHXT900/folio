@@ -906,6 +906,9 @@ async function main() {
     });
     // Narrow phone: fresh scanner session plus one accept (so the
     // session strip is present), then the same geometry assertions.
+    // Viewfinder stability (real-phone report): the framing box must
+    // not collapse once the strip + CTA appear — only the compact
+    // strip may cost space, never a wrapped top bar or in-flow note.
     await page.setViewport({ width: 375, height: 667 });
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
@@ -917,6 +920,12 @@ async function main() {
       },
       { timeout: 30000 },
     );
+    const viewportH = () =>
+      page.evaluate(() => {
+        const v = document.querySelector('video');
+        return v?.parentElement?.getBoundingClientRect().height ?? 0;
+      });
+    const beforeCaptureH = await viewportH();
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
@@ -931,6 +940,12 @@ async function main() {
     await page.waitForFunction(
       () => document.querySelector('[aria-label="Pages captured this session"]') !== null,
       { timeout: 30000 },
+    );
+    const afterCaptureH = await viewportH();
+    check(
+      'images viewfinder keeps its size after the first capture',
+      beforeCaptureH > 0 && afterCaptureH >= beforeCaptureH - 100,
+      `before=${Math.round(beforeCaptureH)} after=${Math.round(afterCaptureH)}`,
     );
     hud = await hudGeometry();
     check('images scanner HUD layers cleanly on narrow phone', hudSane(hud), JSON.stringify(hud));

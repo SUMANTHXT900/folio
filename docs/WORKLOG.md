@@ -250,3 +250,9 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Rust **354 passing** (8 new), fmt/clippy clean; frontend **228**, E2E **43/43 + 4 SKIP** (DCT renders identically); WASM rebuilt (1.6 MB). No version bump.
 
 - **Deploy.** Passthrough build deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Re-test the 13-photo flow on the phone: expect ~15–25 MB instead of 81 MB, identical image quality.
+
+## 2026-09-26 — Scanner viewfinder stability (F-15)
+
+- **Objective.** Real-phone report with screenshots: viewfinder full-size pre-capture, ~130px smaller after one capture (top-bar wrap + note strip + thumbnail strip all stole flex space).
+- **Work.** `CameraCapture.tsx`: nowrap single-row top bar (truncate title, short CTA, device picker to bottom hint row), import note → floating auto-dismissing pill (5s), slimmer strip without duplicate safe-area padding. Strip stays in-flow below dock per E2E layering contract.
+- **Verification.** Unit 228; E2E **44/44 + 4 SKIP** (new: framing-box 263px → 263px across first capture, pixel-identical); typecheck/lint/format clean. No version bump.

@@ -125,3 +125,11 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Root cause.** Deploy skew: the new service worker activates and (by default) deletes the previous deployment precaches, while the still-open old page keeps old chunk hashes that no longer exist on hosting. Retrying the operation can never succeed — only a reload to the current shell helps.
 - **Fix.** Two layers: (1) `ErrorBlock` detects stale-chunk failures across bundler message shapes and renders "A new version of Folio was released…" with an explicit Reload button (raw URL kept as secondary diagnostics) — covers every tool at once, consistent with the existing lazy-route recovery copy. (2) `cleanupOutdatedCaches: false` so a new SW no longer deletes the previous deployment chunks out from under open pages (browser quota eviction is the backstop).
 - **Verification.** New `ui.test.tsx` (bundler message shapes, null-safety, recovery rendering, ordinary-error passthrough); canonical E2E 41/41 + 4 SKIP.
+
+### F-15 — Scanner viewfinder shrinks after the first capture (phone)
+
+- **Status.** Resolved (stable layout). **Area.** Scanner shell (`app/src/studio/tools/CameraCapture.tsx`). **Severity.** Medium (framing gets harder with every capture; reported with before/after screenshots).
+- **Symptoms.** Pre-capture the viewfinder filled the screen; after one capture it lost ~130px to three newcomers: the top bar wrapping onto two rows (View-pages CTA), the in-flow "Added as photo" note strip, and the session thumbnail strip.
+- **Root cause.** The viewport flexes to leftover column space, so every in-flow sibling added post-capture stole from it directly.
+- **Fix.** Top bar is single-row nowrap (truncating title, short "Pages (n)" CTA <400px, `shrink-0` buttons; device picker moved to the bottom hint row); the import note became a floating auto-dismissing (5s) pill over the viewport instead of an in-flow strip; the session strip stays in-flow below the dock (E2E layering contract) but slimmer with no duplicate safe-area padding.
+- **Verification.** New E2E check: narrow-phone framing-box height before vs after first capture — 263px → 263px, pixel-identical; canonical E2E 44/44 + 4 SKIP.

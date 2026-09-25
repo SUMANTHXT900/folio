@@ -582,6 +582,16 @@ export function CameraCapture({
   const importInputRef = useRef<HTMLInputElement>(null);
   const importAbortRef = useRef<AbortController | null>(null);
 
+  // Import notes are transient confirmations over the viewport (not
+  // layout): auto-dismiss so a stale pill never covers the framing
+  // area. E2E reads the note immediately after accept — well inside
+  // the window on a local worker.
+  useEffect(() => {
+    if (importNote === null) return;
+    const id = window.setTimeout(() => setImportNote(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [importNote]);
+
   const runImport = async (files: File[]) => {
     if (files.length === 0) return;
     const controller = new AbortController();
@@ -635,13 +645,17 @@ export function CameraCapture({
           'md:pt-0 md:pb-0 md:shadow-2xl dark:md:border-ink-700'
         }
       >
-        {/* CameraTopBar: back | title | import | grid | switch | device. */}
-        <div className="flex flex-wrap items-center gap-2 border-b border-paper-300/70 px-3 py-2 dark:border-ink-800/70">
+        {/* CameraTopBar: back | title | import | grid | switch | device.
+          Single row, never wraps: after the first capture the "View
+          pages" CTA appears here, and a wrapping bar would steal ~44px
+          from the viewfinder (real-phone report). The title truncates
+          instead. */}
+        <div className="flex items-center gap-2 border-b border-paper-300/70 px-3 py-2 dark:border-ink-800/70">
           <button
             onClick={leave}
             aria-label="Back to pages"
             title="Back to page list"
-            className="flex min-h-[36px] items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
+            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
           >
             <svg
               width="14"
@@ -683,7 +697,7 @@ export function CameraCapture({
             onClick={() => importInputRef.current?.click()}
             disabled={importState !== null}
             aria-label="Import images from files"
-            className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-paper-300 px-2.5 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:border-brass-400/40 hover:text-ink-900 disabled:opacity-40 dark:border-ink-700 dark:text-ink-200 dark:hover:text-paper-100"
+            className="flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-lg border border-paper-300 px-2.5 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:border-brass-400/40 hover:text-ink-900 disabled:opacity-40 dark:border-ink-700 dark:text-ink-200 dark:hover:text-paper-100"
           >
             <svg
               width="14"
@@ -705,9 +719,11 @@ export function CameraCapture({
             <button
               onClick={leave}
               aria-label="Finish scanning and view pages"
-              className="flex min-h-[36px] items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
+              className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
             >
-              View pages ({sessionPages.length})
+              {/* Short label on narrow phones so the bar never wraps. */}
+              <span className="hidden min-[400px]:inline">View pages ({sessionPages.length})</span>
+              <span className="min-[400px]:hidden">Pages ({sessionPages.length})</span>
               <svg
                 width="13"
                 height="13"
@@ -727,7 +743,7 @@ export function CameraCapture({
             aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
             aria-pressed={grid}
             title="Alignment grid"
-            className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
               grid
                 ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
                 : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
@@ -752,7 +768,7 @@ export function CameraCapture({
             }}
             aria-label="Switch camera"
             title="Switch camera"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
           >
             <svg
               width="16"
@@ -768,21 +784,9 @@ export function CameraCapture({
               <circle cx="12" cy="13" r="4" />
             </svg>
           </button>
-          {devices.length > 1 && (
-            <select
-              value={deviceId}
-              onChange={(e) => setDeviceId(e.target.value)}
-              className="h-9 rounded-lg border border-paper-300 bg-transparent px-2 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
-              aria-label="Choose camera"
-            >
-              <option value="">Auto</option>
-              {devices.map((d, i) => (
-                <option key={d.deviceId} value={d.deviceId}>
-                  {d.label || `Camera ${i + 1}`}
-                </option>
-              ))}
-            </select>
-          )}
+          {/* Device picker lives at the bottom (with the focus hint), not
+            in the top bar: on multi-camera phones a full select would
+            force the bar onto two rows and shrink the viewfinder. */}
         </div>
 
         {/* Import progress: always visible (camera live OR failed), so the
@@ -806,15 +810,6 @@ export function CameraCapture({
             </button>
           </div>
         )}
-        {importNote !== null && importState === null && (
-          <p
-            role="status"
-            className="border-b border-paper-300/70 px-3 py-1.5 text-xs text-ink-400 dark:text-ink-300"
-          >
-            {importNote}
-          </p>
-        )}
-
         {status === 'starting' && (
           <div className="flex aspect-[4/3] items-center justify-center rounded-xl bg-paper-200/60 dark:bg-ink-900/60">
             <p className="text-sm text-ink-400 dark:text-ink-300">Starting camera…</p>
@@ -823,7 +818,12 @@ export function CameraCapture({
 
         {(status === 'failed' || status === 'disconnected' || status === 'preview-blocked') &&
           failure && (
-            <div className="space-y-3">
+            <div className="space-y-3 px-3 py-2">
+              {importNote !== null && importState === null && (
+                <p role="status" className="text-xs text-ink-400 dark:text-ink-300">
+                  {importNote}
+                </p>
+              )}
               <ErrorBlock error={new Error(failure)} />
               <div className="flex gap-2">
                 <Button variant="ghost" onClick={() => void start(facing, deviceId)}>
@@ -840,9 +840,21 @@ export function CameraCapture({
           <div
             className={
               (status === 'starting' ? 'hidden ' : '') +
-              'flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'
+              'relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'
             }
           >
+            {/* Import note: floating pill over the viewport top, never an
+              in-flow strip — a strip would push the viewport up after
+              every capture (real-phone report). Auto-dismissed. */}
+            {importNote !== null && importState === null && (
+              <p
+                role="status"
+                data-import-note
+                className="pointer-events-none absolute inset-x-0 top-3 z-10 mx-auto w-fit max-w-[90%] rounded-full bg-ink-900/85 px-3 py-1 text-center text-[11px] text-paper-50 dark:bg-paper-100 dark:text-ink-900"
+              >
+                {importNote}
+              </p>
+            )}
             {/* Viewport: the wrapper flexes to leftover space; the content
               box is MEASURED (see scanViewport.ts) so video and overlay
               always share the exact painted rect — zero letterbox bars by
@@ -1054,16 +1066,18 @@ export function CameraCapture({
 
             {/* Session strip: previews only, newest last with a brass ring.
               Lives at the very bottom (below the dock) with horizontal
-              scroll only, so captured pages never squeeze the viewport. */}
+              scroll only, so captured pages never squeeze the viewport.
+              Compact cells + no extra safe-area padding (the root already
+              carries it) keep the viewport stable once pages exist. */}
             {sessionPages.length > 0 && (
               <div
-                className="flex gap-1.5 overflow-x-auto pb-[env(safe-area-inset-bottom)]"
+                className="flex gap-1.5 overflow-x-auto"
                 aria-label="Pages captured this session"
               >
                 {sessionPages.map((thumb, i) => (
                   <div
                     key={thumb.id}
-                    className={`relative h-14 w-10 shrink-0 overflow-hidden rounded-lg border bg-ink-950 sm:h-16 sm:w-12 ${
+                    className={`relative h-12 w-9 shrink-0 overflow-hidden rounded-lg border bg-ink-950 sm:h-16 sm:w-12 ${
                       i === sessionPages.length - 1
                         ? 'border-brass-400 ring-2 ring-brass-400/40'
                         : 'border-paper-300 dark:border-ink-700'
@@ -1090,11 +1104,31 @@ export function CameraCapture({
               </div>
             )}
 
-            {caps.supportsTapToFocus && (
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="text-xs text-ink-400 dark:text-ink-300">
-                  Tap the preview to refocus.
-                </span>
+            {(caps.supportsTapToFocus || devices.length > 1) && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                {caps.supportsTapToFocus && (
+                  <span className="text-xs text-ink-400 dark:text-ink-300">
+                    Tap the preview to refocus.
+                  </span>
+                )}
+                {devices.length > 1 && (
+                  <label className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="shrink-0 text-xs text-ink-400 dark:text-ink-300">Camera</span>
+                    <select
+                      value={deviceId}
+                      onChange={(e) => setDeviceId(e.target.value)}
+                      className="h-9 min-w-0 flex-1 rounded-lg border border-paper-300 bg-transparent px-2 text-xs text-ink-500 dark:border-ink-700 dark:text-ink-300"
+                      aria-label="Choose camera"
+                    >
+                      <option value="">Auto</option>
+                      {devices.map((d, i) => (
+                        <option key={d.deviceId} value={d.deviceId}>
+                          {d.label || `Camera ${i + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
             )}
           </div>
