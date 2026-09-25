@@ -20,8 +20,12 @@
 //!   `FitImage` page sizes and `StandardPage` drawn sizes.
 //! * **EXIF orientation:** read from the original bytes (values 1–8) and
 //!   applied to decoded pixels. Input bytes are never mutated.
-//! * **JPEG handling:** decode → raw RGB embedding (no DCT passthrough).
-//!   Correctness first; passthrough is a future size optimization.
+//! * **JPEG handling:** baseline JPEGs with EXIF orientation 1 pass
+//!   through untouched (`/DCTDecode` embedding — the PDF is a container,
+//!   output ≈ input size, zero quality loss). Anything else (progressive,
+//!   YCCK/CMYK surprises, EXIF-rotated) falls back to a single JPEG
+//!   re-encode at [`FALLBACK_JPEG_QUALITY`]. PNGs keep the lossless raw
+//!   path. Passthrough never guesses: unparseable frames fall back.
 //! * **Transparency:** RGBA is composited against a configurable background
 //!   (default white). No silent black backgrounds.
 //! * **Atomicity:** the whole input list validates before construction; any
@@ -31,8 +35,9 @@
 //!   arithmetic before full decode; no panics on untrusted input.
 //!
 //! Never mutates the inputs. No filesystem, network, browser APIs,
-//! compression tuning, or parallelism — sequential by design.
+//! user-facing compression options, or parallelism — sequential by design.
 
+use image::ImageEncoder;
 use lopdf::{dictionary, Stream};
 
 use crate::core::error::{EngineError, ErrorCode};
@@ -51,6 +56,13 @@ const MAX_IMAGE_DIMENSION: u32 = 30_000;
 
 /// Maximum image pixels (width × height). 100 MP ≈ 300 MB raw RGB.
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+/// JPEG quality for the fallback re-encode (non-passthrough JPEGs:
+/// progressive, YCCK, EXIF-rotated). Internal constant, not a user
+/// option — high enough that a single generation is visually
+/// transparent, low enough to bound the worst case (~10× smaller than
+/// raw RGB for photos).
+const FALLBACK_JPEG_QUALITY: u8 = 82;
 
 /// A4 page size in PDF points (ISO 216, 210 × 297 mm at 72 pt/in).
 pub const A4_WIDTH_PT: f64 = 595.28;
@@ -233,14 +245,9 @@ impl Operation for ImagesToPdfOperation {
             ctx.check_cancellation()?;
             let item = decode_image(image, index, options.background_rgb)?;
             // `item` moves into the document here and drops at the end of
-            // this iteration: peak decoded retention is one image.
-            pdf.append(
-                item.rgb,
-                item.width_px,
-                item.height_px,
-                item.dpi,
-                options.page_size,
-            )?;
+            // this iteration: peak decoded retention is one image
+            // (passthrough clones are bounded JPEG bytes, not raw RGB).
+            pdf.append(item, options.page_size)?;
             let completed = 10 + ((index as u64 + 1) * 80) / total.max(1);
             ctx.report_progress(
                 Some("processing images"),
@@ -279,14 +286,54 @@ impl Operation for ImagesToPdfOperation {
 struct DecodedImage {
     width_px: u32,
     height_px: u32,
-    /// Row-major top-to-bottom RGB bytes (`w*h*3`).
-    rgb: Vec<u8>,
+    /// How the pixels travel into the PDF (raw RGB for PNGs, JPEG
+    /// bytes for passthrough + fallback re-encodes).
+    payload: ImagePayload,
     /// Detected (or fallback) DPI.
     dpi: f64,
 }
 
+/// Embedded pixel data: lossless raw RGB (PNG path) or JPEG bytes
+/// (passthrough originals + fallback re-encodes) with their PDF
+/// color space.
+enum ImagePayload {
+    RawRgb(Vec<u8>),
+    Jpeg(JpegPayload),
+}
+
+/// JPEG bytes plus the dictionary entries they require.
+struct JpegPayload {
+    bytes: Vec<u8>,
+    color_space: JpegColorSpace,
+}
+
+/// PDF color space for an embedded JPEG. `Cmyk` is Adobe APP14
+/// transform-0 (inverted CMYK) and needs an inverting `/Decode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JpegColorSpace {
+    Gray,
+    Rgb,
+    Cmyk,
+}
+
+impl JpegColorSpace {
+    fn pdf_name(self) -> &'static str {
+        match self {
+            Self::Gray => "DeviceGray",
+            Self::Rgb => "DeviceRGB",
+            Self::Cmyk => "DeviceCMYK",
+        }
+    }
+}
+
 /// Validates headers, decodes, applies EXIF orientation, composites alpha,
 /// and detects DPI. Input bytes are only borrowed, never mutated.
+///
+/// JPEG fast path: baseline RGB/gray/Adobe-CMYK frames with EXIF
+/// orientation 1 are returned untouched (passthrough) — no decode, no
+/// quality loss, output ≈ input size. Everything else decodes as before;
+/// non-passthrough JPEGs are re-encoded once at
+/// [`FALLBACK_JPEG_QUALITY`] so the worst case stays ~10× below raw RGB.
 fn decode_image(
     image: &ImageInput,
     index: usize,
@@ -306,6 +353,32 @@ fn decode_image(
         map_image_error(&image.bytes, &err.to_string(), image_number, &image.name)
     })?;
     validate_dimensions(probe_w, probe_h, image_number, &image.name)?;
+
+    // JPEG fast path first: orientation-1 baseline frames skip the
+    // decode entirely. The frame dims must agree with the header probe
+    // (paranoia against malformed SOF); anything doubtful falls through
+    // to the decode path below.
+    if is_jpeg_magic(&image.bytes) && read_exif_orientation(&image.bytes) == 1 {
+        if let Some(frame) = parse_jpeg_frame(&image.bytes) {
+            if frame.width == probe_w
+                && frame.height == probe_h
+                && jpeg_color_space(&frame).is_some()
+            {
+                validate_dimensions(frame.width, frame.height, image_number, &image.name)?;
+                let dpi = detect_dpi(&image.bytes).unwrap_or(DEFAULT_DPI);
+                let color_space = jpeg_color_space(&frame).expect("checked");
+                return Ok(DecodedImage {
+                    width_px: frame.width,
+                    height_px: frame.height,
+                    payload: ImagePayload::Jpeg(JpegPayload {
+                        bytes: image.bytes.clone(),
+                        color_space,
+                    }),
+                    dpi,
+                });
+            }
+        }
+    }
 
     let dynamic = image::load_from_memory(&image.bytes).map_err(|err| {
         map_image_error(&image.bytes, &err.to_string(), image_number, &image.name)
@@ -366,10 +439,36 @@ fn decode_image(
     }
 
     let dpi = detect_dpi(&image.bytes).unwrap_or(DEFAULT_DPI);
+    let is_jpeg = is_jpeg_magic(&image.bytes);
+    let payload = if is_jpeg {
+        // Fallback path (progressive, YCCK, EXIF-rotated): pixels are
+        // already oriented + composited above, so one re-encode at the
+        // fallback quality bounds the size. EXIF must NOT ride along
+        // (fresh encoder output carries none — orientation is baked in).
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, FALLBACK_JPEG_QUALITY)
+            .write_image(&rgb, width_px, height_px, image::ExtendedColorType::Rgb8)
+            .map_err(|err| {
+                EngineError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "image {image_number} (\"{}\") fallback JPEG re-encode failed",
+                        image.name
+                    ),
+                )
+                .with_details(format!("image_index={image_number} reason={}", err))
+            })?;
+        ImagePayload::Jpeg(JpegPayload {
+            bytes: encoded,
+            color_space: JpegColorSpace::Rgb,
+        })
+    } else {
+        ImagePayload::RawRgb(rgb)
+    };
     Ok(DecodedImage {
         width_px,
         height_px,
-        rgb,
+        payload,
         dpi,
     })
 }
@@ -471,6 +570,105 @@ fn is_jpeg_magic(bytes: &[u8]) -> bool {
 
 fn is_png_magic(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && bytes[0..8] == [137, 80, 78, 71, 13, 10, 26, 10]
+}
+
+// ---------------------------------------------------------------------------
+// JPEG frame parsing (passthrough gate)
+// ---------------------------------------------------------------------------
+
+/// Baseline JPEG frame header: dims + component count + Adobe flag.
+/// Everything passthrough needs; parsed without decoding a pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JpegFrame {
+    width: u32,
+    height: u32,
+    components: u8,
+    /// Adobe APP14 transform byte when present (`None` = no APP14).
+    adobe_transform: Option<u8>,
+}
+
+/// Maps a parsed frame to its PDF color space. `None` means "do not
+/// pass through" (YCCK, exotic component counts — fall back to the
+/// re-encode path, which always produces plain RGB).
+fn jpeg_color_space(frame: &JpegFrame) -> Option<JpegColorSpace> {
+    match frame.components {
+        1 => Some(JpegColorSpace::Gray),
+        3 => Some(JpegColorSpace::Rgb),
+        // Adobe transform 0 = inverted CMYK (needs an inverting
+        // /Decode); transform 1 = YCCK, which viewers render
+        // inconsistently — re-encode instead.
+        4 if frame.adobe_transform == Some(0) => Some(JpegColorSpace::Cmyk),
+        _ => None,
+    }
+}
+
+/// Parses the first baseline SOF (C0/C1) of a JPEG, recording the Adobe
+/// APP14 transform on the way. Returns `None` for progressive (C2 —
+/// most PDF viewers cannot render progressive DCT), truncated, or
+/// otherwise suspicious data. Conservative by design: `None` just means
+/// "use the decode path", never an error.
+fn parse_jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
+    if !is_jpeg_magic(bytes) || bytes.len() < 4 {
+        return None;
+    }
+    let mut pos = 2;
+    let mut adobe_transform: Option<u8> = None;
+    while pos + 1 < bytes.len() {
+        if bytes[pos] != 0xFF {
+            return None;
+        }
+        // Skip fill bytes (0xFF padding before the marker code).
+        let mut next = pos + 1;
+        while next < bytes.len() && bytes[next] == 0xFF {
+            next += 1;
+        }
+        if next >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[next];
+        pos = next + 1;
+        // Standalone markers carry no length.
+        if marker == 0xD9 || marker == 0xDA {
+            break; // EOI / SOS: no SOF found.
+        }
+        if marker == 0x01 || (0xD0..=0xD8).contains(&marker) {
+            continue;
+        }
+        if pos + 2 > bytes.len() {
+            return None;
+        }
+        let seg_len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        if seg_len < 2 || pos + seg_len > bytes.len() {
+            return None;
+        }
+        let body = &bytes[pos + 2..pos + seg_len];
+        // Adobe APP14: "Adobe\0" + version(2) + flags(4) + transform(1).
+        if marker == 0xEE && body.len() >= 13 && body[0..6] == *b"Adobe\x00" {
+            adobe_transform = Some(body[12]);
+        }
+        if marker == 0xC0 || marker == 0xC1 {
+            if body.len() < 6 {
+                return None;
+            }
+            let height = u16::from_be_bytes([body[1], body[2]]) as u32;
+            let width = u16::from_be_bytes([body[3], body[4]]) as u32;
+            let components = body[5];
+            if width == 0 || height == 0 || components == 0 {
+                return None;
+            }
+            return Some(JpegFrame {
+                width,
+                height,
+                components,
+                adobe_transform,
+            });
+        }
+        if marker == 0xC2 {
+            return None; // Progressive DCT: viewers disagree; re-encode.
+        }
+        pos += seg_len;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -763,23 +961,10 @@ impl PdfBuild {
     }
 
     /// Embeds one decoded image as the next page, taking ownership of
-    /// its RGB bytes (no clone — the caller's copy is moved from).
+    /// its payload (no clone — the caller's copy is moved from).
     /// The bytes are released when this call returns: peak retention
     /// across a run is one image.
-    fn append(
-        &mut self,
-        rgb: Vec<u8>,
-        width_px: u32,
-        height_px: u32,
-        dpi: f64,
-        policy: PageSizePolicy,
-    ) -> Result<(), EngineError> {
-        let decoded = DecodedImage {
-            width_px,
-            height_px,
-            rgb,
-            dpi,
-        };
+    fn append(&mut self, decoded: DecodedImage, policy: PageSizePolicy) -> Result<(), EngineError> {
         #[cfg(test)]
         self.track_live();
         let (page_w, page_h, rect) = placement(&decoded, policy);
@@ -791,19 +976,53 @@ impl PdfBuild {
         }
 
         let image_id = self.doc.new_object_id();
-        let image_dict = dictionary! {
-            "Type" => "XObject",
-            "Subtype" => "Image",
-            "Width" => i64::from(decoded.width_px),
-            "Height" => i64::from(decoded.height_px),
-            "ColorSpace" => "DeviceRGB",
-            "BitsPerComponent" => 8,
+        let image_dict = match &decoded.payload {
+            ImagePayload::RawRgb(_) => dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => i64::from(decoded.width_px),
+                "Height" => i64::from(decoded.height_px),
+                "ColorSpace" => "DeviceRGB",
+                "BitsPerComponent" => 8,
+            },
+            ImagePayload::Jpeg(payload) => {
+                let mut dict = dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "Width" => i64::from(decoded.width_px),
+                    "Height" => i64::from(decoded.height_px),
+                    "ColorSpace" => payload.color_space.pdf_name(),
+                    "BitsPerComponent" => 8,
+                    "Filter" => "DCTDecode",
+                };
+                // Adobe inverted CMYK stores 0 as ink: invert on render.
+                if payload.color_space == JpegColorSpace::Cmyk {
+                    dict.set(
+                        "Decode",
+                        vec![
+                            lopdf::Object::Integer(1),
+                            lopdf::Object::Integer(0),
+                            lopdf::Object::Integer(1),
+                            lopdf::Object::Integer(0),
+                            lopdf::Object::Integer(1),
+                            lopdf::Object::Integer(0),
+                            lopdf::Object::Integer(1),
+                            lopdf::Object::Integer(0),
+                        ],
+                    );
+                }
+                dict
+            }
         };
         // Moved in, not cloned: the decoded buffer now belongs to the
         // document (the caller's copy is gone after this call).
+        let content = match decoded.payload {
+            ImagePayload::RawRgb(rgb) => rgb,
+            ImagePayload::Jpeg(payload) => payload.bytes,
+        };
         self.doc.objects.insert(
             image_id,
-            lopdf::Object::Stream(Stream::new(image_dict, decoded.rgb)),
+            lopdf::Object::Stream(Stream::new(image_dict, content)),
         );
         #[cfg(test)]
         self.untrack_live();
@@ -1258,14 +1477,7 @@ mod tests {
             let bytes = solid_rgb_png(32, 32, *color);
             let image = ImageInput::new(format!("{i}.png"), bytes).expect("input builds");
             let item = decode_image(&image, i, [255, 255, 255]).expect("decodes");
-            pdf.append(
-                item.rgb,
-                item.width_px,
-                item.height_px,
-                item.dpi,
-                PageSizePolicy::FitImage,
-            )
-            .expect("embeds");
+            pdf.append(item, PageSizePolicy::FitImage).expect("embeds");
         }
         assert_eq!(
             pdf.peak_live(),
@@ -1452,6 +1664,157 @@ mod tests {
         let serialized = run_bytes(input_named("exif3.jpg", tagged), opts());
         let images = output_images_from_bytes(&serialized);
         assert_eq!((images[0].0, images[0].1), (12, 8));
+    }
+
+    // -- JPEG passthrough ----------------------------------------------------------
+
+    /// Filter + ColorSpace + raw content per embedded image page.
+    fn image_stream_info(serialized: &[u8]) -> Vec<(Option<String>, Option<String>, Vec<u8>)> {
+        let raw = lopdf::Document::load_mem(serialized).expect("parses");
+        let mut numbers: Vec<u32> = raw.get_pages().keys().copied().collect();
+        numbers.sort_unstable();
+        let mut out = Vec::new();
+        for number in numbers {
+            let page_id = raw.get_pages()[&number];
+            let page = raw.get_dictionary(page_id).expect("page dict");
+            let resources = page.get(b"Resources").expect("resources");
+            let (_, resources) = raw.dereference(resources).expect("resolve");
+            let xobjects = resources
+                .as_dict()
+                .expect("dict")
+                .get(b"XObject")
+                .expect("xobject");
+            let (_, xobjects) = raw.dereference(xobjects).expect("resolve");
+            let im = xobjects.as_dict().expect("dict").get(b"Im1").expect("Im1");
+            let (_, image) = raw.dereference(im).expect("image resolves");
+            let stream = image.as_stream().expect("stream");
+            let name = |key: &[u8]| {
+                stream
+                    .dict
+                    .get(key)
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+            };
+            out.push((name(b"Filter"), name(b"ColorSpace"), stream.content.clone()));
+        }
+        out
+    }
+
+    #[test]
+    fn baseline_jpeg_passes_through_untouched() {
+        let input = solid_jpeg(64, 48, [200, 30, 30]);
+        let item = decode_image(
+            &ImageInput::new("photo.jpg", input.clone()).expect("input builds"),
+            0,
+            [255, 255, 255],
+        )
+        .expect("decodes");
+        assert_eq!((item.width_px, item.height_px), (64, 48));
+        match item.payload {
+            ImagePayload::Jpeg(payload) => {
+                assert_eq!(payload.bytes, input, "passthrough is byte-identical");
+                assert_eq!(payload.color_space, JpegColorSpace::Rgb);
+            }
+            ImagePayload::RawRgb(_) => panic!("baseline JPEG must pass through, not decode"),
+        }
+    }
+
+    #[test]
+    fn passthrough_pdf_embeds_dct_and_stays_small() {
+        let input = solid_jpeg(320, 240, [40, 80, 160]);
+        let raw_budget = 320usize * 240 * 3;
+        assert!(input.len() < raw_budget / 4, "fixture sanity");
+        let serialized = run_bytes(input_named("photo.jpg", input.clone()), opts());
+        let info = image_stream_info(&serialized);
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].0.as_deref(), Some("DCTDecode"));
+        assert_eq!(info[0].1.as_deref(), Some("DeviceRGB"));
+        assert_eq!(info[0].2, input, "embedded stream is the original file");
+        assert!(
+            serialized.len() < raw_budget,
+            "PDF stays far below raw RGB: {} vs {raw_budget}",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn exif_rotated_jpeg_falls_back_to_reencode() {
+        // Orientation 6 cannot pass through (SOF dims ≠ presented dims):
+        // pixels rotate, then a single q82 re-encode bounds the size.
+        let base = solid_jpeg(64, 48, [180, 40, 40]);
+        let tagged = inject_exif_orientation(&base, 6);
+        let item = decode_image(
+            &ImageInput::new("exif.jpg", tagged.clone()).expect("input builds"),
+            0,
+            [255, 255, 255],
+        )
+        .expect("decodes");
+        assert_eq!((item.width_px, item.height_px), (48, 64));
+        match item.payload {
+            ImagePayload::Jpeg(payload) => {
+                assert_ne!(payload.bytes, tagged, "fallback re-encodes, never copies");
+                assert_eq!(payload.color_space, JpegColorSpace::Rgb);
+                // Still DCT in the PDF and far below raw RGB.
+                let serialized = run_bytes(input_named("exif.jpg", tagged), opts());
+                let info = image_stream_info(&serialized);
+                assert_eq!(info[0].0.as_deref(), Some("DCTDecode"));
+                assert!(
+                    info[0].2.len() < 48 * 64 * 3,
+                    "fallback stays far below raw RGB: {}",
+                    info[0].2.len()
+                );
+            }
+            ImagePayload::RawRgb(_) => panic!("fallback must re-encode to JPEG"),
+        }
+    }
+
+    #[test]
+    fn frame_parser_reads_baseline_sof() {
+        let bytes = solid_jpeg(64, 48, [1, 2, 3]);
+        let frame = parse_jpeg_frame(&bytes).expect("parses");
+        assert_eq!((frame.width, frame.height), (64, 48));
+        assert_eq!(frame.components, 3);
+        assert_eq!(frame.adobe_transform, None);
+        assert_eq!(jpeg_color_space(&frame), Some(JpegColorSpace::Rgb));
+    }
+
+    #[test]
+    fn frame_parser_rejects_progressive_sof2() {
+        // SOI + minimal APP0 + SOF2 (progressive): well-formed enough to
+        // parse, but passthrough must refuse (viewers disagree on
+        // progressive DCT).
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        bytes.extend_from_slice(b"JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00");
+        bytes.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x0B, 0x08]);
+        bytes.extend_from_slice(&[0x00, 0x30, 0x00, 0x20, 0x03]);
+        bytes.extend_from_slice(&[0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(parse_jpeg_frame(&bytes), None);
+    }
+
+    #[test]
+    fn frame_parser_reads_adobe_cmyk() {
+        // SOI + APP14 (transform 0) + SOF0 with 4 components.
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xEE, 0x00, 0x0F];
+        bytes.extend_from_slice(b"Adobe\x00\x01\x00\x00\x00\x00\x00\x00");
+        bytes.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0E, 0x08]);
+        bytes.extend_from_slice(&[0x00, 0x10, 0x00, 0x10, 0x04]);
+        bytes.extend_from_slice(&[0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00]);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+        let frame = parse_jpeg_frame(&bytes).expect("parses");
+        assert_eq!(frame.components, 4);
+        assert_eq!(frame.adobe_transform, Some(0));
+        assert_eq!(jpeg_color_space(&frame), Some(JpegColorSpace::Cmyk));
+    }
+
+    #[test]
+    fn frame_parser_rejects_truncated_and_foreign_data() {
+        assert_eq!(parse_jpeg_frame(&[]), None);
+        assert_eq!(parse_jpeg_frame(b"not a jpeg"), None);
+        let mut bytes = solid_jpeg(16, 16, [1, 2, 3]);
+        bytes.truncate(24);
+        assert_eq!(parse_jpeg_frame(&bytes), None);
     }
 
     #[test]

@@ -50,7 +50,7 @@ None. No blocked items.
 
 | Check                                                         | Result                                                                                                                                                          |
 | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust tests (`cargo test` in `engine/`)                        | 346 passing (229 unit + integration suites, incl. incremental-embed peak test)                                                                                  |
+| Rust tests (`cargo test` in `engine/`)                        | 354 passing (unit + integration suites, incl. passthrough/byte-identity tests)                                                                                  |
 | Scan core tests (`cargo test` in `scan/`)                     | 26 passing (geometry, detect, warp, enhance, pipeline)                                                                                                          |
 | Rust format (`cargo fmt --check`)                             | clean                                                                                                                                                           |
 | Rust lints (`cargo clippy --all-targets`)                     | clean                                                                                                                                                           |
@@ -58,7 +58,7 @@ None. No blocked items.
 | Frontend typecheck (`npm run typecheck`)                      | passing                                                                                                                                                         |
 | Frontend lint (`npm run lint`)                                | passing                                                                                                                                                         |
 | Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
-| Frontend unit tests (`npm test`)                              | 227 passing (import normalization + bulk import + scanner surface + stale-chunk recovery + PWA update manager)                                                  |
+| Frontend unit tests (`npm test`)                              | 228 passing (import normalization + bulk import + scanner surface + stale-chunk recovery + PWA update manager)                                                  |
 | Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
 | Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 43/43 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |

@@ -129,3 +129,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** `useRegisterSW` hook from `virtual:pwa-register/react` (rejected: hook-local state can't feed both the banner and About without prop drilling; the external store does). Forcing `reload` on every launch (rejected: destroys session state when no update exists).
 - **Consequences.** New `app/src/pwa/` boundary; `virtual:pwa-register` is dynamically imported so unit tests and the dev server (no SW) degrade to `local`/`unsupported` instead of crashing; E2E asserts the About card on localhost.
 - **Status.** Decided, implemented, verified (14 manager unit tests, canonical E2E 43/43 + 4 SKIP).
+
+## D17 — JPEG DCT passthrough in images_to_pdf (container, not re-encoder)
+
+- **Decision.** Baseline JPEGs with EXIF orientation 1 embed byte-identical (`/DCTDecode`, `/DeviceRGB`/`DeviceGray`/`DeviceCMYK`+inverting `/Decode` for Adobe transform-0). A conservative SOF parser gates passthrough (progressive SOF2, YCCK, 4-component-without-APP14, truncated, or probe-mismatched frames all fall through); non-passthrough JPEGs get one internal q82 re-encode; PNGs keep the lossless raw path. No wire change: no new option, no protocol change, fixed internal quality constant.
+- **Reason.** The engine discarded JPEG compression entirely (decode → uncompressed raw RGB stream), so a 3 MB phone photo became ~14 MB in the PDF — 13 photos → 81 MB (F-14). Passthrough matches the img2pdf reference approach (PDF as container) with zero quality loss on the common path.
+- **Alternatives considered.** Engine-wide `/FlateDecode` on raw (rejected: still ~2x the JPEGs). Lowering the app import budget/quality (rejected: punishes everyones quality to dodge an engine bug). User-facing quality slider (deferred: Compress tool territory).
+- **Consequences.** Output size ≈ sum of input JPEG sizes; EXIF-rotated/progressive inputs still shrink ~10x via the fallback. Tests pin byte identity, DCT filter presence, and fallback dims.
+- **Status.** Decided, implemented, verified (Rust 354 passing incl. 8 new passthrough/parser tests, E2E 43/43 + 4 SKIP).

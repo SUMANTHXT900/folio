@@ -102,6 +102,32 @@ fn jpeg_to_pdf_through_engine() {
 }
 
 #[test]
+fn jpeg_passthrough_keeps_original_bytes_through_engine() {
+    let input_bytes = jpeg(64, 48, [200, 30, 30]);
+    let raw_budget = 64usize * 48 * 3;
+    let result = run_operation(
+        &ImagesToPdfOperation,
+        input(vec![("photo.jpg", input_bytes.clone())]),
+        ImagesToPdfOptions::default(),
+    );
+    assert_lifecycle_complete(&result);
+    let mut output = expect_success(result);
+    let bytes = output.document.save_to_bytes().expect("serializes");
+    let images = output_images(&bytes);
+    assert_eq!(images.len(), 1);
+    assert_eq!((images[0].0, images[0].1), (64, 48));
+    assert_eq!(
+        images[0].2, input_bytes,
+        "embedded stream is the original JPEG"
+    );
+    assert!(
+        bytes.len() < raw_budget,
+        "container stays far below raw RGB: {} vs {raw_budget}",
+        bytes.len()
+    );
+}
+
+#[test]
 fn png_to_pdf_through_engine() {
     let result = run_operation(
         &ImagesToPdfOperation,
@@ -134,11 +160,23 @@ fn multiple_images_preserve_order() {
     let bytes = output.document.save_to_bytes().expect("serializes");
     let images = output_images(&bytes);
     assert_eq!(images.len(), 3);
-    // JPEG middle page is lossy: assert hue dominance instead of exact bytes.
+    // PNG pages stay raw RGB: exact first pixels, order preserved.
     assert_eq!(&images[0].2[0..3], &[255, 0, 0]);
     assert_eq!(&images[2].2[0..3], &[0, 0, 255]);
-    let (r, g, b) = (images[1].2[0], images[1].2[1], images[1].2[2]);
-    assert!(g > r && g > b, "middle page stays greenish: {r},{g},{b}");
+    // JPEG middle page passes through as DCT bytes, not raw RGB:
+    // decode the embedded stream and assert hue dominance instead.
+    let decoded = image::load_from_memory(&images[1].2).expect("embedded DCT decodes");
+    let rgb = decoded.to_rgb8();
+    let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
+    for px in rgb.pixels() {
+        r_sum += u64::from(px[0]);
+        g_sum += u64::from(px[1]);
+        b_sum += u64::from(px[2]);
+    }
+    assert!(
+        g_sum > r_sum && g_sum > b_sum,
+        "middle page stays greenish: {r_sum},{g_sum},{b_sum}"
+    );
 }
 
 #[test]

@@ -242,3 +242,9 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit **227 passed** (+14 manager incl. env classification, settle paths, offline/error, log cap, snapshot stability); canonical E2E **43/43 + 4 SKIP** (new: About card check → local status on dev, no stray banner); typecheck/lint/format clean; production build clean (37 precache entries). No version bump.
 
 - **Deploy.** Update manager deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). This deploy is itself the first live test of the banner: phones holding the old precache will get the one-tap prompt instead of silent staleness.
+
+## 2026-09-26 — JPEG DCT passthrough (F-14, engine-only)
+
+- **Objective.** 13 photos → 81 MB PDF on a real phone. Root cause confirmed in code: the engine embedded uncompressed raw RGB (no `/Filter`), discarding JPEG compression at the engine boundary.
+- **Work.** `engine/.../images_to_pdf`: SOF parser gate (baseline C0/C1 only; progressive/YCCK/truncated/probe-mismatch fall through), byte-identical `/DCTDecode` passthrough (RGB/Gray/Adobe-CMYK+inverting Decode), one internal q82 re-encode fallback, PNG raw path untouched. No wire change (no new option, protocol frozen). Fixture bug caught by own test (short APP14) — fixed.
+- **Verification.** Rust **354 passing** (8 new), fmt/clippy clean; frontend **228**, E2E **43/43 + 4 SKIP** (DCT renders identically); WASM rebuilt (1.6 MB). No version bump.

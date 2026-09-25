@@ -12,6 +12,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
 - **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
 
+### F-14 — Images → PDF output ~5× larger than the input photos (81 MB for 13 images)
+
+- **Status.** Resolved (DCT passthrough). **Area.** Engine (`engine/src/processing/pdf/images_to_pdf/mod.rs`), engine-only — wire, protocol, and app untouched. **Severity.** High (the scanner's main output was unusable at scale: share failures, storage bloat).
+- **Symptoms.** 13 phone/camera photos (~2–4 MB JPEGs each) built an ~81 MB PDF on a real phone.
+- **Root cause.** The engine decoded every JPEG to raw pixels and embedded an _uncompressed_ stream (`w×h×3` bytes, no `/Filter`) — the original JPEG compression was discarded at the engine boundary. A 2500px photo entered as ~3 MB and left as ~14 MB.
+- **Fix.** Baseline orientation-1 JPEGs embed byte-identical (`/DCTDecode`); progressive/YCCK/EXIF-rotated fall back to one internal q82 re-encode; PNGs keep the lossless raw path (D17).
+- **Verification.** 8 new Rust tests (byte identity, DCT filter, fallback dims, parser gates incl. progressive rejection + Adobe CMYK); full Rust 354 passing, fmt/clippy clean; frontend 228 + E2E 43/43 + 4 SKIP unchanged (DCT renders identically in PDF.js).
+
 ## Known limitations (by design, not defects)
 
 - **L1 — Compress disabled.** The Studio action stays disabled; no engine or UI implementation exists yet. See `docs/ROADMAP.md`.
