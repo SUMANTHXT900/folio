@@ -51,7 +51,7 @@ function ModeToggle({
       aria-pressed={mode === value}
       onClick={() => onChange(value)}
       className={
-        'rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors min-h-[36px] ' +
+        'rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors min-h-[44px] ' +
         (mode === value
           ? 'bg-brass-400 text-ink-900 shadow-sm'
           : 'text-ink-500 dark:text-ink-300 hover:bg-brass-400/15')
@@ -223,7 +223,7 @@ function PartRow({
           maxLength={120}
           autoComplete="off"
           spellCheck={false}
-          className="min-w-0 flex-1 rounded-md border border-paper-300 dark:border-ink-700 bg-paper-100 dark:bg-ink-900 px-2.5 py-2 font-mono text-[13px] text-ink-700 dark:text-paper-100 focus:outline-none focus:border-brass-400 min-h-[40px]"
+          className="min-w-0 flex-1 rounded-md border border-paper-300 dark:border-ink-700 bg-paper-100 dark:bg-ink-900 px-2.5 py-2 font-mono text-[13px] text-ink-700 dark:text-paper-100 focus:outline-none focus:border-brass-400 min-h-[44px]"
         />
         {url && (
           <a
@@ -232,7 +232,7 @@ function PartRow({
             download={finalName}
             aria-label={`Download part ${index + 1}`}
             data-download-part={index}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-forest-600 hover:bg-forest-500 text-white px-3 py-2 text-[13px] font-semibold transition-colors min-h-[40px]"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-forest-600 hover:bg-forest-500 text-white px-3 py-2 text-[13px] font-semibold transition-colors min-h-[44px]"
           >
             Save
           </a>
@@ -258,7 +258,7 @@ function PartShare({ blob, finalName, index }: { blob: Blob; finalName: string; 
         const r = await studioShare(blob, finalName);
         if (r === 'shared') setShared(true);
       }}
-      className="shrink-0 text-xs font-medium text-forest-600 dark:text-forest-300 hover:underline min-h-[32px]"
+      className="shrink-0 inline-flex items-center text-xs font-medium text-forest-600 dark:text-forest-300 hover:underline min-h-[44px] px-1"
     >
       {shared ? 'Shared ✓' : 'Share…'}
     </button>

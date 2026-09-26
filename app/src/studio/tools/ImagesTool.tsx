@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useCallback, useRef, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ToolHeading,
@@ -18,7 +18,7 @@ import {
   studioShareAvailable,
   type StudioJob,
 } from '../services/folio';
-import { buildImagesPdf } from './imageSharding';
+import { buildImagesPdf, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
 import { CameraCapture } from './CameraCapture';
@@ -69,6 +69,29 @@ export async function stageImagePages(
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   return staged;
+}
+
+/**
+ * Pre-stage sharding policy (M5): evaluates `resolveShardCount` on
+ * pre-stage sums — Σ `file.size` bytes plus Σ known w×h pixels (retained
+ * scan originals included) — BEFORE the prepare loop materializes staged
+ * bytes. Image pages retain no decoded dims (handles only), so known
+ * pixels are 0 here and the byte gate still bounds exactly as before;
+ * the page-count gate runs first, so small batches keep the single-worker
+ * path byte-for-byte. Exported for unit tests.
+ */
+export function preStageShardEstimate(pages: readonly { file: File | Blob; size: number }[]): {
+  totalBytes: number;
+  totalPixels: number;
+  shards: number;
+} {
+  const totalBytes = pages.reduce((sum, p) => sum + Math.max(0, p.file?.size ?? p.size ?? 0), 0);
+  const totalPixels = 0;
+  return {
+    totalBytes,
+    totalPixels,
+    shards: resolveShardCount(pages.length, { totalBytes, totalPixels }),
+  };
 }
 
 /**
@@ -170,10 +193,13 @@ export default function ImagesTool() {
     setSessionIds((prev) => [...prev, id]);
   };
 
-  const onRemovePage = (id: string) => {
-    releaseScan(id);
-    remove(id);
-  };
+  const onRemovePage = useCallback(
+    (id: string) => {
+      releaseScan(id);
+      remove(id);
+    },
+    [remove],
+  );
 
   const onClearAll = () => {
     clearScans();
@@ -217,6 +243,15 @@ export default function ImagesTool() {
     const staged: string[] = [];
     const stagedSizes: number[] = [];
     try {
+      // M5: pre-stage policy on pre-stage sums (single source of truth for
+      // the decision lives in `buildImagesPdf`'s post-stage evaluation;
+      // small batches agree by construction — see `preStageShardEstimate`).
+      const preStage = preStageShardEstimate(pages);
+      if (import.meta.env.DEV) {
+        console.debug(
+          `[folio-images] pre-stage policy: ${pages.length} pages, ${preStage.totalBytes} bytes → ${preStage.shards} shard(s)`,
+        );
+      }
       const prepared = await stageImagePages(pages, browserImageRenderer, (completed, total) => {
         setStage(`Preparing images… ${completed} of ${total}`);
         setFraction(completed / total);
@@ -402,8 +437,8 @@ export default function ImagesTool() {
             <p className="mb-3 mt-4 text-sm font-medium text-ink-700 dark:text-paper-100">
               Page size policy
             </p>
-            <div className="flex gap-4 text-sm">
-              <label className="flex items-center gap-1">
+            <div className="flex gap-4 text-sm" role="radiogroup" aria-label="Page size policy">
+              <label className="flex min-h-[44px] items-center gap-1.5">
                 <input
                   type="radio"
                   name="studio-images-page-size"
@@ -412,7 +447,7 @@ export default function ImagesTool() {
                 />
                 Fit image (page = image size)
               </label>
-              <label className="flex items-center gap-1">
+              <label className="flex min-h-[44px] items-center gap-1.5">
                 <input
                   type="radio"
                   name="studio-images-page-size"

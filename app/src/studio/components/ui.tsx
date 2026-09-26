@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { studioShare } from '../services/folio';
 
@@ -56,7 +56,6 @@ export function DropZone({
   hint?: string;
   cta?: string;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
   return (
@@ -75,7 +74,7 @@ export function DropZone({
         const files = Array.from(e.dataTransfer.files);
         if (files.length) onFiles(files);
       }}
-      className={`relative w-full overflow-hidden rounded-2xl border-2 border-dashed p-8 sm:p-14 flex flex-col items-center justify-center gap-4 text-center transition-colors ${
+      className={`relative w-full overflow-hidden rounded-2xl border-2 border-dashed p-8 sm:p-14 flex flex-col items-center justify-center gap-4 text-center transition-colors focus-within:border-brass-400/70 ${
         over
           ? 'border-brass-400 bg-brass-400/[0.08] shadow-[0_0_0_5px_color-mix(in_srgb,var(--color-brass-400)_16%,transparent)] scale-[1.005]'
           : 'border-brass-500/35 dark:border-brass-400/25 bg-paper-50/70 dark:bg-ink-800/40 hover:bg-paper-50 dark:hover:bg-ink-800/60 hover:border-brass-400/60'
@@ -136,11 +135,11 @@ export function DropZone({
         </AnimatePresence>
       </div>
 
-      {/* real CTA button */}
-      <button
-        type="button"
-        onClick={() => inputRef.current?.click()}
-        className="relative inline-flex items-center gap-2 rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-5 py-2.5 text-sm font-medium shadow-sm hover:shadow-md hover:-translate-y-px active:translate-y-0 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-800"
+      {/* CTA visual only (aria-hidden): the file input overlay below is the
+          single labelled control — one tab-stop, identical mouse behavior. */}
+      <span
+        aria-hidden
+        className="relative inline-flex items-center gap-2 rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-5 py-2.5 text-sm font-medium shadow-sm"
       >
         <svg
           width="15"
@@ -155,7 +154,7 @@ export function DropZone({
           <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
         </svg>
         {cta}
-      </button>
+      </span>
 
       <span className="relative inline-flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-ink-300 rounded-full border border-brass-500/20 dark:border-brass-400/20 bg-brass-400/[0.07] dark:bg-brass-400/[0.09] px-3 py-1">
         <svg
@@ -176,12 +175,11 @@ export function DropZone({
       </span>
 
       <input
-        ref={inputRef}
         type="file"
         accept={accept}
         multiple={multiple}
+        aria-label={cta}
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-        onClick={(e) => e.stopPropagation()}
         onChange={(e) => {
           const files = Array.from(e.target.files || []);
           if (files.length) onFiles(files);
@@ -348,7 +346,7 @@ export function Card({
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-      className={`rounded-2xl border border-paper-300/70 dark:border-ink-700 bg-paper-50/80 dark:bg-ink-800/60 backdrop-blur p-6 shadow-soft ${className}`}
+      className={`rounded-2xl border border-paper-300/70 dark:border-ink-700 bg-paper-50/80 dark:bg-ink-800/60 backdrop-blur p-4 sm:p-6 shadow-soft ${className}`}
     >
       {children}
     </motion.div>
@@ -369,16 +367,15 @@ export function Progress({ value, label }: { value: number; label?: string }) {
         </span>
       </div>
       <div className="h-1.5 rounded-full bg-paper-200 dark:bg-ink-700 overflow-hidden">
-        {/* scaleX keeps the animation compositor-only (#21) */}
-        <div className="h-full w-full rounded-full origin-left bg-gradient-to-r from-brass-500 to-brass-300">
-          <motion.div
-            className="h-full w-full rounded-full bg-gradient-to-r from-brass-500 to-brass-300"
-            initial={{ scaleX: 0 }}
-            animate={{ scaleX: pct / 100 }}
-            transition={{ duration: 0.25, ease: 'easeOut' }}
-            style={{ transformOrigin: 'left' }}
-          />
-        </div>
+        {/* scaleX keeps the animation compositor-only (#21). The fill is the
+            ONLY gradient layer, so determinate progress reads honestly. */}
+        <motion.div
+          className="h-full w-full rounded-full origin-left bg-gradient-to-r from-brass-500 to-brass-300"
+          initial={{ scaleX: 0 }}
+          animate={{ scaleX: pct / 100 }}
+          transition={{ duration: 0.25, ease: 'easeOut' }}
+          style={{ transformOrigin: 'left' }}
+        />
       </div>
     </div>
   );
@@ -429,7 +426,10 @@ export function ErrorBlock({
   if (isStaleChunkError(error)) {
     const raw = error instanceof Error ? error.message : fallback;
     return (
-      <div className="mt-4" role="alert">
+      <div
+        className="mt-5 rounded-xl border border-red-600/30 bg-red-600/[0.06] px-4 py-3.5"
+        role="alert"
+      >
         <p className="text-sm font-medium text-ink-900 dark:text-paper-100">
           A new version of Folio was released while this page was open.
         </p>
@@ -459,8 +459,11 @@ export function ErrorBlock({
   // Avoid repeating the primary message in the secondary line.
   const deduped = secondary.filter((part) => part !== message);
   return (
-    <div className="mt-4" role="alert">
-      <p className="text-sm text-red-500">{message}</p>
+    <div
+      className="mt-5 rounded-xl border border-red-600/30 bg-red-600/[0.06] px-4 py-3.5"
+      role="alert"
+    >
+      <p className="text-sm font-medium text-red-700 dark:text-red-400">{message}</p>
       {deduped.length > 0 && (
         <p className="mt-1 text-xs text-ink-400 dark:text-ink-300 break-words">
           {deduped.join(' — ')}

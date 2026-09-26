@@ -795,13 +795,15 @@ export function CameraCapture({
           Single row, never wraps: after the first capture the "View
           pages" CTA appears here, and a wrapping bar would steal ~44px
           from the viewfinder (real-phone report). The title truncates
-          instead. */}
-        <div className="flex items-center gap-2 border-b border-paper-300/70 px-3 py-2 dark:border-ink-800/70">
+          instead, and the bar scrolls horizontally on very narrow screens
+          so every 44px target stays reachable without reflowing the
+          viewfinder below. */}
+        <div className="flex items-center gap-2 overflow-x-auto border-b border-paper-300/70 px-3 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden dark:border-ink-800/70">
           <button
             onClick={leave}
             aria-label="Back to pages"
             title="Back to page list"
-            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
+            className="flex min-h-[44px] shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-900 dark:text-ink-300 dark:hover:bg-ink-700"
           >
             <svg
               width="14"
@@ -843,7 +845,7 @@ export function CameraCapture({
             onClick={() => importInputRef.current?.click()}
             disabled={importState !== null}
             aria-label="Import images from files"
-            className="flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-lg border border-paper-300 px-2.5 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:border-brass-400/40 hover:text-ink-900 disabled:opacity-40 dark:border-ink-700 dark:text-ink-200 dark:hover:text-paper-100"
+            className="flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-lg border border-paper-300 px-2.5 py-1.5 text-xs font-medium text-ink-600 transition-colors hover:border-brass-400/40 hover:text-ink-900 disabled:opacity-40 dark:border-ink-700 dark:text-ink-200 dark:hover:text-paper-100"
           >
             <svg
               width="14"
@@ -865,7 +867,7 @@ export function CameraCapture({
             <button
               onClick={leave}
               aria-label="Finish scanning and view pages"
-              className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
+              className="flex min-h-[44px] shrink-0 items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
             >
               {/* Short label on narrow phones so the bar never wraps. */}
               <span className="hidden min-[400px]:inline">View pages ({sessionPages.length})</span>
@@ -889,7 +891,7 @@ export function CameraCapture({
             aria-label={grid ? 'Hide alignment grid' : 'Show alignment grid'}
             aria-pressed={grid}
             title="Alignment grid"
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
               grid
                 ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
                 : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
@@ -914,7 +916,7 @@ export function CameraCapture({
             }}
             aria-label="Switch camera"
             title="Switch camera"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-paper-300 text-ink-500 transition-colors hover:border-brass-400/40 hover:text-ink-900 dark:border-ink-700 dark:text-ink-300 dark:hover:text-paper-100"
           >
             <svg
               width="16"

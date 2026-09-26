@@ -45,20 +45,29 @@ const RotateTile = memo(function RotateTile({
   src,
   idx,
   angle,
-  onLeft,
-  onRight,
+  onSpin,
 }: {
   src: string;
   idx: number;
   angle: number;
-  onLeft: () => void;
-  onRight: () => void;
+  onSpin: (idx: number, dir: 1 | -1) => void;
 }) {
+  // Letterboxed preview: the frame stays axis-aligned and swaps aspect for
+  // quarter-turns (3:4 <-> 4:3) while the image rotates inside with
+  // object-contain — a 90° preview letterboxes instead of clipping or
+  // overlapping its neighbours. The group label carries the page index so
+  // the generic Rotate buttons below read in context.
+  const sideways = (((angle / 90) % 2) + 2) % 2 === 1;
   return (
-    <div className="flex flex-col items-center gap-2">
+    <div
+      role="group"
+      aria-label={`Page ${idx + 1}${angle !== 0 ? `, rotated ${angle} degrees clockwise` : ''}`}
+      className="flex flex-col items-center gap-2"
+    >
       <div
-        className="w-full aspect-[3/4] rounded-lg overflow-hidden border-2 border-paper-300 dark:border-ink-700 bg-white relative"
-        style={{ transform: `rotate(${angle}deg)`, transition: 'transform .2s' }}
+        className={`flex w-full items-center justify-center overflow-hidden rounded-lg border-2 border-paper-300 dark:border-ink-700 bg-white relative ${
+          sideways ? 'aspect-[4/3]' : 'aspect-[3/4]'
+        }`}
       >
         {src ? (
           <img
@@ -66,7 +75,8 @@ const RotateTile = memo(function RotateTile({
             alt={`Page ${idx + 1}`}
             loading="lazy"
             decoding="async"
-            className="w-full h-full object-scale-down"
+            style={{ transform: `rotate(${angle}deg)` }}
+            className="max-h-full max-w-full object-contain transition-transform"
           />
         ) : (
           <span className="absolute inset-0 flex items-center justify-center text-xs text-ink-400 animate-pulse">
@@ -76,7 +86,7 @@ const RotateTile = memo(function RotateTile({
       </div>
       <div className="flex items-center gap-1">
         <button
-          onClick={onLeft}
+          onClick={() => onSpin(idx, -1)}
           className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
           aria-label="Rotate left"
         >
@@ -84,7 +94,7 @@ const RotateTile = memo(function RotateTile({
         </button>
         <span className="w-6 text-center text-xs font-medium text-ink-400">{idx + 1}</span>
         <button
-          onClick={onRight}
+          onClick={() => onSpin(idx, 1)}
           className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
           aria-label="Rotate right"
         >
@@ -361,8 +371,7 @@ export default function RotateTool() {
                       src={thumbs[idx]}
                       idx={idx}
                       angle={angle}
-                      onLeft={() => spinOne(idx, -1)}
-                      onRight={() => spinOne(idx, 1)}
+                      onSpin={spinOne}
                     />
                   );
                 })}
@@ -417,13 +426,16 @@ export default function RotateTool() {
               </button>
             )}
           </div>
-          {working && fraction !== null && (
-            <div className="mt-3 w-full max-w-xs">
-              <Progress value={fraction * 100} label={stage ?? 'Rotating…'} />
-            </div>
-          )}
-
-          {working && <Spinner label={stage ?? 'Rotating…'} />}
+          {/* Single busy pattern: determinate Progress when a fraction is
+              known, otherwise the staged Spinner — never both. */}
+          {working &&
+            (fraction !== null ? (
+              <div className="mt-3 w-full max-w-xs">
+                <Progress value={fraction * 100} label={stage ?? 'Rotating…'} />
+              </div>
+            ) : (
+              <Spinner label={stage ?? 'Rotating…'} />
+            ))}
           {done && (
             <div className="mt-6">
               <DownloadCard

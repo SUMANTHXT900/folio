@@ -3,8 +3,8 @@
  * undebuggable deploy-skew failure into an actionable reload prompt.
  */
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
-import { ErrorBlock, isStaleChunkError } from './ui';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DropZone, ErrorBlock, Progress, isStaleChunkError } from './ui';
 
 afterEach(() => {
   cleanup();
@@ -48,5 +48,40 @@ describe('ErrorBlock stale-chunk recovery', () => {
     render(<ErrorBlock error={new Error('Something broke')} />);
     expect(screen.getByText('Something broke')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reload app' })).toBeNull();
+  });
+
+  it('renders as a bordered card with darker red, keeping message and code', () => {
+    const error = Object.assign(new Error('Those page numbers are not valid'), {
+      code: 'PAGE_OUT_OF_RANGE',
+    });
+    const { container } = render(<ErrorBlock error={error} />);
+    const alert = screen.getByRole('alert');
+    expect(alert.className).toMatch(/rounded-xl/);
+    expect(alert.className).toMatch(/border/);
+    expect(screen.getByText('Those page numbers are not valid').className).toMatch(/red-700/);
+    expect(screen.getByText('PAGE_OUT_OF_RANGE')).toBeTruthy();
+    expect(container.innerHTML).toContain('Those page numbers are not valid');
+  });
+});
+
+describe('Progress determinate fill', () => {
+  it('renders a single gradient fill layer so the percentage reads honestly', () => {
+    const { container } = render(<Progress value={40} label="Working…" />);
+    expect(screen.getByText('40%')).toBeTruthy();
+    // One gradient layer only — the old always-full outer layer is gone.
+    expect(container.querySelectorAll('.from-brass-500')).toHaveLength(1);
+  });
+});
+
+describe('DropZone single labelled control', () => {
+  it('exposes one tab-stop with the CTA as its accessible name', () => {
+    const onFiles = vi.fn();
+    const { container } = render(<DropZone onFiles={onFiles} cta="Select PDFs" />);
+    // Exactly one focusable control: the file input. The CTA is visual only.
+    const input = screen.getByLabelText('Select PDFs');
+    expect(input.getAttribute('type')).toBe('file');
+    const tabbables = container.querySelectorAll('button, input, a[href], [tabindex]');
+    expect(tabbables).toHaveLength(1);
+    expect(container.querySelector('button')).toBeNull();
   });
 });

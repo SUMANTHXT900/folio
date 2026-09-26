@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { usePwaUpdate } from './usePwaUpdate';
 
 /**
@@ -6,31 +7,76 @@ import { usePwaUpdate } from './usePwaUpdate';
  * Floats above the mobile tool nav (`z-50`) with safe-area clearance.
  *
  * The whole banner links to the About updates card, where the waiting
- * version is reviewed and applied with one tap.
+ * version is reviewed and applied with one tap. The banner itself never
+ * applies or reloads — so while a StudioJob or a live scan session is
+ * active it defers (copy says to finish the current task first) instead
+ * of pushing the user toward a reload mid-task.
  */
 export default function UpdateBanner() {
   const state = usePwaUpdate();
-  if (!state.updateAvailable) return null;
+  const [dismissed, setDismissed] = useState(false);
+  const busy = useScannerBusy();
+  if (!state.updateAvailable || dismissed) return null;
   const applying = state.phase === 'applying';
   return (
     <div role="alert" className="fixed inset-x-4 bottom-4 z-[70] pb-[env(safe-area-inset-bottom)]">
-      <a
-        href="#/about"
-        className="mx-auto flex max-w-xl items-center gap-3 rounded-2xl border border-brass-400/40 bg-ink-900/95 px-4 py-3 shadow-soft backdrop-blur dark:bg-paper-100 dark:text-ink-900 text-paper-50"
-      >
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm font-semibold">A new version is ready</span>
-          <span className="block truncate text-xs opacity-70">
-            {applying ? 'Installing update… Reloading.' : 'Tap to review and update.'}
-          </span>
-        </span>
-        <span
-          aria-hidden
-          className="shrink-0 rounded-xl bg-brass-400 px-4 py-2 text-sm font-semibold text-ink-900"
+      <div className="mx-auto flex max-w-xl items-center gap-2 rounded-2xl border border-brass-400/40 bg-ink-900/95 px-4 py-3 shadow-soft backdrop-blur dark:bg-paper-100 dark:text-ink-900 text-paper-50">
+        <a
+          href="#/about"
+          className="flex min-w-0 flex-1 items-center gap-3"
+          aria-label={busy ? 'Update ready — review after your current task' : undefined}
         >
-          {applying ? 'Installing…' : 'Review update'}
-        </span>
-      </a>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold">A new version is ready</span>
+            <span className="block truncate text-xs opacity-70">
+              {applying
+                ? 'Installing update… Reloading.'
+                : busy
+                  ? 'Finish your current task first, then review.'
+                  : 'Tap to review and update.'}
+            </span>
+          </span>
+          <span
+            aria-hidden
+            className="shrink-0 rounded-xl bg-brass-400 px-4 py-2 text-sm font-semibold text-ink-900"
+          >
+            {applying ? 'Installing…' : 'Review update'}
+          </span>
+        </a>
+        <button
+          type="button"
+          onClick={() => setDismissed(true)}
+          aria-label="Dismiss update notice"
+          className="shrink-0 rounded-full px-3 py-1 text-sm opacity-70 transition-opacity hover:opacity-100 hover:bg-white/10"
+        >
+          ✕
+        </button>
+      </div>
     </div>
   );
+}
+
+/**
+ * Live-scan busy guard. There is no global StudioJob registry (job handles
+ * stay tool-local by design), so this observes the existing scan-surface
+ * markers in the DOM: the scanner root (camera live / review open) and the
+ * native-picker import progress. No new stores — presence is read from
+ * state the scanner already publishes, via MutationObserver so the banner
+ * copy defers the moment a session starts.
+ */
+function useScannerBusy(): boolean {
+  const [busy, setBusy] = useState<boolean>(() =>
+    typeof document === 'undefined'
+      ? false
+      : document.querySelector('[data-scanner-root],[data-import-progress]') !== null,
+  );
+  useEffect(() => {
+    const check = () =>
+      setBusy(document.querySelector('[data-scanner-root],[data-import-progress]') !== null);
+    check();
+    const observer = new MutationObserver(check);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+  return busy;
 }

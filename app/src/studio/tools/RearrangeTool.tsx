@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo, memo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import {
   ToolHeading,
@@ -29,8 +30,7 @@ const RearrangeRow = memo(function RearrangeRow({
   pageIdx,
   pos,
   thumb,
-  onMoveUp,
-  onMoveDown,
+  onMove,
   onPreview,
   isFirst,
   isLast,
@@ -39,9 +39,8 @@ const RearrangeRow = memo(function RearrangeRow({
   pageIdx: number;
   pos: number;
   thumb: string;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onPreview: () => void;
+  onMove: (pos: number, dir: -1 | 1) => void;
+  onPreview: (pos: number) => void;
   isFirst: boolean;
   isLast: boolean;
   dragControls: DragControls;
@@ -66,7 +65,7 @@ const RearrangeRow = memo(function RearrangeRow({
         </svg>
       </span>
       <span className="w-6 text-center text-xs font-mono text-ink-400">{pos + 1}</span>
-      <button onClick={onPreview} className="flex-1 flex items-center gap-3 text-left">
+      <button onClick={() => onPreview(pos)} className="flex-1 flex items-center gap-3 text-left">
         {thumb ? (
           <img
             src={thumb}
@@ -82,7 +81,7 @@ const RearrangeRow = memo(function RearrangeRow({
       </button>
       <div className="flex flex-col">
         <button
-          onClick={onMoveUp}
+          onClick={() => onMove(pos, -1)}
           disabled={isFirst}
           className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label="Move up"
@@ -90,7 +89,7 @@ const RearrangeRow = memo(function RearrangeRow({
           ↑
         </button>
         <button
-          onClick={onMoveDown}
+          onClick={() => onMove(pos, 1)}
           disabled={isLast}
           className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label="Move down"
@@ -103,13 +102,14 @@ const RearrangeRow = memo(function RearrangeRow({
 });
 
 /* One reorderable row: drag starts ONLY from the handle (dragListener={false}).
-   The item keeps `touch-action: pan-y` so vertical page scroll works on touch. */
-function DragRow({
+   The item keeps `touch-action: pan-y` so vertical page scroll works on touch.
+   Memoized: stable per-row props (primitives + stable callbacks) keep drags
+   from re-rendering every row. */
+const DragRow = memo(function DragRow({
   pageIdx,
   pos,
   thumb,
-  onMoveUp,
-  onMoveDown,
+  onMove,
   onPreview,
   isFirst,
   isLast,
@@ -117,9 +117,8 @@ function DragRow({
   pageIdx: number;
   pos: number;
   thumb: string;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onPreview: () => void;
+  onMove: (pos: number, dir: -1 | 1) => void;
+  onPreview: (pos: number) => void;
   isFirst: boolean;
   isLast: boolean;
 }) {
@@ -136,8 +135,7 @@ function DragRow({
         pageIdx={pageIdx}
         pos={pos}
         thumb={thumb}
-        onMoveUp={onMoveUp}
-        onMoveDown={onMoveDown}
+        onMove={onMove}
         onPreview={onPreview}
         isFirst={isFirst}
         isLast={isLast}
@@ -145,7 +143,7 @@ function DragRow({
       />
     </Reorder.Item>
   );
-}
+});
 
 export default function RearrangeTool() {
   const { files, setFiles, addFiles, error: filesError, busy, setBusy, setError } = usePdfFiles();
@@ -179,16 +177,10 @@ export default function RearrangeTool() {
       cancelled = true;
     };
   }, [viewer, file, order, hiRes, renderPreview]);
+  // Full-res preview URLs are service-owned borrows (see `studioPreview`:
+  // never revoke the result). Dropping the cache entry is enough — the
+  // service purges its keys on close/evict, so no caller-side revoke here.
   const [showAll, setShowAll] = useState(false);
-
-  // Revoke full-res preview URLs when the file changes or the tool unmounts.
-  // (No exhaustive-deps rule in this repo's eslint config; the dep list is intentional.)
-  useEffect(() => {
-    const urls = hiRes;
-    return () => {
-      for (const url of Object.values(urls)) URL.revokeObjectURL(url);
-    };
-  }, [file?.id]);
 
   useEffect(() => {
     setResult(null);
@@ -296,6 +288,12 @@ export default function RearrangeTool() {
     });
   }, []);
 
+  // Stable per-row preview callback: DragRow stays memoized because it
+  // receives this reference (plus primitives), never fresh closures.
+  const handlePreview = useCallback((pos: number) => {
+    setViewer(pos);
+  }, []);
+
   return (
     <div className="py-6">
       <ToolHeading
@@ -353,9 +351,8 @@ export default function RearrangeTool() {
                     pageIdx={pageIdx}
                     pos={i}
                     thumb={thumbs[pageIdx]}
-                    onMoveUp={() => move(i, -1)}
-                    onMoveDown={() => move(i, 1)}
-                    onPreview={() => setViewer(i)}
+                    onMove={move}
+                    onPreview={handlePreview}
                     isFirst={i === 0}
                     isLast={i === order.length - 1}
                   />
@@ -419,53 +416,64 @@ export default function RearrangeTool() {
       {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
       {opError !== null && <ErrorBlock error={opError} />}
 
-      {viewer !== null && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setViewer(null)}
-        >
+      {viewer !== null &&
+        // Portaled to document.body: the Card above carries
+        // `backdrop-filter` (via the shared Card's backdrop-blur), which per
+        // spec becomes the containing block for in-tree `fixed` descendants
+        // — the backdrop then spans the tall card and the dialog centers
+        // off-screen (F-19, cf. PageGrid). The portal escapes every
+        // ancestor, so `fixed inset-0` is always the real viewport. `dvh`
+        // caps keep the mobile URL bar from cropping.
+        createPortal(
           <div
-            className="max-w-3xl w-full max-h-[92vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+            onClick={() => setViewer(null)}
           >
-            <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
-              <span className="font-display text-lg">Page {order[viewer] + 1}</span>
-              <button
-                onClick={() => setViewer(null)}
-                className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
-              >
-                Close
-              </button>
+            <div
+              className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label={`Preview Page ${order[viewer] + 1}`}
+            >
+              <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
+                <span className="font-display text-lg">Page {order[viewer] + 1}</span>
+                <button
+                  onClick={() => setViewer(null)}
+                  className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                >
+                  Close
+                </button>
+              </div>
+              {(() => {
+                const pageNum = order[viewer] + 1;
+                const hi = hiRes[pageNum];
+                const fallback = thumbs[order[viewer]];
+                return hi ? (
+                  <img
+                    src={hi}
+                    alt={`Page ${pageNum} (full resolution)`}
+                    className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
+                  />
+                ) : (
+                  <>
+                    {fallback && (
+                      <img
+                        src={fallback}
+                        alt={`Page ${pageNum}`}
+                        className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh] opacity-80"
+                      />
+                    )}
+                    {!fallback && <div className="h-64 rounded-xl bg-white/20 animate-pulse" />}
+                    <p className="mt-2 text-center text-xs text-paper-100/80">
+                      Rendering full-resolution view…
+                    </p>
+                  </>
+                );
+              })()}
             </div>
-            {(() => {
-              const pageNum = order[viewer] + 1;
-              const hi = hiRes[pageNum];
-              const fallback = thumbs[order[viewer]];
-              return hi ? (
-                <img
-                  src={hi}
-                  alt={`Page ${pageNum} (full resolution)`}
-                  className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[82vh]"
-                />
-              ) : (
-                <>
-                  {fallback && (
-                    <img
-                      src={fallback}
-                      alt={`Page ${pageNum}`}
-                      className="w-full rounded-xl shadow-2xl bg-white opacity-80"
-                    />
-                  )}
-                  {!fallback && <div className="h-64 rounded-xl bg-white/20 animate-pulse" />}
-                  <p className="mt-2 text-center text-xs text-paper-100/80">
-                    Rendering full-resolution view…
-                  </p>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -10,7 +10,7 @@
  * through `reorderPages` (pure, tested in `imagePages.test.ts`);
  * per-card move buttons stay the E2E-asserted guaranteed path.
  */
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import { formatBytes } from '../components/ui';
@@ -143,10 +143,10 @@ const PageRow = memo(function PageRow({
   position: number;
   isFirst: boolean;
   isLast: boolean;
-  onMove: (dir: -1 | 1) => void;
-  onRemove: () => void;
-  onRotate: () => void;
-  onPreview: () => void;
+  onMove: (id: string, dir: -1 | 1) => void;
+  onRemove: (id: string) => void;
+  onRotate: (id: string) => void;
+  onPreview: (index: number) => void;
   dragControls: DragControls;
 }) {
   return (
@@ -165,7 +165,7 @@ const PageRow = memo(function PageRow({
         {position + 1}
       </span>
       <button
-        onClick={onPreview}
+        onClick={() => onPreview(position)}
         aria-label={`Preview ${page.name}`}
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-3"
       >
@@ -186,7 +186,7 @@ const PageRow = memo(function PageRow({
       </button>
       <div className="flex shrink-0 flex-col">
         <button
-          onClick={() => onMove(-1)}
+          onClick={() => onMove(page.id, -1)}
           disabled={isFirst}
           className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label={`Move ${page.name} earlier`}
@@ -194,7 +194,7 @@ const PageRow = memo(function PageRow({
           ↑
         </button>
         <button
-          onClick={() => onMove(1)}
+          onClick={() => onMove(page.id, 1)}
           disabled={isLast}
           className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
           aria-label={`Move ${page.name} later`}
@@ -204,7 +204,7 @@ const PageRow = memo(function PageRow({
       </div>
       <div className="flex shrink-0">
         <button
-          onClick={onRotate}
+          onClick={() => onRotate(page.id)}
           className={controlBtn}
           aria-label={`Rotate ${page.name} 90 degrees clockwise`}
           title="Rotate 90° clockwise"
@@ -224,7 +224,7 @@ const PageRow = memo(function PageRow({
           </svg>
         </button>
         <button
-          onClick={onRemove}
+          onClick={() => onRemove(page.id)}
           className={controlBtn + ' hover:!bg-red-50 hover:!text-red-500 dark:hover:!bg-red-950/40'}
           aria-label={`Remove ${page.name}`}
           title="Remove page"
@@ -249,8 +249,10 @@ const PageRow = memo(function PageRow({
 
 /* One reorderable row: drag starts ONLY from the handle
    (dragListener={false}). The item keeps `touch-action: pan-y` so
-   vertical page scroll works on touch. */
-function DragRow({
+   vertical page scroll works on touch. Memoized: stable per-row props
+   (page object + primitives + stable callbacks) keep drags from
+   re-rendering every row. */
+const DragRow = memo(function DragRow({
   page,
   position,
   isFirst,
@@ -264,10 +266,10 @@ function DragRow({
   position: number;
   isFirst: boolean;
   isLast: boolean;
-  onMove: (dir: -1 | 1) => void;
-  onRemove: () => void;
-  onRotate: () => void;
-  onPreview: () => void;
+  onMove: (id: string, dir: -1 | 1) => void;
+  onRemove: (id: string) => void;
+  onRotate: (id: string) => void;
+  onPreview: (index: number) => void;
 }) {
   const controls = useDragControls();
   return (
@@ -292,12 +294,18 @@ function DragRow({
       />
     </Reorder.Item>
   );
-}
+});
 
 export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageGridProps) {
   const ids = useMemo(() => pages.map((p) => p.id), [pages]);
   const [viewer, setViewer] = useState<number | null>(null);
   const viewing = viewer === null ? null : (pages[viewer] ?? null);
+
+  // Stable preview callback: rows receive this reference (plus their
+  // position) instead of fresh per-row closures, so memo holds.
+  const handlePreview = useCallback((index: number) => {
+    setViewer(index);
+  }, []);
 
   return (
     <>
@@ -315,10 +323,10 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
             position={i}
             isFirst={i === 0}
             isLast={i === pages.length - 1}
-            onMove={(dir) => onMove(page.id, dir)}
-            onRemove={() => onRemove(page.id)}
-            onRotate={() => onRotate(page.id)}
-            onPreview={() => setViewer(i)}
+            onMove={onMove}
+            onRemove={onRemove}
+            onRotate={onRotate}
+            onPreview={handlePreview}
           />
         ))}
       </Reorder.Group>

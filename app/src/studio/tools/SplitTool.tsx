@@ -68,7 +68,7 @@ const ThumbTile = memo(function ThumbTile({
       <button
         onClick={() => onToggle(index)}
         aria-label={`${kept ? 'Remove' : 'Keep'} Page ${index + 1}`}
-        className="absolute bottom-0 left-0 right-0 bg-black/60 text-paper-100 text-[11px] py-0.5 text-center hover:bg-black/75 transition-colors"
+        className="absolute bottom-0 left-0 right-0 min-h-[44px] flex items-center justify-center bg-black/60 text-paper-100 text-xs text-center hover:bg-black/75 transition-colors"
       >
         {kept ? `Page ${index + 1}` : 'removed'}
       </button>
@@ -300,11 +300,12 @@ export default function SplitTool() {
             }}
           />
 
-          <div className="flex gap-2">
+          <div className="flex gap-2" role="group" aria-label="Split mode">
             <button
               onClick={() => setMode('pick')}
+              aria-pressed={mode === 'pick'}
               className={
-                'flex-1 rounded-xl border px-4 py-2 text-sm transition-colors ' +
+                'flex-1 rounded-xl border px-4 py-2 min-h-[44px] text-sm transition-colors ' +
                 (mode === 'pick'
                   ? 'border-brass-400 bg-brass-400/10 text-ink-900 dark:text-paper-100'
                   : 'border-paper-300 dark:border-ink-700 text-ink-400')
@@ -314,8 +315,9 @@ export default function SplitTool() {
             </button>
             <button
               onClick={() => setMode('ranges')}
+              aria-pressed={mode === 'ranges'}
               className={
-                'flex-1 rounded-xl border px-4 py-2 text-sm transition-colors ' +
+                'flex-1 rounded-xl border px-4 py-2 min-h-[44px] text-sm transition-colors ' +
                 (mode === 'ranges'
                   ? 'border-brass-400 bg-brass-400/10 text-ink-900 dark:text-paper-100'
                   : 'border-paper-300 dark:border-ink-700 text-ink-400')

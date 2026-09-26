@@ -436,7 +436,7 @@ function Footer() {
           >
             GitHub
           </a>
-          <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-paper-200 dark:border-ink-700 bg-paper-50 dark:bg-ink-800 px-2.5 py-1 font-mono text-[11px] text-ink-400 dark:text-ink-300">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-paper-200 dark:border-ink-700 bg-paper-50 dark:bg-ink-800 px-2.5 py-1 font-mono text-[11px] text-ink-400 dark:text-ink-300">
             <span className="w-1.5 h-1.5 rounded-full bg-forest-500" /> v{__FOLIO_VERSION__}
           </span>
         </div>

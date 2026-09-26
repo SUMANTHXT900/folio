@@ -331,12 +331,12 @@ export default function MetadataTool() {
                     </label>
                     <input
                       id={`studio-meta-${key}`}
-                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
+                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
                       value={texts[key]}
                       onChange={(e) => setTexts((p) => ({ ...p, [key]: e.target.value }))}
                     />
                   </div>
-                  <label className="flex shrink-0 items-center gap-1 pb-2 text-xs text-ink-400 dark:text-ink-300">
+                  <label className="flex shrink-0 items-center gap-1.5 min-h-[44px] px-2 text-xs text-ink-400 dark:text-ink-300">
                     <input
                       type="checkbox"
                       checked={!!clears[key]}
@@ -357,13 +357,13 @@ export default function MetadataTool() {
                     </label>
                     <input
                       id={`studio-meta-${key}`}
-                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 text-sm font-mono text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
+                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm font-mono text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
                       value={dates[key]}
                       placeholder="2026-01-23 09:30:00 +0530"
                       onChange={(e) => setDates((p) => ({ ...p, [key]: e.target.value }))}
                     />
                   </div>
-                  <label className="flex shrink-0 items-center gap-1 pb-2 text-xs text-ink-400 dark:text-ink-300">
+                  <label className="flex shrink-0 items-center gap-1.5 min-h-[44px] px-2 text-xs text-ink-400 dark:text-ink-300">
                     <input
                       type="checkbox"
                       checked={!!clears[key]}

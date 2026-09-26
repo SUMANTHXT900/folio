@@ -5,7 +5,7 @@
  * owned by `imageSharding.test.ts` and are untouched here.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { stageImagePages } from './ImagesTool';
+import { preStageShardEstimate, stageImagePages } from './ImagesTool';
 import { createPage } from './imagePages';
 import type { ImageRenderer } from './imagePrepare';
 
@@ -69,5 +69,36 @@ describe('stageImagePages', () => {
     const staged = await stageImagePages(pages, stubRenderer());
     expect(staged).toHaveLength(1);
     expect(staged[0].name).toBe('a.jpg');
+  });
+});
+
+describe('preStageShardEstimate', () => {
+  it('sums pre-stage file bytes for the policy input', () => {
+    const pages = [
+      createPage({ id: 'a', source: 'upload', file: upload('a.jpg', [1, 2]), name: 'a.jpg' }),
+      createPage({
+        id: 'b',
+        source: 'camera',
+        file: upload('b.jpg', [3, 4, 5]),
+        name: 'b.jpg',
+      }),
+    ];
+    const estimate = preStageShardEstimate(pages);
+    expect(estimate.totalBytes).toBe(5);
+    expect(estimate.totalPixels).toBe(0);
+  });
+
+  it('keeps small batches on the single-worker path', () => {
+    const pages = Array.from({ length: 3 }, (_, i) =>
+      createPage({
+        id: `p${i}`,
+        source: 'upload',
+        file: upload(`p${i}.jpg`, [i + 1]),
+        name: `p${i}.jpg`,
+      }),
+    );
+    // Below the shard threshold the page-count gate decides first:
+    // pre-stage and post-stage evaluations agree — behavior identical.
+    expect(preStageShardEstimate(pages).shards).toBe(1);
   });
 });
