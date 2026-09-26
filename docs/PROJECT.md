@@ -52,7 +52,7 @@ Anyone who works with PDFs containing private or sensitive content and prefers a
 
 Open, inspect, thumbnail, and operate on hundred-megabyte / thousand-page PDFs without tab crashes, unbounded memory growth, or frozen UI: bounded thumbnail concurrency (2) and windows (24 pages), LRU-bounded thumbnail URL cache (6 documents), canvas bitmap release after URL encode, cancellable jobs, and document close/release semantics. Historically verified against a ~514 MB / 2585-page file (optional large-file validation during engine development — the file is not part of the repository).
 
-## Current capabilities (v1.7.0, `dev`)
+## Current capabilities (`dev`, pre-v2.0: scanner M1–M3, perf P0–P4, naming-first downloads)
 
 | Tool         | Operation(s)                                                                                                                                                                                                        |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

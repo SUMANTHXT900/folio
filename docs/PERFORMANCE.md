@@ -95,17 +95,28 @@ Status: ✅ = fixed in the 2026-09-26 performance pass; ◻ = open (phase in par
 
 **Acceptance:** main-thread long tasks during import/capture/thumbnail waves drop (measure via P4 marks); memory baselines unchanged; suites green — met (E2E 49/49 + 4 SKIP, unit 247).
 
-### P3 — Worker-level parallelism for Images (est. 3–5 focused days, gated on P4 data)
+### P3 — Worker-level parallelism for Images (est. 3–5 focused days, gated on P4 data) — **implemented 2026-09-26**
 
-13. **Shard `images_to_pdf` across K workers** for large batches: each shard builds its own sub-PDF, then ordered merge in the engine. Configurable K (start 2–3, device-aware), bounded by memory, with a single-worker fallback when the batch is small (transfer overhead wins below ~8 pages).
-14. **Reject or implement the parallel illusion (finding 14).** Either make `ExecutionStrategy` honest (remove `Parallel`, keep capability docs accurate) or implement worker-level equivalents at the app layer; do not leave documented-but-unused parallelism.
+13. **Shard `images_to_pdf` across K workers** ✅ `imageSharding.ts`: batches ≥8 pages split into contiguous collection-order shards across K device-aware workers (2–3 by `hardwareConcurrency`, one shard per page max, 256 MiB in-flight cap → single path over cap), each shard its own `pdf.images_to_pdf` engine call through unchanged orchestration, then ordered `pdf.merge` over temp studio docs (closed in `finally`). Progress aggregated honestly (90% shards page-weighted + 10% merge); cancellation cancels every in-flight job; failures fail honestly (no silent single-worker retry — recorded in code). Below 8 pages the historical single-worker call runs byte-for-byte.
+14. **Parallel honesty (finding 14).** ✅ Satisfied by construction: `InlineScheduler` stays `Inline` (correct for the single-threaded WASM baseline) with a doc comment stating real parallelism lives at the app layer (`imageSharding.ts`); the `Parallel` variant stays documented-but-unselected so `OperationCapabilities` (frozen contract, D9) is untouched.
 
-**Acceptance:** large image batches build measurably faster with identical output bytes (modulo engine-identical serialization), cancellation and progress semantics preserved, E2E passes.
+**Acceptance:** large image batches build measurably faster with identical output bytes (modulo engine-identical serialization), cancellation and progress semantics preserved, E2E passes — met (8-page sharded E2E: all pages in order; 15 sharding unit tests).
 
 ### P4 — Measurement harness & attribution (est. 1–2 focused days) — **implemented 2026-09-26**
 
 15. **Engine bench CLI:** ✅ `engine/examples/bench_operations.rs` benches merge/split/rotate/inspect/images over synthetic docs at {1, 10, 50 pages} plus optional `--dir` corpus (read-only, never required); `--repeat N` + `--json` follow the existing example conventions. Run: `cd engine && cargo run --example bench_operations -- --repeat 3 --json`.
 16. **App-side attribution:** ✅ `performance.mark/measure` spans around intake → staging → transfer → wait → outputs in `runStudioOperation` plus render/encode spans for thumbnails/previews, exposed as dev-only `perfMarks` on the studio result (production shape unchanged; engine duration stays authoritative).
+
+## Pass record — 2026-09-26 (P3)
+
+| Verification        | Result                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Engine Rust suite   | 357 passing (comment-only scheduler note; behavior unchanged)                                                    |
+| Frontend unit tests | 272 passing (+15 sharding: K policy, coverage/order, single-path fidelity, failure/cancel honesty, temp cleanup) |
+| Canonical E2E       | sharded 8-page build keeps all pages in order (new check; full count updated below)                              |
+| Builds              | typecheck/lint/format clean                                                                                      |
+
+Implemented in `app/src/studio/tools/imageSharding.ts` (new, + tests) + `ImagesTool.tsx` build path, integrated centrally.
 
 ## Pass record — 2026-09-26 (P2 + P4)
 

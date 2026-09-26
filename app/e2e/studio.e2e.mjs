@@ -759,6 +759,34 @@ async function main() {
       imagesCustom !== null && imagesCustom.name === 'e2e-custom-name.pdf',
       imagesCustom ? imagesCustom.name : null,
     );
+    // Sharded build (P3, threshold 8 pages): 6 more uploads → 8 pages take
+    // the multi-worker path; output must keep every page in order.
+    await upload(page, 'input[type="file"]', [red, red, red, blue, blue, blue]);
+    await page.waitForFunction(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 8,
+      { timeout: 120000 },
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.startsWith('Build PDF'))
+        ?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('8 images → 8-page PDF'), {
+      timeout: 300000,
+    });
+    await page.waitForFunction(
+      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
+      { timeout: 30000 },
+    );
+    await page.evaluate(() => {
+      document.querySelector('a[aria-label="Download PDF"]')?.click();
+    });
+    const sharded = await waitForCapturedDownload(page, 120000);
+    check(
+      'images sharded build keeps all 8 pages in order',
+      sharded !== null && sharded.magic === '%PDF-' && sharded.name.endsWith('.pdf'),
+      sharded ? `${sharded.name} ${sharded.size}b` : null,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();

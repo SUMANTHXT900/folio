@@ -146,6 +146,14 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Consequences.** Upload fixture names change (`red-wide.png` → `red-wide.jpg`) — E2E updated; E2E drag coverage moves from dnd-kit keyboard to handle pointer-drag; unit count changes (pageDrag suite gone, reorder/PNG suites added).
 - **Status.** Decided, implemented, verified (unit 229, E2E 45/45 + 4 SKIP twice).
 
+## D22 — P3 image-build sharding: parallel shards + ordered merge, small batches untouched
+
+- **Decision.** Batches ≥8 pages shard across K device-aware engine jobs (`2–3` by `hardwareConcurrency`, 256 MiB in-flight cap, one shard per page max), each a plain `pdf.images_to_pdf` call through unchanged orchestration, merged in order via temp studio docs (closed in `finally`); below 8 pages the historical single call runs byte-for-byte. Progress is aggregated honestly, cancellation reaches every in-flight job, failures fail honestly with no silent retry. `ExecutionStrategy::Parallel` stays documented-but-unselected (comment-only) so the frozen `OperationCapabilities` contract is untouched — the illusion is resolved by construction, not deletion.
+- **Reason.** PERFORMANCE.md P3: sharding is the highest-value parallelism on the stable toolchain (no nightly, no COOP/COEP); transfer+merge overhead wins small, so the threshold keeps small builds identical.
+- **Alternatives considered.** Silent single-worker fallback on shard failure (rejected: doubles worst-case time and hides errors). Removing the `Parallel` variant (rejected: frozen-contract churn for zero behavioral gain).
+- **Consequences.** Large image builds fan out K WASM jobs (memory ×K while sharded — hence the cap); small builds provably unchanged.
+- **Status.** Decided, implemented, verified (engine 357, frontend 272, sharded 8-page E2E in order; builds clean).
+
 ## D21 — Naming-first downloads: smart defaults + custom names (all tools)
 
 - **Decision.** Every tool completion renders a naming card instead of auto-downloading with an inline-invented filename: `downloadNaming.ts` (pure policy — per-kind smart defaults from input names, `sanitizeFileName` guaranteeing a safe `.pdf`), `DownloadCard` (Smart prefilled toggle / Custom blank slate, live `download` anchor carrying the exact final name, share with the same name, `DoneBanner` with the final name after first save), `MultiDownloadCard` for split multi-part (per-part editable rows + Download-all). Smart rules: merge `a-b-merged.pdf` / `first-plus<N-1>-merged.pdf`; rearrange/rotate/metadata `<base>-<op>.pdf`; split parts keep `-p<a>-<b>`; images `<page>.pdf` / `<first>-plus<N-1>-pages.pdf`. The `images.pdf` hardcode and all auto-download calls are gone; the card anchor is the single download trigger.

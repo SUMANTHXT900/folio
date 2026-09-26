@@ -25,6 +25,18 @@ pub enum ExecutionStrategy {
     Inline,
     /// Reserved: run with bounded parallelism (worker count + chunking
     /// decided per operation and workload, never `1 page = 1 worker`).
+    ///
+    /// NOTE (PERFORMANCE.md P3 item 14): no in-engine scheduler selects
+    /// this variant — `InlineScheduler` always returns `Inline`, which is
+    /// correct for the single-threaded WASM baseline (lopdf mutations
+    /// share one document; threaded WASM is separately gated). Real
+    /// parallelism for independent work lives one layer up: the app fans
+    /// out one engine call per shard through the unchanged orchestration
+    /// (e.g. `app/src/studio/tools/imageSharding.ts` shards
+    /// `images_to_pdf` across jobs, then ordered `merge`). Keep this
+    /// variant documented-but-unselected rather than deleting it: removal
+    /// would churn `OperationCapabilities` (a frozen-contract surface)
+    /// for zero behavioral gain.
     Parallel {
         /// Maximum concurrent workers for this execution.
         max_workers: usize,

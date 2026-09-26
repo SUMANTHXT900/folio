@@ -13,12 +13,12 @@ import { DownloadCard } from '../components/DownloadCard';
 import { smartOutputName } from '../components/downloadNaming';
 import {
   releaseStagedBytes,
-  runStudioOperation,
   formatDurationMs,
   stageStudioBytes,
   studioShareAvailable,
   type StudioJob,
 } from '../services/folio';
+import { buildImagesPdf } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
 import { CameraCapture } from './CameraCapture';
@@ -188,22 +188,25 @@ export default function ImagesTool() {
     setFraction(null);
     setStage(null);
     const staged: string[] = [];
+    const stagedSizes: number[] = [];
     try {
       for (const page of pages) {
         const prepared = await preparePageBytes(page, browserImageRenderer);
+        stagedSizes.push(prepared.bytes.length);
         staged.push(stageStudioBytes(prepared.name, prepared.bytes));
       }
-      const job = runStudioOperation(
-        'pdf.images_to_pdf',
-        staged,
-        { pageSize, backgroundRgb: [255, 255, 255] },
-        {
-          onProgress: (p) => {
-            setFraction(p.fraction);
-            setStage(p.label);
-          },
+      // P3 item 13: large batches shard across parallel shard jobs +
+      // ordered merge (imageSharding); small batches keep the historical
+      // single-worker engine call byte-for-byte inside that module.
+      const job = buildImagesPdf({
+        stagedIds: staged,
+        stagedSizes,
+        pageSize,
+        onProgress: (p) => {
+          setFraction(p.fraction);
+          setStage(p.label);
         },
-      );
+      });
       jobRef.current = job;
       const out = await job.done;
       jobRef.current = null;

@@ -16,11 +16,11 @@ This roadmap records actual project direction. Items are separated by commitment
 
 ## Current
 
-- v2.0 scanner in progress (M1–M3 done on `dev`): `folio-scan` core, scan worker + WASM, CameraCapture integration with review-before-accept. M4 (final docs, version bump) next.
+- v2.0 scanner on `dev` (M1–M3 + M3.x hardening done; M4 docs-prep in progress, version bump HELD): `folio-scan` core (detect → warp → enhance, Otsu + closing + area-order + spine-split merge), dedicated scan worker + WASM (protocol v2 `detectOnly`/`detected`), CameraCapture integration with review-before-accept for processed scans and fallback auto-accept for no-boundary captures, live-guidance-only detection, portaled scanner surface, memory-safe sequential imports (`MAX_IMPORT_LONG_EDGE = 2500`, PNG→JPEG). Also on `dev`: PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG + Rearrange-parity page list (D18), perf P0–P2+P4 (D19/D20), naming-first downloads all tools (D21), preview hardenings F-18/F-19. Real-device Android validation PENDING — gates the v2.0.0 release (checklist in `docs/STATUS.md`); `package.json` still 1.8.0.
 
 ## Next
 
-- **Performance program (`docs/PERFORMANCE.md`).** P0 (copy elimination, progress coalescing, scan detect-only, single-decode imports), P1 (page-map cache, in-place rotate, single-pass split/delete/reorder/inspect, one-`getPage` thumbnails), P2 (encode worker offload, bounded-2 thumbnail encode, preview LRU), and P4 (engine bench CLI, dev-only perf attribution) **done 2026-09-26**. Remaining: P0.2 main-thread slice removal (design-gated on measurements — P4 harness now available), P3 worker-level parallelism for Images (gated on P4 data — now available). Threaded WASM explicitly gated behind a future decision.
+- **Performance program (`docs/PERFORMANCE.md`).** P0, P1, P2, P3, P4 **all done 2026-09-26** (P3: image-build sharding + parallel-honesty-by-construction, D22). Remaining: P0.2 main-thread slice removal (design-gated on measurements — P4 harness available; HELD for deep discussion per user). Threaded WASM explicitly gated behind a future decision.
 - Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
 
 ## Future / not committed
@@ -29,7 +29,7 @@ The following appear in the product surface or history as aspirations. None are 
 
 - **Compress** — button reserved in the Studio UI; engine + UI implementation not started.
 - **Sign & annotate** — listed in the About page version tree as a planned "v1.2.0" (e-signatures, form-fill overlay, watermarks/page numbers). About-page aspiration only.
-- **Batch & OCR** — listed in the About page version tree as a planned "v2.0.0" (batch queue, local OCR). About-page aspiration only.
+- **Batch & OCR** — listed in the About page version tree as a planned "v2.0.0" (batch queue, local OCR). About-page aspiration only. Note: that "v2.0.0" label predates the scanner v2.0 release and collides with its numbering — resolving it is an explicit gate in the `docs/STATUS.md` v2.0.0 checklist.
 - Engine-adjacent ideas mentioned in code comments as "later lessons" (text extraction, rendering inside the engine, compression, encryption): explicitly out of scope for the current engine, recorded here only so they are not mistaken for plans.
 
 - **Scanner zoom (revisit)** — the zoom control was removed because the track-reported range is not a focal-length multiplier (docs/BUGS.md F-11); revisit only with focal-accurate lens handling.

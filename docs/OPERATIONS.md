@@ -1,6 +1,6 @@
 # Folio — PDF Operation Contracts
 
-Documentation only — the engine is frozen for structural work. Every contract below is verified against `engine/src/processing/pdf/*/mod.rs` module docs and `app/src/types/engine.ts`. Operation IDs are the stable wire names; page numbers are **1-based** throughout.
+Documentation only — the engine ↔ TypeScript contract is frozen (D9), not the implementation: internals have evolved under that contract (DCT passthrough D17, page-map cache + in-place rotate + single-pass copy D19, progress coalescing + owned WASM inputs D19/D20). Every contract below is verified against `engine/src/processing/pdf/*/mod.rs` module docs and `app/src/types/engine.ts`. Operation IDs are the stable wire names; page numbers are **1-based** throughout. Document-scan processing is separate (`folio-scan` core + scan worker; see `docs/ARCHITECTURE.md`) and is not covered here.
 
 Global rules for all operations: inputs arrive as bytes (never paths); validation runs before mutation; failures return structured `ErrorCode`s (see `docs/ARCHITECTURE.md`); all ten operations declare `parallel_friendly()` capabilities (progress + cancellation supported); results carry an authoritative `engineDurationMs` and a typed summary.
 

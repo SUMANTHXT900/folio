@@ -52,11 +52,11 @@ Everything PDF-related executes in one of three places: the main thread (UI + re
 
 ## Scan worker boundary (v2.0 M2)
 
-Document-scan processing runs in a DEDICATED scan worker (`app/src/studio/tools/scan/scan.worker.ts`), separate from the PDF engine worker: different responsibility (image analysis vs PDF manipulation), different WASM module (`scan/pkg`, ~514 KB + glue), independent lifecycle. `ScanWorkerClient` is the main-thread gateway: lazy worker creation, init-once module reuse, transferable byte ownership (neuter-on-send), epoch-guarded stale-result discard, terminate-to-cancel with transparent recreate. The protocol (`scanProtocol.ts`, versioned) distinguishes `processed | original | error` — "no document detected" is fallback, not failure. Scan WASM loads on first scanner use, never at app boot; PWA precache budget unchanged (4.1 + ~0.5 « 8 MB cap).
+Document-scan processing runs in a DEDICATED scan worker (`app/src/studio/tools/scan/scan.worker.ts`), separate from the PDF engine worker: different responsibility (image analysis vs PDF manipulation), different WASM module (`scan/pkg`, ~542 KB measured `folio_scan_bg.wasm` + glue), independent lifecycle. `ScanWorkerClient` is the main-thread gateway: lazy worker creation, init-once module reuse, transferable byte ownership (neuter-on-send), epoch-guarded stale-result discard, terminate-to-cancel with transparent recreate. The protocol (`scanProtocol.ts`, v2: `detectOnly` request flag + `detected` result status for the live path) distinguishes `processed | detected | original | error` — "no document detected" is fallback, not failure. Scan WASM loads on first scanner use, never at app boot; PWA precache budget unchanged (≈4.7 MB « 8 MB cap).
 
-## Scanner integration (v2.0 M3)
+## Scanner integration (v2.0 M3 + M3.x hardening)
 
-`useScanProcessor` drives capture → worker → review inside `CameraCapture`: mode selector (Original bypasses the worker; Document/Grayscale/B&W process through it), processed-preview review (Use scan / Use original / Retry / Retake), throttled low-res live detection (~160px, 500 ms, skipped while busy) feeding only the "Document detected" framing hint — the shutter always re-detects at full resolution and live corners are never reused. Accepted scans enter `ImagePage[]` with the pre-scan capture retained in `scanStore` under the page id (released on remove/clear/replace, never on scanner close). See `docs/DECISIONS.md` D15.
+`useScanProcessor` drives capture → worker → review inside `CameraCapture`. There is NO scan-mode selector (removed in M3.x): one color capture experience with the core pipeline mode fixed at the color path (`CORE_MODE = 'original'` in `useScanProcessor.ts`). Captures resolve two ways: processed scans land in an explicit review (Use scan / Use original / Retry / Discard); no-boundary fallbacks auto-accept (normalized through the import pixel budget, committed to the collection with a transient "Added as photo" note — per-capture interrogation was removed as nagging after real-device feedback). Throttled low-res live detection (~160px, 500 ms, skipped while busy) feeds only the "Document detected" framing hint — the shutter always re-detects at full resolution and live corners are never reused. Accepted scans enter `ImagePage[]` with the pre-scan capture retained in `scanStore` under the page id (released on remove/clear/replace, never on scanner close). The scanner surface renders via `createPortal(..., document.body)` (full-bleed on phones, centered panel on desktop) with body scroll lock while mounted. See `docs/DECISIONS.md` D15.
 
 ## Binary ownership
 
@@ -112,6 +112,8 @@ Document-scan processing runs in a DEDICATED scan worker (`app/src/studio/tools/
 
 - `DefaultPdfThumbnailEngine` generates thumbnails through the shared `PdfRenderEngine` (one document load, not one per page — the "25x faster thumbs" fix, v1.2.2).
 - Windows, not whole documents: callers request page windows (the Studio hook uses 24 pages) with bounded concurrency (2). Transient memory stays flat regardless of document size.
+- Thumbnail encodes run at bounded concurrency 2, order-preserving, same WebP → JPEG → PNG chain (D20).
+- Full-resolution previews carry a service LRU (cap 8, `renderId:pageNumber` keys) with revocation on eviction and on `closeStudioDoc` (D20); tools keep per-mount maps as fast path.
 - Object-URL cache is LRU-bounded to 6 documents; eviction and document close revoke URLs. Canvas bitmaps are released (`width = height = 0`) as soon as the encoded URL exists.
 - MIME fallback chain on encode: WebP → JPEG → PNG, so environments without a WebP encoder (or under memory pressure) never fail the wave.
 
