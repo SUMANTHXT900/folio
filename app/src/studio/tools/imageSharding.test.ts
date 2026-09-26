@@ -266,7 +266,9 @@ describe('buildImagesPdf sharded path', () => {
     // Progress stays within [0, 1] and names shards + merge honestly.
     expect(seen.some((l) => l.startsWith('Shard 1 of 3'))).toBe(true);
     expect(seen.some((l) => l.startsWith('Merging 3 parts'))).toBe(true);
-    expect(out.durationMs).toBeGreaterThan(0);
+    // Duration is honest wall time: parallel shards contribute their max
+    // (3 × 10ms shards + 10ms merge = 20ms), never the sum (40ms).
+    expect(out.durationMs).toBe(20);
   });
 
   it('fails honestly on a shard error: no fallback, siblings cancelled, temps cleaned', async () => {
@@ -358,5 +360,72 @@ describe('buildImagesPdf sharded path', () => {
     }
     // Final merge progress sits above the shard phase (0.9 weight).
     expect(fractions[fractions.length - 1]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it('reports max shard wall + merge wall, not the sum of parallel spans', async () => {
+    // Two mocked 10s shards run concurrently: wall time is ~10s + merge,
+    // never 20s+. A sum would report 20_500ms; the max reports 10_500ms.
+    const SHARD_MS = 10_000;
+    const MERGE_MS = 500;
+    let shardCalls = 0;
+    const runOperation = ((operation: OperationId): StudioJob => {
+      if (operation === 'pdf.merge') {
+        return {
+          done: Promise.resolve(studioResult(8, MERGE_MS)),
+          cancel: async () => undefined,
+        };
+      }
+      shardCalls += 1;
+      return {
+        done: Promise.resolve(studioResult(4, SHARD_MS)),
+        cancel: async () => undefined,
+      };
+    }) as ShardDeps['runOperation'];
+    const temps = makeFakeTemps();
+    const job = buildImagesPdf(input(8, 4), {
+      runOperation,
+      openBytes: temps.openBytes,
+      closeDoc: temps.closeDoc,
+    });
+    const out = await job.done;
+    expect(shardCalls).toBe(2);
+    expect(out.durationMs).toBe(SHARD_MS + MERGE_MS);
+    expect(out.durationMs).toBeLessThan(2 * SHARD_MS + MERGE_MS);
+  });
+
+  it('keeps per-shard perf marks namespaced on the merged result', async () => {
+    const marked = (durationMs: number, marks: StudioResult['perfMarks']): StudioResult => ({
+      ...studioResult(4, durationMs),
+      perfMarks: marks,
+    });
+    let shardCalls = 0;
+    const runOperation = ((operation: OperationId): StudioJob => {
+      if (operation === 'pdf.merge') {
+        return {
+          done: Promise.resolve(marked(7, [{ name: 'studio:run:wait', durationMs: 7 }])),
+          cancel: async () => undefined,
+        };
+      }
+      shardCalls += 1;
+      return {
+        done: Promise.resolve(marked(10, [{ name: 'studio:run:wait', durationMs: 10 }])),
+        cancel: async () => undefined,
+      };
+    }) as ShardDeps['runOperation'];
+    const temps = makeFakeTemps();
+    const job = buildImagesPdf(input(8, 4), {
+      runOperation,
+      openBytes: temps.openBytes,
+      closeDoc: temps.closeDoc,
+    });
+    const out = await job.done;
+    // Max shard wall (10) + merge wall (7).
+    expect(shardCalls).toBe(2);
+    expect(out.durationMs).toBe(17);
+    expect(out.perfMarks?.map((m) => m.name)).toEqual([
+      'shard:1:studio:run:wait',
+      'shard:2:studio:run:wait',
+      'studio:run:wait',
+    ]);
   });
 });

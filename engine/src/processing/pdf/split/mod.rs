@@ -21,7 +21,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
-use crate::processing::pdf::core::copy::{copy_pages_with_map, find_invalid_page};
+use crate::processing::pdf::core::copy::copy_pages_with_map;
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
 /// Input for [`SplitOperation`]: owned PDF bytes plus an optional label.
@@ -180,8 +180,10 @@ impl Operation for SplitOperation {
             .with_details("password-based decryption is not supported yet"));
         }
 
-        // Validate the ENTIRE plan before constructing anything.
-        validate_plan(&source, &options.parts)?;
+        // Validate the ENTIRE plan before constructing anything. The
+        // context threads through so cancellation stays observable on
+        // huge plans (checks every 1024 entries, like delete's scan).
+        validate_plan(ctx, &source, &options.parts)?;
 
         // Pages occupy the 10–95% band, counted globally across parts so
         // progress is monotonic over the whole operation. The plan was
@@ -230,7 +232,16 @@ impl Operation for SplitOperation {
 /// Validates the whole split plan against the document before any output
 /// is constructed. Part/entry numbers in messages are 1-based for humans;
 /// details carry the same fields in `key=value` form for machines.
-fn validate_plan(source: &PdfDocument, parts: &[SplitPart]) -> Result<(), EngineError> {
+///
+/// Validation walks every plan entry (not just the first failure per
+/// part) so cancellation stays observable on huge plans: the context is
+/// checked every 1024 entries. Error shape and first-failure order are
+/// identical to the previous whole-slice scan.
+fn validate_plan<C: OperationContext>(
+    ctx: &C,
+    source: &PdfDocument,
+    parts: &[SplitPart],
+) -> Result<(), EngineError> {
     if parts.is_empty() {
         return Err(EngineError::new(
             ErrorCode::InvalidInput,
@@ -238,6 +249,8 @@ fn validate_plan(source: &PdfDocument, parts: &[SplitPart]) -> Result<(), Engine
         ));
     }
     let page_count = source.page_count();
+    let page_map = source.page_map();
+    let mut checked: usize = 0;
     for (part_index, part) in parts.iter().enumerate() {
         let part_number = part_index + 1;
         if part.pages.is_empty() {
@@ -247,19 +260,25 @@ fn validate_plan(source: &PdfDocument, parts: &[SplitPart]) -> Result<(), Engine
             )
             .with_details(format!("part={part_number} page_count={page_count}")));
         }
-        if let Some((entry_index, page_number)) = find_invalid_page(source, &part.pages) {
-            let entry_number = entry_index + 1;
-            return Err(EngineError::new(
-                ErrorCode::PageOutOfRange,
-                format!(
-                    "part {part_number}, page entry {entry_number} references page \
-                     {page_number}, but the document contains only {page_count} pages"
-                ),
-            )
-            .with_details(format!(
-                "part={part_number} entry={entry_number} page={page_number} \
-                 page_count={page_count}"
-            )));
+        for (entry_index, page_number) in part.pages.iter().enumerate() {
+            checked += 1;
+            if checked.is_multiple_of(1024) {
+                ctx.check_cancellation()?;
+            }
+            if !page_map.contains_key(page_number) {
+                let entry_number = entry_index + 1;
+                return Err(EngineError::new(
+                    ErrorCode::PageOutOfRange,
+                    format!(
+                        "part {part_number}, page entry {entry_number} references page \
+                         {page_number}, but the document contains only {page_count} pages"
+                    ),
+                )
+                .with_details(format!(
+                    "part={part_number} entry={entry_number} page={page_number} \
+                     page_count={page_count}"
+                )));
+            }
         }
     }
     Ok(())
@@ -301,6 +320,44 @@ mod tests {
 
     fn ctx() -> NullCtx {
         NullCtx { id: JobId::new() }
+    }
+
+    /// Context that cancels after a fixed number of successful checks, so
+    /// mid-operation cancellation is deterministic.
+    struct CancelAfterCtx {
+        id: JobId,
+        remaining: std::cell::Cell<usize>,
+        max_completed: std::cell::Cell<u64>,
+    }
+
+    impl OperationContext for CancelAfterCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.split"
+        }
+        fn report_progress(
+            &self,
+            _phase: Option<&str>,
+            completed: u64,
+            _total: u64,
+            _message: Option<&str>,
+        ) {
+            let max = self.max_completed.get().max(completed);
+            self.max_completed.set(max);
+        }
+        fn is_cancelled(&self) -> bool {
+            self.remaining.get() == 0
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            let left = self.remaining.get();
+            if left == 0 {
+                return Err(EngineError::cancelled(&self.id, "pdf.split"));
+            }
+            self.remaining.set(left - 1);
+            Ok(())
+        }
     }
 
     fn input(bytes: Vec<u8>) -> SplitInput {
@@ -498,6 +555,32 @@ mod tests {
         .expect("reference builds");
         let err = SplitInput::from_document(&reference).expect_err("reference rejected");
         assert_eq!(err.code(), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn cancellation_during_validation_reports_no_completion() {
+        // Two checks pass (validating, preparing); the third fires inside
+        // plan validation at the 1024th entry of a large duplicate-page
+        // plan, so no part is ever constructed and 100% is never reported.
+        let ctx = CancelAfterCtx {
+            id: JobId::new(),
+            remaining: std::cell::Cell::new(2),
+            max_completed: std::cell::Cell::new(0),
+        };
+        let big_part = SplitPart::new(vec![1; 2500]);
+        let err = SplitOperation
+            .execute(
+                &ctx,
+                input(fixtures::single_page_pdf()),
+                SplitOptions::new(vec![big_part]),
+            )
+            .expect_err("validate cancel must fail");
+        assert_eq!(err.code(), ErrorCode::Cancelled);
+        assert!(
+            ctx.max_completed.get() < 100,
+            "never reported completion: {}",
+            ctx.max_completed.get()
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ import {
   openStudioBytes,
   runStudioOperation,
   type StudioJob,
+  type StudioPerfMark,
   type StudioProgress,
   type StudioResult,
 } from '../services/folio';
@@ -209,7 +210,12 @@ export function buildImagesPdf(
     const plans = planShards(pageCount, shardCount);
     const totalPages = pageCount;
     const fractions = new Array<number>(plans.length).fill(0);
-    let totalDurationMs = 0;
+    // Shards run concurrently (`Promise.all` below), so wall time is the
+    // slowest shard — never the sum. The engine duration of each single
+    // run stays authoritative (D4); this only combines the parallel
+    // spans honestly before adding the sequential merge wall.
+    let maxShardDurationMs = 0;
+    const shardMarks: StudioPerfMark[] = [];
     const reportShards = (): void => {
       if (onProgress === undefined) return;
       let weighted = 0;
@@ -261,8 +267,16 @@ export function buildImagesPdf(
       }
       throw error;
     }
-    for (const result of shardResults) {
-      totalDurationMs += result.durationMs;
+    for (let i = 0; i < shardResults.length; i += 1) {
+      const shard = shardResults[i];
+      maxShardDurationMs = Math.max(maxShardDurationMs, shard.durationMs);
+      // Keep per-shard attribution spans when present (DEV-only):
+      // namespaced by shard so concurrent spans stay distinguishable.
+      if (shard.perfMarks !== undefined) {
+        for (const mark of shard.perfMarks) {
+          shardMarks.push({ ...mark, name: `shard:${i + 1}:${mark.name}` });
+        }
+      }
     }
     reportShards();
 
@@ -303,7 +317,16 @@ export function buildImagesPdf(
       active.add(job);
       try {
         const merged = await job.done;
-        return { ...merged, durationMs: totalDurationMs + merged.durationMs };
+        // Parallel shard wall (max) + sequential merge wall — not the sum.
+        const durationMs = maxShardDurationMs + merged.durationMs;
+        if (shardMarks.length > 0 || merged.perfMarks !== undefined) {
+          return {
+            ...merged,
+            durationMs,
+            perfMarks: [...shardMarks, ...(merged.perfMarks ?? [])],
+          };
+        }
+        return { ...merged, durationMs };
       } finally {
         active.delete(job);
         mergeJob = null;

@@ -73,6 +73,17 @@ describe('parseSplitParts', () => {
       expect(parsed.error).toContain('line 2');
     }
   });
+
+  it('keeps colons after the first as part of the name', () => {
+    expect(parseSplitParts('1,2:cover:extra')).toEqual({
+      ok: true,
+      parts: [{ pages: [1, 2], name: 'cover:extra' }],
+    });
+    expect(parseSplitParts('3:a:b:c')).toEqual({
+      ok: true,
+      parts: [{ pages: [3], name: 'a:b:c' }],
+    });
+  });
 });
 
 describe('parseMetadataDate', () => {

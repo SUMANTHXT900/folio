@@ -7,10 +7,13 @@
  * mocked here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sanitizeFileName } from '../components/downloadNaming';
 import {
   encodeThumbCanvases,
   formatDurationMs,
+  isPdfBytes,
   studioDownload,
+  studioShare,
   studioStripExt,
   toStudioError,
 } from './folio';
@@ -113,6 +116,119 @@ describe('studioDownload', () => {
     // (Blob identity is preserved through the call).
     expect(createSpy).toHaveBeenCalledTimes(1);
     expect(createSpy.mock.calls[0][0]).toBe(blob);
+  });
+
+  it('sanitizes raw names instead of trusting callers', () => {
+    const clicks: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(this.download);
+    });
+    const raw = 'a/b\\c:d*e?f"g<h>i|j';
+    studioDownload(new Uint8Array([1, 2, 3]), raw);
+    expect(clicks).toEqual([sanitizeFileName(raw)]);
+    expect(clicks[0]).not.toMatch(/[\\/:*?"<>|]/);
+    expect(clicks[0]).toMatch(/\.pdf$/);
+  });
+
+  it('caps overlong names to the filesystem limit', () => {
+    const clicks: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(this.download);
+    });
+    studioDownload(new Uint8Array([1, 2, 3]), 'x'.repeat(200));
+    expect(clicks[0]).toBe(sanitizeFileName('x'.repeat(200)));
+    expect(clicks[0].length).toBeLessThanOrEqual(120);
+    expect(clicks[0]).toMatch(/\.pdf$/);
+  });
+
+  it('trims dot-heavy names to a clean basename', () => {
+    const clicks: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(this.download);
+    });
+    studioDownload(new Uint8Array([1, 2, 3]), '  ...lead...trail...   ');
+    expect(clicks[0]).toBe(sanitizeFileName('  ...lead...trail...   '));
+    expect(clicks[0]).not.toMatch(/^\./);
+    expect(clicks[0]).toMatch(/\.pdf$/);
+  });
+});
+
+describe('studioShare', () => {
+  const nav = navigator as unknown as Record<string, unknown>;
+  const originalShare = nav['share'];
+  const originalCanShare = nav['canShare'];
+
+  afterEach(() => {
+    if (originalShare === undefined) {
+      delete nav['share'];
+    } else {
+      nav['share'] = originalShare;
+    }
+    if (originalCanShare === undefined) {
+      delete nav['canShare'];
+    } else {
+      nav['canShare'] = originalCanShare;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('shares with a sanitized filename and title', async () => {
+    const seenFiles: File[] = [];
+    let seenTitle: string | undefined;
+    nav['canShare'] = vi.fn((data: { files?: File[] }) => {
+      seenFiles.push(...(data.files ?? []));
+      return true;
+    });
+    nav['share'] = vi.fn((data: { files?: File[]; title?: string }) => {
+      seenTitle = data.title;
+      return Promise.resolve();
+    });
+    const raw = 'a/b\\c:d*e?f"g<h>i|j';
+    await expect(studioShare(new Uint8Array([1, 2, 3]), raw)).resolves.toBe('shared');
+    expect(seenFiles).toHaveLength(1);
+    expect(seenFiles[0].name).toBe(sanitizeFileName(raw));
+    expect(seenTitle).toBe(sanitizeFileName(raw));
+  });
+
+  it('returns unavailable when the Web Share API is missing', async () => {
+    delete nav['share'];
+    delete nav['canShare'];
+    await expect(studioShare(new Uint8Array([1, 2, 3]), 'doc.pdf')).resolves.toBe('unavailable');
+  });
+});
+
+describe('isPdfBytes', () => {
+  const header = (extra: number[] = []): Uint8Array =>
+    new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, ...extra]);
+
+  it('accepts a plain header', () => {
+    expect(isPdfBytes(header([0x31, 0x2e, 0x34]))).toBe(true);
+  });
+
+  it('accepts a BOM-prefixed header', () => {
+    expect(isPdfBytes(new Uint8Array([0xef, 0xbb, 0xbf, ...header()]))).toBe(true);
+  });
+
+  it('accepts whitespace/newline-prefixed headers', () => {
+    expect(isPdfBytes(new Uint8Array([0x20, 0x0a, ...header()]))).toBe(true);
+  });
+
+  it('accepts tiny-but-well-formed headers (only >=5 bytes required)', () => {
+    expect(isPdfBytes(header())).toBe(true);
+    expect(header().length).toBe(5);
+  });
+
+  it('rejects empty, truncated, and non-PDF input', () => {
+    expect(isPdfBytes(new Uint8Array([]))).toBe(false);
+    expect(isPdfBytes(new Uint8Array([0x25, 0x50, 0x44]))).toBe(false);
+    expect(isPdfBytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]))).toBe(false);
+    expect(isPdfBytes(new Uint8Array([0x20, 0x20, 0x20, 0x20, 0x20, 0x20]))).toBe(false);
   });
 });
 

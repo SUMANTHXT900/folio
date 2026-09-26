@@ -16,8 +16,10 @@
 //!   `StandardPage` uses fixed A4 (595.28 × 841.89 pt) with the image
 //!   uniformly scaled to fit (`contain`) and centered.
 //! * **DPI:** EXIF → JFIF (JPEG) / pHYs (PNG) → fallback `150`. Invalid or
-//!   absent DPI uses the fallback. DPI sets the natural size, which sets
-//!   `FitImage` page sizes and `StandardPage` drawn sizes.
+//!   absent DPI uses the fallback. Non-square pixels use `min(X, Y)` so the
+//!   image is never rendered smaller than intended on either axis. DPI sets
+//!   the natural size, which sets `FitImage` page sizes and `StandardPage`
+//!   drawn sizes.
 //! * **EXIF orientation:** read from the original bytes (values 1–8) and
 //!   applied to decoded pixels. Input bytes are never mutated.
 //! * **JPEG handling:** baseline JPEGs with EXIF orientation 1 pass
@@ -53,6 +55,13 @@ const MAX_DPI: f64 = 1200.0;
 
 /// Maximum single image dimension in pixels (guards against absurd headers).
 const MAX_IMAGE_DIMENSION: u32 = 30_000;
+
+/// Maximum page dimension in points. PDF viewers cap sheet sizes (Acrobat
+/// refuses pages above 14400 pt ≈ 200 in); a low-DPI large-pixel image
+/// (30000 px at 1 DPI → 2.16 M pt) would otherwise produce an unopenable
+/// page. [`natural_size_pt`] scales uniformly down to this bound, so the
+/// aspect ratio never distorts.
+const MAX_PAGE_DIMENSION_PT: f64 = 14_400.0;
 
 /// Maximum image pixels (width × height). 100 MP ≈ 300 MB raw RGB.
 const MAX_IMAGE_PIXELS: u64 = 100_000_000;
@@ -760,10 +769,22 @@ fn valid_dpi(dpi: f64) -> bool {
 }
 
 /// Reads XResolution/YResolution + ResolutionUnit from EXIF.
+///
+/// Non-square pixels use `min(X, Y)`: the smaller DPI yields the larger
+/// natural size, so the image is never rendered smaller than intended on
+/// either axis. A missing Y falls back to X alone.
 fn read_exif_dpi(bytes: &[u8]) -> Option<f64> {
     let mut cursor = std::io::Cursor::new(bytes);
     let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
     let x = exif.get_field(exif::Tag::XResolution, exif::In::PRIMARY)?;
+    let dots_x = exif_dots(&x.value)?;
+    let dots_y = exif
+        .get_field(exif::Tag::YResolution, exif::In::PRIMARY)
+        .and_then(|field| exif_dots(&field.value));
+    let dots = match dots_y {
+        Some(y) => dots_x.min(y),
+        None => dots_x,
+    };
     let unit = exif
         .get_field(exif::Tag::ResolutionUnit, exif::In::PRIMARY)
         .and_then(|field| match field.value {
@@ -771,21 +792,25 @@ fn read_exif_dpi(bytes: &[u8]) -> Option<f64> {
             _ => None,
         })
         .unwrap_or(2);
-    let dots = match &x.value {
+    match unit {
+        // 2 = inch (already DPI), 3 = centimeter → × 2.54.
+        2 => Some(dots),
+        3 => Some(dots * 2.54),
+        _ => None,
+    }
+}
+
+/// Converts an EXIF resolution value to dots (before unit conversion).
+fn exif_dots(value: &exif::Value) -> Option<f64> {
+    match value {
         exif::Value::Rational(values) => {
             let rational = *values.first()?;
             if rational.denom == 0 {
                 return None;
             }
-            f64::from(rational.num) / f64::from(rational.denom)
+            Some(f64::from(rational.num) / f64::from(rational.denom))
         }
-        exif::Value::Short(values) => f64::from(*values.first()?),
-        _ => return None,
-    };
-    match unit {
-        // 2 = inch (already DPI), 3 = centimeter → × 2.54.
-        2 => Some(dots),
-        3 => Some(dots * 2.54),
+        exif::Value::Short(values) => Some(f64::from(*values.first()?)),
         _ => None,
     }
 }
@@ -818,10 +843,23 @@ fn read_png_phys_dpi(bytes: &[u8]) -> Option<f64> {
                 bytes[data_start + 2],
                 bytes[data_start + 3],
             ]);
+            let ppuy = u32::from_be_bytes([
+                bytes[data_start + 4],
+                bytes[data_start + 5],
+                bytes[data_start + 6],
+                bytes[data_start + 7],
+            ]);
             let unit = bytes[data_start + 8];
-            // unit 1 = meter. 1 inch = 0.0254 m.
-            if unit == 1 && ppux > 0 {
-                return Some(f64::from(ppux) * 0.0254);
+            // unit 1 = meter. 1 inch = 0.0254 m. Non-square pixels use
+            // min(X, Y); a zero axis is ignored, never selected.
+            if unit == 1 {
+                let dots = match (ppux > 0, ppuy > 0) {
+                    (true, true) => ppux.min(ppuy),
+                    (true, false) => ppux,
+                    (false, true) => ppuy,
+                    (false, false) => return None,
+                };
+                return Some(f64::from(dots) * 0.0254);
             }
             return None;
         }
@@ -861,22 +899,26 @@ fn read_jpeg_jfif_dpi(bytes: &[u8]) -> Option<f64> {
         if length < 2 || offset + 2 + length > bytes.len() {
             return None;
         }
-        // APP0 with a JFIF header carries density.
+        // APP0 with a JFIF header carries density. Non-square pixels use
+        // min(X, Y); a zero axis is ignored, never selected.
         if marker == 0xE0 && length >= 16 {
             let base = offset + 4;
             if base + 14 <= bytes.len() && &bytes[base..base + 5] == b"JFIF\x00" {
                 let units = bytes[base + 7];
                 let xdensity = u16::from_be_bytes([bytes[base + 8], bytes[base + 9]]);
+                let ydensity = u16::from_be_bytes([bytes[base + 10], bytes[base + 11]]);
+                let dots = match (xdensity > 0, ydensity > 0) {
+                    (true, true) => xdensity.min(ydensity),
+                    (true, false) => xdensity,
+                    (false, true) => ydensity,
+                    (false, false) => return None,
+                };
                 match units {
                     1 => {
-                        if xdensity > 0 {
-                            return Some(f64::from(xdensity));
-                        }
+                        return Some(f64::from(dots));
                     }
                     2 => {
-                        if xdensity > 0 {
-                            return Some(f64::from(xdensity) * 2.54);
-                        }
+                        return Some(f64::from(dots) * 2.54);
                     }
                     _ => {}
                 }
@@ -903,10 +945,20 @@ fn natural_size_pt(image: &DecodedImage) -> (f64, f64) {
     } else {
         DEFAULT_DPI
     };
-    (
+    let (mut width, mut height) = (
         round2(f64::from(image.width_px) * 72.0 / dpi),
         round2(f64::from(image.height_px) * 72.0 / dpi),
-    )
+    );
+    // Uniform viewer-sane clamp: low-DPI large-pixel images would
+    // otherwise yield million-point pages no viewer can open. Scaling
+    // both axes by one factor preserves the aspect ratio exactly.
+    let peak = width.max(height);
+    if peak > MAX_PAGE_DIMENSION_PT {
+        let scale = MAX_PAGE_DIMENSION_PT / peak;
+        width = round2(width * scale);
+        height = round2(height * scale);
+    }
+    (width, height)
 }
 
 fn round2(value: f64) -> f64 {
@@ -1863,6 +1915,22 @@ mod tests {
     }
 
     #[test]
+    fn png_phys_dpi_uses_min_for_non_square_pixels() {
+        // 10000 px/m on X, 5000 px/m on Y → 127 DPI (the smaller axis).
+        let mut bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&9u32.to_be_bytes());
+        chunk.extend_from_slice(b"pHYs");
+        chunk.extend_from_slice(&10_000u32.to_be_bytes());
+        chunk.extend_from_slice(&5_000u32.to_be_bytes());
+        chunk.push(1);
+        chunk.extend_from_slice(&[0, 0, 0, 0]); // CRC (ignored)
+        bytes.extend_from_slice(&chunk);
+        let dpi = read_png_phys_dpi(&bytes).expect("parses");
+        assert!((dpi - 127.0).abs() < 0.01, "{dpi}");
+    }
+
+    #[test]
     fn jpeg_jfif_dpi_parses() {
         // SOI + APP0 JFIF units=1 Xdensity=300.
         let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
@@ -1874,7 +1942,124 @@ mod tests {
         assert_eq!(read_jpeg_jfif_dpi(&bytes), Some(300.0));
     }
 
+    #[test]
+    fn jpeg_jfif_dpi_uses_min_for_non_square_pixels() {
+        // Xdensity=300, Ydensity=150 → 150 DPI (the smaller axis).
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        bytes.extend_from_slice(b"JFIF\x00\x01\x02\x01");
+        bytes.extend_from_slice(&300u16.to_be_bytes());
+        bytes.extend_from_slice(&150u16.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(read_jpeg_jfif_dpi(&bytes), Some(150.0));
+    }
+
+    /// Injects a minimal EXIF APP1 segment carrying XResolution,
+    /// YResolution (rationals) and ResolutionUnit.
+    fn inject_exif_resolution(
+        jpeg: &[u8],
+        x_num: u32,
+        x_den: u32,
+        y_num: u32,
+        y_den: u32,
+        unit: u16,
+    ) -> Vec<u8> {
+        assert!(jpeg.len() >= 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8);
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&[0x2A, 0x00]);
+        tiff.extend_from_slice(&[0x08, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&[0x03, 0x00]); // 3 entries
+                                               // Tag 0x011A XResolution, type RATIONAL (5), count 1, offset 50.
+        tiff.extend_from_slice(&[0x1A, 0x01, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&[0x32, 0x00, 0x00, 0x00]);
+        // Tag 0x011B YResolution, offset 58.
+        tiff.extend_from_slice(&[0x1B, 0x01, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&[0x3A, 0x00, 0x00, 0x00]);
+        // Tag 0x0128 ResolutionUnit, type SHORT (3), inline value.
+        tiff.extend_from_slice(&[0x28, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        tiff.extend_from_slice(&[unit as u8, (unit >> 8) as u8, 0x00, 0x00]);
+        tiff.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // next IFD = 0
+        assert_eq!(tiff.len(), 50);
+        for value in [x_num, x_den, y_num, y_den] {
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut out = Vec::with_capacity(jpeg.len() + tiff.len() + 10);
+        out.extend_from_slice(&jpeg[0..2]);
+        let seg_len = (2 + 6 + tiff.len()) as u16;
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&seg_len.to_be_bytes());
+        out.extend_from_slice(b"Exif\x00\x00");
+        out.extend_from_slice(&tiff);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn exif_dpi_uses_min_for_non_square_pixels() {
+        let base = solid_jpeg(16, 16, [1, 2, 3]);
+        // X 300 DPI, Y 150 DPI, inches → 150.
+        let tagged = inject_exif_resolution(&base, 300, 1, 150, 1, 2);
+        assert_eq!(read_exif_dpi(&tagged), Some(150.0));
+    }
+
+    #[test]
+    fn exif_dpi_converts_centimeters_after_min() {
+        let base = solid_jpeg(16, 16, [1, 2, 3]);
+        // X 100 px/cm, Y 200 px/cm → min 100 × 2.54 = 254 DPI.
+        let tagged = inject_exif_resolution(&base, 100, 1, 200, 1, 3);
+        let dpi = read_exif_dpi(&tagged).expect("parses");
+        assert!((dpi - 254.0).abs() < 0.01, "{dpi}");
+    }
+
     // -- errors -------------------------------------------------------------------------
+
+    #[test]
+    fn huge_low_dpi_image_clamps_to_viewer_sane_page() {
+        // 30000 px at 1 DPI would be a 2.16 M-point page no viewer can
+        // open; the natural size clamps uniformly to 14400 pt, keeping the
+        // 300:1 aspect ratio exact.
+        let image = DecodedImage {
+            width_px: 30_000,
+            height_px: 100,
+            payload: ImagePayload::RawRgb(Vec::new()),
+            dpi: 1.0,
+        };
+        let (width, height) = natural_size_pt(&image);
+        assert!((width - 14_400.0).abs() < 0.01, "{width}");
+        assert!((height - 48.0).abs() < 0.01, "{height}");
+        assert!((width / height - 300.0).abs() < 0.01, "{width}x{height}");
+    }
+
+    #[test]
+    fn ordinary_sizes_pass_through_unclamped() {
+        let image = DecodedImage {
+            width_px: 150,
+            height_px: 150,
+            payload: ImagePayload::RawRgb(Vec::new()),
+            dpi: 150.0,
+        };
+        let (width, height) = natural_size_pt(&image);
+        assert!((width - 72.0).abs() < 0.01, "{width}");
+        assert!((height - 72.0).abs() < 0.01, "{height}");
+    }
+
+    #[test]
+    fn four_component_jpeg_without_app14_never_passes_through() {
+        // SOF0 with 4 components and no Adobe APP14: not Adobe-CMYK, not
+        // RGB — the passthrough gate must refuse so the file takes the
+        // decode path (which reports a structured error if undecodable).
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        bytes.extend_from_slice(&[0x00, 0x10, 0x00, 0x10, 0x04]);
+        bytes.extend_from_slice(&[
+            0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0x04, 0x11, 0x00,
+        ]);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+        let frame = parse_jpeg_frame(&bytes).expect("parses");
+        assert_eq!(frame.components, 4);
+        assert_eq!(frame.adobe_transform, None);
+        assert_eq!(jpeg_color_space(&frame), None);
+    }
 
     #[test]
     fn rejects_zero_images() {

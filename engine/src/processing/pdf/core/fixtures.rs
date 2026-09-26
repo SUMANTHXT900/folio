@@ -42,7 +42,8 @@ pub struct PdfSpec {
     /// When `true`, pages omit `/MediaBox` and the Pages node carries
     /// `612x792` instead, exercising inheritance.
     pub inherit_media_box: bool,
-    /// Optional `/Rotate` on the Pages node (accumulates with page rotation).
+    /// Optional `/Rotate` on the Pages node (nearest holder wins per the
+    /// PDF spec: a page's own rotation shadows this one).
     pub pages_rotate: Option<i64>,
 }
 

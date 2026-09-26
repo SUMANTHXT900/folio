@@ -124,7 +124,11 @@ export function parseSplitParts(
     if (line === '') {
       continue;
     }
-    const [pagesSpec, name] = line.split(':');
+    // Split on the FIRST colon only: names may themselves contain
+    // colons (`"1,2:cover:extra"` → name `"cover:extra"`).
+    const colon = line.indexOf(':');
+    const pagesSpec = colon === -1 ? line : line.slice(0, colon);
+    const name = colon === -1 ? undefined : line.slice(colon + 1);
     const parsed = parsePageList(pagesSpec);
     if (!parsed.ok) {
       return { ok: false, error: `line ${index + 1}: ${parsed.error}` };

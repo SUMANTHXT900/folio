@@ -27,6 +27,7 @@ import type { WasmWorkerEngineAdapter } from '../../engine/WasmWorkerEngineAdapt
 import type { PdfRenderEngine } from '../../rendering/PdfRenderEngine';
 import type { PdfThumbnailEngine } from '../../rendering/PdfThumbnailEngine';
 import { getBytes, releaseBytes } from '../../engine/binaryStore';
+import { sanitizeFileName } from '../components/downloadNaming';
 import type { EngineRequest, OperationId, ResultSummary } from '../../types/engine';
 
 /** Lightweight document handle for UI state (no bytes). */
@@ -846,6 +847,9 @@ export async function studioPreview(docId: string, pageNumber: number): Promise<
  * object URL is revoked after 60s (generous download-start window).
  */
 export function studioDownload(bytes: Uint8Array | Blob, name: string): void {
+  // Sanitize here (not just at callers) so every download path is safe
+  // even when a caller passes a raw user-typed or overlong name.
+  const safeName = sanitizeFileName(name);
   const blob =
     bytes instanceof Blob
       ? bytes
@@ -853,7 +857,7 @@ export function studioDownload(bytes: Uint8Array | Blob, name: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = name;
+  anchor.download = safeName;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -872,13 +876,16 @@ export async function studioShare(
   if (!nav.share || !nav.canShare) {
     return 'unavailable';
   }
+  // Same sanitize-as-the-last-mile policy as `studioDownload`: the share
+  // sheet must never receive a raw caller-provided filename.
+  const safeName = sanitizeFileName(name);
   const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
-  const file = new File([blob], name, { type: 'application/pdf' });
+  const file = new File([blob], safeName, { type: 'application/pdf' });
   if (!nav.canShare({ files: [file] })) {
     return 'unavailable';
   }
   try {
-    await nav.share({ files: [file], title: name });
+    await nav.share({ files: [file], title: safeName });
     return 'shared';
   } catch {
     return 'unavailable';
@@ -903,14 +910,35 @@ export function studioStripExt(name: string): string {
   return name.replace(/\.\w+$/, '');
 }
 
-function isPdfBytes(bytes: Uint8Array): boolean {
-  return (
-    bytes.length > 8 &&
-    bytes[0] === 0x25 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x44 &&
-    bytes[3] === 0x46
-  );
+/**
+ * Cheap pre-gate before the real load: true when the first bytes contain
+ * a `%PDF` header. Deliberately permissive — a UTF-8 BOM or stray leading
+ * whitespace/newlines must not reject an otherwise valid document, and
+ * tiny-but-well-formed headers (`%PDF-`, 5 bytes) pass too. The real
+ * verdict always belongs to the engine/render load that follows; this
+ * only filters out obvious non-PDFs (empty buffers, image bytes).
+ *
+ * Exported for unit tests; production callers go through `openStudioBytes`.
+ */
+export function isPdfBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < 5) {
+    return false;
+  }
+  // Scan the first bytes for `%PDF` so BOM/whitespace-prefixed headers
+  // pass. The window stays small on purpose: anything the gate accepts
+  // still faces the engine load, which rejects non-PDFs for real.
+  const windowEnd = Math.min(bytes.length - 3, 16);
+  for (let i = 0; i < windowEnd; i += 1) {
+    if (
+      bytes[i] === 0x25 &&
+      bytes[i + 1] === 0x50 &&
+      bytes[i + 2] === 0x44 &&
+      bytes[i + 3] === 0x46
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Test-only reset (drops engines, bytes, URLs). Not used by the app. */

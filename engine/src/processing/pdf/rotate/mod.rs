@@ -192,26 +192,26 @@ impl Operation for RotateOperation {
             ));
         }
 
-        // Page preparation occupies the 10–80% band over all pages: one
-        // traversal of the resolved page map resolves each selected page's
-        // effective rotation and plans its final value.
-        let selected: HashSet<PageNumber> = options.pages.iter().copied().collect();
-        let mut plan: Vec<(PageNumber, i32)> = Vec::with_capacity(selected.len());
-        for (index, page_number) in document.page_map().keys().copied().enumerate() {
+        // Page preparation occupies the 10–80% band over the planned
+        // pages only: each selected page's effective rotation resolves
+        // directly (validated above, so resolution cannot fail for range).
+        // Unselected pages are never touched — sparse selections on large
+        // documents skip them entirely instead of traversing the full map.
+        let planned = options.pages.len();
+        let mut plan: Vec<(PageNumber, i32)> = Vec::with_capacity(planned);
+        for (index, page_number) in options.pages.iter().copied().enumerate() {
             ctx.check_cancellation()?;
-            if selected.contains(&page_number) {
-                let base = document.effective_rotation(page_number)?;
-                let rotated = (base + angle).rem_euclid(360);
-                debug_assert_eq!(rotated % 90, 0, "quarter-turn inputs stay quarter-turn");
-                plan.push((page_number, rotated));
-            }
+            let base = document.effective_rotation(page_number)?;
+            let rotated = (base + angle).rem_euclid(360);
+            debug_assert_eq!(rotated % 90, 0, "quarter-turn inputs stay quarter-turn");
+            plan.push((page_number, rotated));
             let done = index + 1;
-            let completed = 10 + (done as u64 * 70) / u64::from(page_count).max(1);
+            let completed = 10 + (done as u64 * 70) / (planned as u64).max(1);
             ctx.report_progress(
                 Some("copying pages"),
                 completed.min(80),
                 100,
-                Some(&format!("page {done} of {page_count}")),
+                Some(&format!("page {done} of {planned}")),
             );
         }
 
@@ -642,6 +642,32 @@ mod tests {
     }
 
     #[test]
+    fn geometry_matches_effective_after_ancestor_inherited_rotate() {
+        // Ancestor carries /Rotate 90; rotating page 1 by +90 materializes
+        // an explicit /Rotate 180 on the page. Geometry must read the
+        // nearest holder (180), agreeing with the effective rotation —
+        // never the accumulated 270.
+        let mut spec = fixtures::pdf_spec(
+            "1.4",
+            vec![(612.0, 792.0, None), (612.0, 792.0, None)],
+            None,
+        );
+        spec.pages_rotate = Some(90);
+        let bytes = fixtures::build_pdf(&spec);
+        let reparsed = rotate_and_reparse(bytes, &[1], 90);
+        for n in 1..=2 {
+            let geometry = reparsed.page_geometry(n).expect("readable");
+            assert_eq!(
+                geometry.rotation_deg,
+                reparsed.effective_rotation(n).expect("readable"),
+                "page {n} geometry disagrees with effective rotation"
+            );
+        }
+        assert_eq!(reparsed.page_geometry(1).expect("p1").rotation_deg, 180);
+        assert_eq!(reparsed.page_geometry(2).expect("p2").rotation_deg, 90);
+    }
+
+    #[test]
     fn source_document_is_untouched() {
         let bytes = fixtures::mixed_pages_pdf();
         let before = bytes.clone();
@@ -809,6 +835,33 @@ mod tests {
                 RotateOptions::new(vec![5, 2], 90),
             )
             .expect("rotation succeeds");
+        let events = ctx.events.borrow();
+        assert!(!events.is_empty());
+        assert!(
+            events.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{events:?}"
+        );
+        assert_eq!(*events.last().expect("events"), 100);
+    }
+
+    #[test]
+    fn sparse_selection_stays_monotonic_to_100() {
+        // Planning iterates the selection, not the document: one page out
+        // of fifty still reports monotonic progress ending at exactly 100.
+        let labels: Vec<String> = (1..=50).map(|n| format!("PAGE {n}")).collect();
+        let texts: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = RotateOperation
+            .execute(
+                &ctx,
+                input(fixtures::text_pages_pdf(&texts)),
+                RotateOptions::new(vec![50], 90),
+            )
+            .expect("rotation succeeds");
+        assert_eq!(out.page_count, 50);
         let events = ctx.events.borrow();
         assert!(!events.is_empty());
         assert!(

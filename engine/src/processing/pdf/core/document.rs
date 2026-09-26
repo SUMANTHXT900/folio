@@ -206,10 +206,8 @@ impl PdfDocument {
     ///
     /// Follows PDF inheritance semantics: the nearest `/Rotate` holder on
     /// the page → ancestors chain wins; absence everywhere means `0`.
-    /// (Note: [`page_geometry`](Self::page_geometry) historically
-    /// *accumulates* chained rotations instead; that behavior is preserved
-    /// untouched, so the two agree whenever at most one `/Rotate` exists
-    /// in a chain — the overwhelmingly common case.)
+    /// [`page_geometry`](Self::page_geometry) follows the same
+    /// nearest-wins rule, so the two always agree.
     pub fn effective_rotation(&self, page_number: u32) -> Result<i32, EngineError> {
         let page_id = self.page_map().get(&page_number).copied().ok_or_else(|| {
             EngineError::new(
@@ -450,18 +448,22 @@ impl PdfDocument {
         })?;
 
         let mut media_box: Option<[f64; 4]> = None;
-        let mut rotation: i64 = 0;
+        let mut rotation: Option<i64> = None;
 
-        // Walk the page -> ancestors chain: MediaBox is taken from the
-        // nearest holder, Rotate entries accumulate (mod 360 at the end).
+        // Walk the page -> ancestors chain: MediaBox and Rotate are each
+        // taken from the nearest holder (PDF spec inheritance). A page's
+        // own /Rotate shadows any ancestor's, so rotate's materialization
+        // (explicit /Rotate on the page) is stable under re-reads.
         loop {
             if media_box.is_none() {
                 if let Ok(obj) = current.get(b"MediaBox") {
                     media_box = Some(self.parse_rect(page_number, obj)?);
                 }
             }
-            if let Ok(obj) = current.get(b"Rotate") {
-                rotation += self.as_number(page_number, obj, "Rotate")? as i64;
+            if rotation.is_none() {
+                if let Ok(obj) = current.get(b"Rotate") {
+                    rotation = Some(self.as_number(page_number, obj, "Rotate")? as i64);
+                }
             }
             let parent = match current.get(b"Parent") {
                 Ok(obj) => obj
@@ -495,7 +497,7 @@ impl PdfDocument {
         Ok(PageGeometry {
             width_pt,
             height_pt,
-            rotation_deg: rotation.rem_euclid(360) as i32,
+            rotation_deg: rotation.unwrap_or(0).rem_euclid(360) as i32,
         })
     }
 
@@ -680,6 +682,33 @@ mod tests {
     }
 
     #[test]
+    fn nearest_rotate_holder_wins_over_ancestors() {
+        // PDF spec inheritance: a page's own /Rotate shadows the Pages
+        // node's. Geometry and effective rotation must agree (nearest-wins),
+        // never accumulate (page 180 + ancestor 90 must read 180, not 270).
+        let mut spec = fixtures::pdf_spec(
+            "1.4",
+            vec![(612.0, 792.0, Some(180)), (612.0, 792.0, None)],
+            None,
+        );
+        spec.pages_rotate = Some(90);
+        let bytes = fixtures::build_pdf(&spec);
+        let doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
+        let owned = doc.page_geometry(1).expect("page 1 geometry");
+        assert_eq!(owned.rotation_deg, 180);
+        assert_eq!(
+            owned.rotation_deg,
+            doc.effective_rotation(1).expect("page 1")
+        );
+        let inherited = doc.page_geometry(2).expect("page 2 geometry");
+        assert_eq!(inherited.rotation_deg, 90);
+        assert_eq!(
+            inherited.rotation_deg,
+            doc.effective_rotation(2).expect("page 2")
+        );
+    }
+
+    #[test]
     fn detects_encryption_marker() {
         use lopdf::dictionary;
 
@@ -709,6 +738,37 @@ mod tests {
         let doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
         let err = doc.page_geometry(99).expect_err("page 99 is out of range");
         assert_eq!(err.code(), ErrorCode::PageOutOfRange);
+    }
+
+    #[test]
+    fn page_count_ignores_untrusted_count_entry() {
+        // The Pages /Count entry is untrusted input: it can lie (stale
+        // writers, malformed files), and validating it requires the same
+        // full page-tree walk a fast path would skip. The count therefore
+        // always comes from the resolved page map — never from /Count.
+        let mut raw = fixtures::parsed_fixture(&fixtures::pdf_spec(
+            "1.4",
+            vec![(612.0, 792.0, None), (612.0, 792.0, None)],
+            None,
+        ));
+        let catalog_id = raw
+            .trailer
+            .get(b"Root")
+            .expect("root")
+            .as_reference()
+            .expect("catalog ref");
+        let pages_id = raw
+            .get_dictionary(catalog_id)
+            .expect("catalog")
+            .get(b"Pages")
+            .expect("pages entry")
+            .as_reference()
+            .expect("pages ref");
+        raw.get_dictionary_mut(pages_id)
+            .expect("pages dict")
+            .set("Count", lopdf::Object::Integer(999));
+        let doc = PdfDocument::from_lopdf(raw);
+        assert_eq!(doc.page_count(), 2);
     }
 
     #[test]

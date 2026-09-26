@@ -158,6 +158,7 @@ impl Operation for ExtractPagesOperation {
             Ok(())
         })?;
 
+        ctx.check_cancellation()?;
         ctx.report_progress(Some("finalizing"), 100, 100, Some("extraction complete"));
         Ok(ExtractPagesOutput { document })
     }
@@ -199,6 +200,47 @@ mod tests {
 
     fn ctx() -> NullCtx {
         NullCtx { id: JobId::new() }
+    }
+
+    /// Context that cancels after a fixed number of successful checks, so
+    /// mid-operation cancellation is deterministic. A single-page extract
+    /// performs three checks before the pre-final one (validating,
+    /// preparing, one per-page copy callback), so `remaining = 3` fails on
+    /// the pre-final check — after all work, before 100% is reported.
+    struct CancelAfterCtx {
+        id: JobId,
+        remaining: std::cell::Cell<usize>,
+        max_completed: std::cell::Cell<u64>,
+    }
+
+    impl OperationContext for CancelAfterCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.extract_pages"
+        }
+        fn report_progress(
+            &self,
+            _phase: Option<&str>,
+            completed: u64,
+            _total: u64,
+            _message: Option<&str>,
+        ) {
+            let max = self.max_completed.get().max(completed);
+            self.max_completed.set(max);
+        }
+        fn is_cancelled(&self) -> bool {
+            self.remaining.get() == 0
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            let left = self.remaining.get();
+            if left == 0 {
+                return Err(EngineError::cancelled(&self.id, "pdf.extract_pages"));
+            }
+            self.remaining.set(left - 1);
+            Ok(())
+        }
     }
 
     fn input(bytes: Vec<u8>) -> ExtractPagesInput {
@@ -348,6 +390,31 @@ mod tests {
         .expect("reference builds");
         let err = ExtractPagesInput::from_document(&reference).expect_err("reference rejected");
         assert_eq!(err.code(), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn cancellation_before_final_reports_no_completion() {
+        // Three checks pass (validating, preparing, one page copy); the
+        // pre-final check fails, so no output escapes and 100% is never
+        // reported.
+        let ctx = CancelAfterCtx {
+            id: JobId::new(),
+            remaining: std::cell::Cell::new(3),
+            max_completed: std::cell::Cell::new(0),
+        };
+        let err = ExtractPagesOperation
+            .execute(
+                &ctx,
+                input(fixtures::single_page_pdf()),
+                ExtractPagesOptions::new(vec![1]),
+            )
+            .expect_err("pre-final cancel must fail");
+        assert_eq!(err.code(), ErrorCode::Cancelled);
+        assert!(
+            ctx.max_completed.get() < 100,
+            "never reported completion: {}",
+            ctx.max_completed.get()
+        );
     }
 
     #[test]
