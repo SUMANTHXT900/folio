@@ -317,3 +317,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Fix.** Modal renders via \`createPortal(..., document.body)\`, z-index above sticky header (\`z-[100]\`), \`dvh\` viewport caps (92dvh dialog / 78dvh image). New E2E viewport-anchored assertion (backdrop == viewport, dialog inside).
 - **Verification.** Tall-list probe post-fix: backdrop exactly 390x844 at scroll 873, dialog inside, header covered, image visible; unit 247; E2E **50/50 + 4 SKIP**.
 - **Deploy.** PENDING (commit + push + Cloudflare \`dev\` after this entry).
+
+- **Deploy.** F-19 portaled modal shipped to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
