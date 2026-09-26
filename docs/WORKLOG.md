@@ -342,3 +342,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Central.** E2E sharded-build check (8 pages in order), PERFORMANCE.md P3 + pass record, DECISIONS.md D22, baselines (unit 272, E2E 53/53).
 - **Verification.** Engine 357, fmt/clippy clean; typecheck/lint/format clean; unit 272; E2E **53/53 + 4 SKIP** (sharded `red-wide-plus7-pages.pdf`, all 8 pages).
 - **Deploy.** PENDING (commit + push + Cloudflare `dev` after this entry).
+
+- **Deploy.** P3 + M4 docs shipped to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
