@@ -307,3 +307,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Engine 357 (239+118), fmt/clippy clean; typecheck/lint/format clean; unit 247 (+7); production build clean; E2E **49/49 + 4 SKIP**. Bench smoke: 15/15 reports, 0 failures (debug timings indicative only).
 - **Docs.** PERFORMANCE.md (findings 12/13/17 ✅, 15 assessed; P2/P4 sections + pass record), STATUS.md baselines (unit 247), ROADMAP.md (P0.2/P3 now unblocked by P4 data), DECISIONS.md D20.
 - **Deploy.** PENDING (commit + push + Cloudflare `dev` after this entry).
+
+- **Deploy.** P2+P4 shipped to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
