@@ -20,6 +20,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
 - **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
 
+### F-18 — Images previews could silently fail ("light background, not the image")
+
+- **Status.** Resolved (hardened; the report could not be reproduced in any automated probe — see verification). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** Medium (previews are how users verify their pages).
+- **Symptoms.** Real-phone report: page previews did not appear; rows showed only the light card background.
+- **Root cause.** Not confirmed in reproduction. Inspection found three real silent-failure mechanisms: (1) `loading="lazy"` gated blob-URL previews (pointless for local URLs; can starve in some mobile/in-app browsers); (2) a failed decode had no recovery — Android can reclaim blob-URL storage across tab restore, leaving dead URLs; (3) neither the row nor the modal rendered any fallback, so a broken image showed as blank space indistinguishable from "still loading".
+- **Fix.** Previews load eagerly; `onError` re-materializes the object URL from the retained File handle once; persistent failure renders an explicit "Preview unavailable" tile (row) / panel (modal). Modal is scroll-safe; row layout cleaned up for phones (larger thumbnails, truncated name/meta). Three E2E checks now assert previews actually decode (`naturalWidth > 0`) for uploads, the modal, and accepted scans.
+- **Verification.** E2E 47→49 with the decode checks (twice green). Nine visual/functional probes: dev + deployed builds, light + dark themes, small/large/PNG/JPEG uploads, downscale path, 12-photo list after scroll, scanner review, accepted scan row, modal — all loaded correctly. If the report recurs, it is device-state-specific and the new explicit fallback will show which page failed.
+
 ### F-14 — Images → PDF output ~5× larger than the input photos (81 MB for 13 images)
 
 - **Status.** Resolved (DCT passthrough). **Area.** Engine (`engine/src/processing/pdf/images_to_pdf/mod.rs`), engine-only — wire, protocol, and app untouched. **Severity.** High (the scanner's main output was unusable at scale: share failures, storage bloat).

@@ -290,3 +290,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Engine Rust 357, scan Rust 35, fmt/clippy clean; frontend 240; canonical E2E 46/46 + 4 SKIP; build:wasm/build:scan/production build clean. No version bump.
 
 - **Deploy.** Performance pass P0+P1 deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Both WASM bundles rebuilt (engine changes included).
+
+## 2026-09-26 — Images preview hardening (F-18)
+
+- **Objective.** Real-phone report: Images tool previews missing ("light background, not the image").
+- **Investigation.** Nine probes (dev + deployed builds; light + dark themes; small/large/PNG/JPEG uploads; downscale path; 12-photo list after scroll; scanner review; accepted scan row; modal) — previews loaded correctly in every one. No reproduction, so no confirmed single cause.
+- **Work.** Hardened every silent-failure mechanism in `PageGrid.tsx`: eager preview loading (lazy was pointless for local blob URLs), one-shot recovery that re-materializes the object URL from the retained File (`onError`, Android can reclaim blob storage across tab restore), explicit "Preview unavailable" fallbacks for row + modal instead of blank space, scroll-safe modal, phone row layout cleanup (larger thumbs, truncation). Three E2E decode assertions (`naturalWidth > 0`) added for uploads, modal, accepted scans; the pointer-drag E2E made layout-robust (waits for framer settle, measures row height — a mid-animation measurement had produced a negative pitch).
+- **Verification.** Unit 240; E2E **49/49 + 4 SKIP** twice; typecheck/lint/format/build clean. No version bump.

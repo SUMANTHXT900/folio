@@ -10,7 +10,7 @@
  * through `reorderPages` (pure, tested in `imagePages.test.ts`);
  * per-card move buttons stay the E2E-asserted guaranteed path.
  */
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import { formatBytes } from '../components/ui';
 import type { ImagePage } from './imagePages';
@@ -37,6 +37,96 @@ const GripIcon = (
   </svg>
 );
 
+/**
+ * Self-healing preview source for one page.
+ *
+ * `loading="lazy"` used to gate blob-URL previews — a pointless trade
+ * (local URLs, no network) that could leave previews unloaded in some
+ * mobile/in-app browsers. Loading is eager now, and if the image still
+ * fails to decode (e.g. an Android tab restored from the background
+ * whose blob storage was reclaimed), the hook re-materializes the
+ * object URL from the page's retained File handle once; a second
+ * failure reports `failed` so callers render an explicit placeholder —
+ * never a silent blank (real-phone report: "light background, not the image").
+ */
+function usePreviewSrc(page: ImagePage): {
+  src: string;
+  failed: boolean;
+  onError: () => void;
+} {
+  const [src, setSrc] = useState(page.previewUrl);
+  const [failed, setFailed] = useState(page.previewUrl === '');
+  const [retried, setRetried] = useState(false);
+  const recoveredUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (recoveredUrlRef.current !== null) {
+        URL.revokeObjectURL(recoveredUrlRef.current);
+        recoveredUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  const onError = () => {
+    if (retried) {
+      setFailed(true);
+      return;
+    }
+    setRetried(true);
+    try {
+      const url = URL.createObjectURL(page.file);
+      recoveredUrlRef.current = url;
+      setSrc(url);
+    } catch {
+      setFailed(true);
+    }
+  };
+
+  return { src, failed, onError };
+}
+
+function PageThumb({ page, position }: { page: ImagePage; position: number }) {
+  const { src, failed, onError } = usePreviewSrc(page);
+
+  if (failed) {
+    return (
+      <span
+        aria-label={`Preview unavailable for ${page.name}`}
+        className="flex h-16 w-12 shrink-0 flex-col items-center justify-center gap-0.5 rounded border border-dashed border-paper-300 bg-paper-200/60 text-ink-400 dark:border-ink-700 dark:bg-ink-900/60 dark:text-ink-300"
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <path d="M7 10l5 5 5-5M12 15V3" />
+        </svg>
+        <span className="text-[9px] leading-none">N/A</span>
+      </span>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={`Page ${position + 1} preview: ${page.name}`}
+      decoding="async"
+      draggable={false}
+      onError={onError}
+      style={{ transform: `rotate(${page.rotationDeg}deg)` }}
+      className="h-16 w-12 shrink-0 rounded border border-paper-300 object-cover dark:border-ink-700"
+    />
+  );
+}
+
 const PageRow = memo(function PageRow({
   page,
   position,
@@ -59,48 +149,36 @@ const PageRow = memo(function PageRow({
   dragControls: DragControls;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-800/60 px-3 py-2">
+    <div className="flex items-center gap-2.5 rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-800/60 px-2.5 py-2 sm:gap-3 sm:px-3">
       {/* Drag handle — the ONLY touch point that starts a drag. The rest
           of the row keeps the page's vertical scroll (pan-y). */}
       <span
         onPointerDown={(e) => dragControls.start(e)}
-        className="flex w-8 h-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 hover:text-brass-500 active:cursor-grabbing"
+        className="flex h-8 w-7 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 hover:text-brass-500 active:cursor-grabbing sm:w-8"
         aria-label={`Drag ${page.name} to reorder`}
         role="button"
       >
         {GripIcon}
       </span>
-      <span className="w-6 shrink-0 text-center text-xs font-mono text-ink-400 tabular-nums">
+      <span className="w-5 shrink-0 text-center text-xs font-mono text-ink-400 tabular-nums sm:w-6">
         {position + 1}
       </span>
       <button
         onClick={onPreview}
         aria-label={`Preview ${page.name}`}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        className="flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-3"
       >
-        {page.previewUrl ? (
-          <img
-            src={page.previewUrl}
-            alt={`Page ${position + 1} preview: ${page.name}`}
-            loading="lazy"
-            decoding="async"
-            draggable={false}
-            style={{ transform: `rotate(${page.rotationDeg}deg)` }}
-            className="h-14 w-10 shrink-0 rounded border border-paper-300 object-cover dark:border-ink-700"
-          />
-        ) : (
-          <div className="h-14 w-10 shrink-0 rounded bg-paper-200 dark:bg-ink-700 animate-pulse" />
-        )}
-        <span className="min-w-0">
+        <PageThumb page={page} position={position} />
+        <span className="min-w-0 flex-1">
           <span
             className="block truncate text-sm text-ink-700 dark:text-paper-100"
             title={`${page.name} · ${formatBytes(page.size)}`}
           >
             {page.name}
           </span>
-          <span className="mt-0.5 block text-[11px] text-ink-400 dark:text-ink-300">
+          <span className="mt-0.5 block truncate text-[11px] text-ink-400 dark:text-ink-300">
             {formatBytes(page.size)}
-            {page.source === 'camera' ? ' · 📷 camera' : ' · 📁 file'}
+            {page.source === 'camera' ? ' · camera' : ' · file'}
             {page.rotationDeg !== 0 ? ` · ${page.rotationDeg}°` : ''}
           </span>
         </span>
@@ -250,7 +328,7 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
           onClick={() => setViewer(null)}
         >
           <div
-            className="max-w-3xl w-full max-h-[92vh] flex flex-col"
+            className="max-w-3xl w-full max-h-[92vh] flex flex-col overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
@@ -264,19 +342,32 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
                 Close
               </button>
             </div>
-            {viewing.previewUrl ? (
-              <img
-                src={viewing.previewUrl}
-                alt={`Page ${(viewer ?? 0) + 1} full preview: ${viewing.name}`}
-                style={{ transform: `rotate(${viewing.rotationDeg}deg)` }}
-                className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[82vh]"
-              />
-            ) : (
-              <div className="h-64 rounded-xl bg-white/20 animate-pulse" />
-            )}
+            <PreviewFull page={viewing} position={viewer ?? 0} />
           </div>
         </div>
       )}
     </>
+  );
+}
+
+/** Full-size modal preview with the same self-healing source as rows. */
+function PreviewFull({ page, position }: { page: ImagePage; position: number }) {
+  const { src, failed, onError } = usePreviewSrc(page);
+  if (failed) {
+    return (
+      <div className="flex h-64 flex-col items-center justify-center gap-2 rounded-xl bg-white/10 text-center text-paper-100">
+        <span className="font-display text-base">Preview unavailable</span>
+        <span className="max-w-xs truncate px-4 text-xs opacity-70">{page.name}</span>
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={`Page ${position + 1} full preview: ${page.name}`}
+      onError={onError}
+      style={{ transform: `rotate(${page.rotationDeg}deg)` }}
+      className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[82vh]"
+    />
   );
 }

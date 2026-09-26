@@ -519,6 +519,22 @@ async function main() {
       cards.length === 2 && cards[0].includes('red-wide.jpg') && cards[1].includes('blue-tall.jpg'),
       cards.join(' | '),
     );
+    // Previews must actually DECODE — a row with a blank/broken image
+    // previously passed every text-based assertion (real-phone report).
+    const previewLoadState = () =>
+      page.evaluate(() => {
+        const imgs = [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li img')];
+        return {
+          total: imgs.length,
+          loaded: imgs.filter((i) => i.naturalWidth > 0).length,
+        };
+      });
+    const uploadPreviews = await previewLoadState();
+    check(
+      'images upload previews decode (naturalWidth > 0)',
+      uploadPreviews.total === 2 && uploadPreviews.loaded === 2,
+      JSON.stringify(uploadPreviews),
+    );
     // Guaranteed reorder mechanism: move blue earlier → blue first.
     await clickButton('Move blue-tall.jpg earlier');
     await page.waitForFunction(
@@ -552,6 +568,16 @@ async function main() {
       previewShown = false;
     }
     check('images preview opens a dialog for the page', previewShown);
+    // The dialog image must actually decode, not just exist.
+    const modalPreview = await page.evaluate(() => {
+      const img = document.querySelector('[role="dialog"] img');
+      return img === null ? null : { naturalWidth: img.naturalWidth };
+    });
+    check(
+      'images preview dialog image decodes (naturalWidth > 0)',
+      modalPreview !== null && modalPreview.naturalWidth > 0,
+      JSON.stringify(modalPreview),
+    );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Close')?.click();
     });
@@ -566,20 +592,39 @@ async function main() {
     }
     check('images preview dialog closes', previewClosed);
     // Pointer drag on the handle (framer-motion Reorder, same path as
-    // touch long-press): drag the first row below the second → order
-    // flips. Settle before measuring: reorder commits on drop.
-    const handleBox = await page.evaluate(() => {
-      const btn = document.querySelector(
-        'ul[aria-label="Pages in PDF order"] > li [aria-label^="Drag"]',
-      );
-      const r = btn?.getBoundingClientRect();
-      return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
+    // touch long-press): drag the first row down by exactly one row
+    // pitch → order flips. Wait for framer's layout animation to settle
+    // FIRST (mid-animation transforms made a measured pitch negative),
+    // and MEASURE the pitch (row heights change with layout) rather
+    // than using a fixed pixel distance.
+    await page.waitForFunction(
+      () => {
+        const rows = [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')];
+        if (rows.length < 2) return false;
+        const a = rows[0].getBoundingClientRect();
+        const b = rows[1].getBoundingClientRect();
+        return b.top > a.top && b.top - a.top > a.height * 0.5;
+      },
+      { timeout: 10000 },
+    );
+    const dragGeom = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')];
+      const handles = rows.map((li) => li.querySelector('[aria-label^="Drag"]'));
+      const box = (el) => {
+        const r = el?.getBoundingClientRect();
+        return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
+      };
+      return {
+        start: box(handles[0]),
+        rowHeight: rows[0]?.getBoundingClientRect().height ?? null,
+      };
     });
     let dragReordered = false;
-    if (handleBox !== null) {
-      await page.mouse.move(handleBox.x, handleBox.y);
+    if (dragGeom.start !== null && dragGeom.rowHeight !== null) {
+      const dragBy = dragGeom.rowHeight + 12;
+      await page.mouse.move(dragGeom.start.x, dragGeom.start.y);
       await page.mouse.down();
-      await page.mouse.move(handleBox.x, handleBox.y + 140, { steps: 15 });
+      await page.mouse.move(dragGeom.start.x, dragGeom.start.y + dragBy, { steps: 15 });
       await new Promise((r) => setTimeout(r, 400));
       await page.mouse.up();
       try {
@@ -596,7 +641,7 @@ async function main() {
         dragReordered = false;
       }
     }
-    check('images handle drag reorders pages', dragReordered);
+    check('images handle drag reorders pages', dragReordered, JSON.stringify(dragGeom));
     cards = await cardOrder();
     check(
       'images drag result keeps both pages',
@@ -775,6 +820,17 @@ async function main() {
       'images accepted scan enters the page collection',
       cards.length === 1 && cards[0].includes('scan-'),
       cards.join(' | '),
+    );
+    // The accepted scan's row preview must decode (the review image and
+    // the row image share the processed bytes).
+    const scanPreview = await page.evaluate(() => {
+      const img = document.querySelector('ul[aria-label="Pages in PDF order"] > li img');
+      return img === null ? null : { naturalWidth: img.naturalWidth, alt: img.alt };
+    });
+    check(
+      'images accepted scan preview decodes (naturalWidth > 0)',
+      scanPreview !== null && scanPreview.naturalWidth > 0,
+      JSON.stringify(scanPreview),
     );
     // Scanner surface: mode selector is gone; Import lives in the bar.
     // Desktop keeps a bounded, centered panel (not a full-bleed phone
