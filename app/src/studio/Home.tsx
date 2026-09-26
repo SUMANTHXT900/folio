@@ -307,7 +307,7 @@ export default function Home() {
               </div>
 
               {/* bottom accent */}
-              <span className="pointer-events-none absolute bottom-0 left-4 right-4 h-px bg-gradient-to-r from-transparent via-brass-400/0 to-transparent group-hover:via-brass-400/40 transition-all duration-500" />
+              <span className="pointer-events-none absolute bottom-0 left-4 right-4 h-px bg-gradient-to-r from-transparent via-brass-400/0 to-transparent group-hover:via-brass-400/40 transition-colors duration-500" />
             </>
           );
           if (disabled) {

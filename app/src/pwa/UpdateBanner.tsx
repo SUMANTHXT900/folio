@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { usePwaUpdate } from './usePwaUpdate';
 
 /**
@@ -16,43 +17,57 @@ export default function UpdateBanner() {
   const state = usePwaUpdate();
   const [dismissed, setDismissed] = useState(false);
   const busy = useScannerBusy();
-  if (!state.updateAvailable || dismissed) return null;
   const applying = state.phase === 'applying';
+  // Enter/exit is an opacity-only fade (180ms): the banner conditionally
+  // mounts, so AnimatePresence plays both directions. Dismiss sets state
+  // directly — unmount never waits on JS. No slide: banner motion stays
+  // out of the theatrics bin.
   return (
-    <div role="alert" className="fixed inset-x-4 bottom-4 z-[70] pb-[env(safe-area-inset-bottom)]">
-      <div className="mx-auto flex max-w-xl items-center gap-2 rounded-2xl border border-brass-400/40 bg-ink-900/95 px-4 py-3 shadow-soft backdrop-blur dark:bg-paper-100 dark:text-ink-900 text-paper-50">
-        <a
-          href="#/about"
-          className="flex min-w-0 flex-1 items-center gap-3"
-          aria-label={busy ? 'Update ready — review after your current task' : undefined}
+    <AnimatePresence>
+      {state.updateAvailable && !dismissed && (
+        <motion.div
+          role="alert"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+          className="fixed inset-x-4 bottom-4 z-[70] pb-[env(safe-area-inset-bottom)]"
         >
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold">A new version is ready</span>
-            <span className="block truncate text-xs opacity-70">
-              {applying
-                ? 'Installing update… Reloading.'
-                : busy
-                  ? 'Finish your current task first, then review.'
-                  : 'Tap to review and update.'}
-            </span>
-          </span>
-          <span
-            aria-hidden
-            className="shrink-0 rounded-xl bg-brass-400 px-4 py-2 text-sm font-semibold text-ink-900"
-          >
-            {applying ? 'Installing…' : 'Review update'}
-          </span>
-        </a>
-        <button
-          type="button"
-          onClick={() => setDismissed(true)}
-          aria-label="Dismiss update notice"
-          className="shrink-0 rounded-full px-3 py-1 text-sm opacity-70 transition-opacity hover:opacity-100 hover:bg-white/10"
-        >
-          ✕
-        </button>
-      </div>
-    </div>
+          <div className="mx-auto flex max-w-xl items-center gap-2 rounded-2xl border border-brass-400/40 bg-ink-900/95 px-4 py-3 shadow-soft backdrop-blur dark:bg-paper-100 dark:text-ink-900 text-paper-50">
+            <a
+              href="#/about"
+              className="flex min-w-0 flex-1 items-center gap-3"
+              aria-label={busy ? 'Update ready — review after your current task' : undefined}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold">A new version is ready</span>
+                <span className="block truncate text-xs opacity-70">
+                  {applying
+                    ? 'Installing update… Reloading.'
+                    : busy
+                      ? 'Finish your current task first, then review.'
+                      : 'Tap to review and update.'}
+                </span>
+              </span>
+              <span
+                aria-hidden
+                className="shrink-0 rounded-xl bg-brass-400 px-4 py-2 text-sm font-semibold text-ink-900"
+              >
+                {applying ? 'Installing…' : 'Review update'}
+              </span>
+            </a>
+            <button
+              type="button"
+              onClick={() => setDismissed(true)}
+              aria-label="Dismiss update notice"
+              className="shrink-0 rounded-full px-3 py-1 text-sm opacity-70 transition-opacity hover:opacity-100 hover:bg-white/10"
+            >
+              ✕
+            </button>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 

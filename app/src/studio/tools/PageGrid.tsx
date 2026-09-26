@@ -12,7 +12,13 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Reorder, useDragControls, type DragControls } from 'framer-motion';
+import {
+  AnimatePresence,
+  Reorder,
+  motion,
+  useDragControls,
+  type DragControls,
+} from 'framer-motion';
 import { formatBytes } from '../components/ui';
 import type { ImagePage } from './imagePages';
 
@@ -279,6 +285,7 @@ const DragRow = memo(function DragRow({
       dragControls={controls}
       className="list-none"
       style={{ touchAction: 'pan-y' }}
+      whileDrag={{ scale: 1.015, boxShadow: '0 12px 28px -12px rgba(23,19,14,0.25)' }}
       aria-label={`Page ${position + 1}: ${page.name}`}
     >
       <PageRow
@@ -331,38 +338,50 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
         ))}
       </Reorder.Group>
 
-      {viewing !== null &&
-        // Portaled to document.body: the tool card above us carries
-        // `backdrop-filter` (glass), which per spec becomes the containing
-        // block for in-tree `fixed` descendants — the backdrop then spans
-        // the tall card and the dialog centers off-screen (F-19). The
-        // portal escapes every ancestor, so `fixed inset-0` is always the
-        // real viewport. `dvh` caps keep the mobile URL bar from cropping.
-        createPortal(
-          <div
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
-            onClick={() => setViewer(null)}
-          >
-            <div
-              className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
-              onClick={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
+      <AnimatePresence>
+        {viewing !== null &&
+          // Portaled to document.body: the tool card above us carries
+          // `backdrop-filter` (glass), which per spec becomes the containing
+          // block for in-tree `fixed` descendants — the backdrop then spans
+          // the tall card and the dialog centers off-screen (F-19). The
+          // portal escapes every ancestor, so `fixed inset-0` is always the
+          // real viewport. `dvh` caps keep the mobile URL bar from cropping.
+          // Enter/exit is a 180ms fade+scale (transform/opacity only);
+          // close paths set state directly, so unmount never waits on JS.
+          createPortal(
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+              onClick={() => setViewer(null)}
             >
-              <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
-                <span className="font-display text-lg">Page {(viewer ?? 0) + 1}</span>
-                <button
-                  onClick={() => setViewer(null)}
-                  className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
-                >
-                  Close
-                </button>
-              </div>
-              <PreviewFull page={viewing} position={viewer ?? 0} />
-            </div>
-          </div>,
-          document.body,
-        )}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
+                onClick={(e) => e.stopPropagation()}
+                role="dialog"
+                aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
+              >
+                <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
+                  <span className="font-display text-lg">Page {(viewer ?? 0) + 1}</span>
+                  <button
+                    onClick={() => setViewer(null)}
+                    className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                  >
+                    Close
+                  </button>
+                </div>
+                <PreviewFull page={viewing} position={viewer ?? 0} />
+              </motion.div>
+            </motion.div>,
+            document.body,
+          )}
+      </AnimatePresence>
     </>
   );
 }

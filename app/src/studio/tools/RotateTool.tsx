@@ -88,7 +88,7 @@ const RotateTile = memo(function RotateTile({
         <button
           onClick={() => onSpin(idx, -1)}
           className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
-          aria-label="Rotate left"
+          aria-label={`Rotate left (page ${idx + 1})`}
         >
           ↺
         </button>
@@ -96,7 +96,7 @@ const RotateTile = memo(function RotateTile({
         <button
           onClick={() => onSpin(idx, 1)}
           className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
-          aria-label="Rotate right"
+          aria-label={`Rotate right (page ${idx + 1})`}
         >
           ↻
         </button>

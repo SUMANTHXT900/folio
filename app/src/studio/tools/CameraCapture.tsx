@@ -25,6 +25,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import { Button, ErrorBlock } from '../components/ui';
 import {
   NO_CAPABILITIES,
@@ -235,6 +236,9 @@ export function CameraCapture({
   const [deviceId, setDeviceId] = useState<string>('');
   const [capturing, setCapturing] = useState(false);
   const [grid, setGrid] = useState(false);
+  // Shutter-confirmation blink generation: each accepted capture bumps
+  // this, remounting a one-shot opacity-only flash over the viewport.
+  const [flash, setFlash] = useState(0);
   // Hardware capabilities of the ACTIVE track only — recalculated on
   // every (re)start so switching cameras never shows stale controls.
   const [caps, setCaps] = useState<CameraCapabilities>(NO_CAPABILITIES);
@@ -608,6 +612,7 @@ export function CameraCapture({
   const capture = async () => {
     const file = await captureFrame();
     if (file === null) return;
+    setFlash((f) => f + 1);
     scan.processCapture(file);
   };
 
@@ -994,15 +999,21 @@ export function CameraCapture({
             {/* Import note: floating pill over the viewport top, never an
               in-flow strip — a strip would push the viewport up after
               every capture (real-phone report). Auto-dismissed. */}
-            {importNote !== null && importState === null && (
-              <p
-                role="status"
-                data-import-note
-                className="pointer-events-none absolute inset-x-0 top-3 z-10 mx-auto w-fit max-w-[90%] rounded-full bg-ink-900/85 px-3 py-1 text-center text-[11px] text-paper-50 dark:bg-paper-100 dark:text-ink-900"
-              >
-                {importNote}
-              </p>
-            )}
+            <AnimatePresence>
+              {importNote !== null && importState === null && (
+                <motion.p
+                  role="status"
+                  data-import-note
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="pointer-events-none absolute inset-x-0 top-3 z-10 mx-auto w-fit max-w-[90%] rounded-full bg-ink-900/85 px-3 py-1 text-center text-[11px] text-paper-50 dark:bg-paper-100 dark:text-ink-900"
+                >
+                  {importNote}
+                </motion.p>
+              )}
+            </AnimatePresence>
             {/* Viewport: the wrapper flexes to leftover space; the content
               box is MEASURED (see scanViewport.ts) so video and overlay
               always share the exact painted rect — zero letterbox bars by
@@ -1046,10 +1057,15 @@ export function CameraCapture({
                   />
                 )}
                 {/* Detection pill: low-res worker verdict, framing aid only —
-                  never the final transform geometry. */}
-                <p
+                  never the final transform geometry. Mount is a 150ms
+                  opacity-only fade; verdict swaps stay instant (no
+                  continuous guide animation — battery). */}
+                <motion.p
                   aria-hidden
                   data-detection-pill
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.15 }}
                   className={`pointer-events-none absolute inset-x-0 bottom-2 mx-auto w-fit rounded-full px-3 py-1 text-[11px] ${
                     scan.liveDetected
                       ? 'bg-forest-600/90 font-medium text-white'
@@ -1057,14 +1073,34 @@ export function CameraCapture({
                   }`}
                 >
                   {scan.liveDetected ? 'Document detected ✓' : 'Frame the page in the guide'}
-                </p>
-                {scan.processing && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-ink-950/60">
-                    <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
-                      Processing scan…
-                    </p>
-                  </div>
+                </motion.p>
+                {/* Shutter-confirmation blink: one-shot opacity-only flash,
+                  remounted per capture via `flash`. No geometry, no loop. */}
+                {flash > 0 && (
+                  <motion.span
+                    key={flash}
+                    aria-hidden
+                    initial={{ opacity: 0.45 }}
+                    animate={{ opacity: 0 }}
+                    transition={{ duration: 0.18, ease: 'easeOut' }}
+                    className="pointer-events-none absolute inset-0 bg-white"
+                  />
                 )}
+                <AnimatePresence>
+                  {scan.processing && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.15 }}
+                      className="absolute inset-0 flex items-center justify-center bg-ink-950/60"
+                    >
+                      <p className="rounded-full bg-ink-900/85 px-4 py-2 text-sm text-paper-50">
+                        Processing scan…
+                      </p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
 

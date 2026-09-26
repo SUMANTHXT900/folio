@@ -288,7 +288,7 @@ export function ToolHeading({
         href="#/"
         className="inline-flex items-center gap-1.5 text-sm text-ink-500 hover:text-brass-600 dark:text-ink-300 dark:hover:text-brass-300 transition-colors mb-4 group"
       >
-        <span className="w-6 h-6 rounded-full border border-paper-200 dark:border-ink-700 bg-paper-50 dark:bg-ink-800 flex items-center justify-center group-hover:border-brass-400/40 group-hover:-translate-x-0.5 transition-all">
+        <span className="w-6 h-6 rounded-full border border-paper-200 dark:border-ink-700 bg-paper-50 dark:bg-ink-800 flex items-center justify-center group-hover:border-brass-400/40 group-hover:-translate-x-0.5 transition-[transform,border-color]">
           <svg
             width="12"
             height="12"

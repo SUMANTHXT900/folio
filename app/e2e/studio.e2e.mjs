@@ -499,7 +499,9 @@ async function main() {
       { timeout: 300000 },
     );
     await page.evaluate(() => {
-      [...document.querySelectorAll('button[aria-label="Rotate right"]')][0]?.click();
+      [...document.querySelectorAll('button')].find((b) =>
+        (b.getAttribute('aria-label') ?? '').startsWith('Rotate right'),
+      )?.click();
     });
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]

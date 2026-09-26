@@ -307,7 +307,7 @@ export default function About() {
                 key={`${e.version}-${i}`}
                 initial={{ opacity: 0, y: 14 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.42, delay: 0.12 + i * 0.07, ease }}
+                transition={{ duration: 0.42, delay: Math.min(0.12 + i * 0.07, 0.2), ease }}
                 className="relative pl-8 pb-6 last:pb-0 group/item"
               >
                 {/* node dot */}
@@ -324,7 +324,7 @@ export default function About() {
                 />
                 <div
                   className={
-                    'rounded-2xl border p-5 shadow-soft transition-all duration-300 group-hover/item:-translate-y-0.5 ' +
+                    'rounded-2xl border p-5 shadow-soft transition-[transform,border-color,box-shadow] duration-300 group-hover/item:-translate-y-0.5 ' +
                     (e.status === 'latest'
                       ? 'border-brass-400/40 bg-brass-400/[0.07] dark:bg-brass-400/[0.09]'
                       : e.status === 'planned'
@@ -379,7 +379,11 @@ export default function About() {
           <motion.div
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.42, delay: 0.12 + ENTRIES.length * 0.07, ease }}
+            transition={{
+              duration: 0.42,
+              delay: Math.min(0.12 + ENTRIES.length * 0.07, 0.2),
+              ease,
+            }}
             className="mt-6 rounded-2xl border border-dashed border-paper-300/70 dark:border-ink-700/80 bg-paper-50/50 dark:bg-ink-800/30 p-5 shadow-soft"
           >
             <span className="text-[10px] font-medium uppercase tracking-wider rounded-full px-2 py-0.5 border border-ink-400/40 dark:border-ink-500/50 text-ink-400 dark:text-ink-300">
@@ -438,7 +442,7 @@ export default function About() {
       <motion.footer
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ duration: 0.5, delay: 0.4 }}
+        transition={{ duration: 0.5, delay: 0.2 }}
         className="mt-10 pt-6 border-t border-paper-200/80 dark:border-ink-800/80 flex flex-col sm:flex-row items-center justify-between gap-3"
       >
         <p className="text-xs text-ink-400 dark:text-ink-300">

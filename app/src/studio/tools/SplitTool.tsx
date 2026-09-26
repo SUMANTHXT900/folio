@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, memo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   ToolHeading,
   DropZone,
@@ -44,7 +45,7 @@ const ThumbTile = memo(function ThumbTile({
   return (
     <div
       className={
-        'relative rounded-lg overflow-hidden border-2 transition-all ' +
+        'relative rounded-lg overflow-hidden border-2 transition-[border-color,opacity] ' +
         (kept ? 'border-transparent' : 'border-red-400/70 opacity-40')
       }
     >
@@ -461,44 +462,56 @@ export default function SplitTool() {
       {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
       {opError !== null && <ErrorBlock error={opError} />}
 
-      {preview !== null &&
-        thumbs[preview] &&
-        // Portaled to document.body: the Card above carries no
-        // `backdrop-filter` today, so in-tree `fixed` would work — but a
-        // future refactor could nest this inside one (glass), which per
-        // spec becomes the containing block for `fixed` descendants and
-        // centers the dialog off-screen (F-19, cf. PageGrid). The portal
-        // escapes every ancestor, so `fixed inset-0` is always the real
-        // viewport. `dvh` caps keep the mobile URL bar from cropping.
-        createPortal(
-          <div
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
-            onClick={() => setPreview(null)}
-          >
-            <div
-              className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
-              onClick={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-label={`Preview Page ${preview + 1}`}
+      <AnimatePresence>
+        {preview !== null &&
+          thumbs[preview] &&
+          // Portaled to document.body: the Card above carries no
+          // `backdrop-filter` today, so in-tree `fixed` would work — but a
+          // future refactor could nest this inside one (glass), which per
+          // spec becomes the containing block for `fixed` descendants and
+          // centers the dialog off-screen (F-19, cf. PageGrid). The portal
+          // escapes every ancestor, so `fixed inset-0` is always the real
+          // viewport. `dvh` caps keep the mobile URL bar from cropping.
+          // Enter/exit is a 180ms fade+scale (transform/opacity only);
+          // close paths set state directly, so unmount never waits on JS.
+          createPortal(
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
+              onClick={() => setPreview(null)}
             >
-              <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
-                <span className="font-display text-lg">Page {preview + 1}</span>
-                <button
-                  onClick={() => setPreview(null)}
-                  className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
-                >
-                  Close
-                </button>
-              </div>
-              <img
-                src={thumbs[preview]}
-                alt={`Page ${preview + 1} full preview`}
-                className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
-              />
-            </div>
-          </div>,
-          document.body,
-        )}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
+                onClick={(e) => e.stopPropagation()}
+                role="dialog"
+                aria-label={`Preview Page ${preview + 1}`}
+              >
+                <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
+                  <span className="font-display text-lg">Page {preview + 1}</span>
+                  <button
+                    onClick={() => setPreview(null)}
+                    className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                  >
+                    Close
+                  </button>
+                </div>
+                <img
+                  src={thumbs[preview]}
+                  alt={`Page ${preview + 1} full preview`}
+                  className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
+                />
+              </motion.div>
+            </motion.div>,
+            document.body,
+          )}
+      </AnimatePresence>
     </div>
   );
 }
