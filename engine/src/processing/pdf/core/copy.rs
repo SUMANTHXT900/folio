@@ -42,18 +42,26 @@ const INHERITABLE_KEYS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"R
 /// malformed files. Shared with rotation resolution in `document`.
 pub(crate) const MAX_INHERITANCE_DEPTH: usize = 128;
 
-/// Checks 1-based page numbers against the document, returning the
-/// selection index and number of the first invalid entry, if any.
-/// Page `0` and anything above the page count are invalid.
+/// Checks 1-based page numbers against the document's cached page map,
+/// returning the selection index and number of the first invalid entry, if
+/// any. Page `0` and anything above the page count are invalid.
 ///
 /// Shared by `copy_pages` and multi-part operations (e.g. `pdf.split`)
 /// so every caller validates against the same rule.
 pub(crate) fn find_invalid_page(source: &PdfDocument, pages: &[u32]) -> Option<(usize, u32)> {
-    let src_pages = source.raw_document().get_pages();
+    find_invalid_page_in_map(source.page_map(), pages)
+}
+
+/// [`find_invalid_page`] against an already-resolved page map, for callers
+/// that hold one (e.g. `pdf.split`'s whole-plan validation).
+fn find_invalid_page_in_map(
+    page_map: &BTreeMap<u32, ObjectId>,
+    pages: &[u32],
+) -> Option<(usize, u32)> {
     pages
         .iter()
         .enumerate()
-        .find(|(_, page_number)| !src_pages.contains_key(page_number))
+        .find(|(_, page_number)| !page_map.contains_key(page_number))
         .map(|(index, page_number)| (index, *page_number))
 }
 
@@ -66,6 +74,25 @@ pub(crate) fn find_invalid_page(source: &PdfDocument, pages: &[u32]) -> Option<(
 pub(crate) fn copy_pages(
     source: &PdfDocument,
     pages: &[u32],
+    on_page_copied: impl FnMut(usize, usize) -> Result<(), EngineError>,
+) -> Result<PdfDocument, EngineError> {
+    copy_pages_with_map(source, source.page_map(), pages, on_page_copied)
+}
+
+/// [`copy_pages`] against a caller-resolved page map. Callers that already
+/// validated their selection against this exact map (e.g. `pdf.split`'s
+/// whole-plan validation) skip a second page-tree resolution; the selection
+/// is still checked against the map before anything is constructed, so the
+/// empty-selection and out-of-range guarantees of [`copy_pages`] hold
+/// identically.
+///
+/// `on_page_copied(completed, total)` runs after each page is incorporated
+/// and may report progress or fail (e.g. on cancellation), aborting the
+/// operation without exposing a partial document.
+pub(crate) fn copy_pages_with_map(
+    source: &PdfDocument,
+    page_map: &BTreeMap<u32, ObjectId>,
+    pages: &[u32],
     mut on_page_copied: impl FnMut(usize, usize) -> Result<(), EngineError>,
 ) -> Result<PdfDocument, EngineError> {
     if pages.is_empty() {
@@ -75,28 +102,27 @@ pub(crate) fn copy_pages(
         ));
     }
 
-    let src = source.raw_document();
-    let page_count = source.page_count();
-
-    // Validate the complete selection before constructing anything.
-    let src_pages = src.get_pages();
-    if let Some((index, page_number)) = find_invalid_page(source, pages) {
+    // Validate the complete selection against the resolved map before
+    // constructing anything.
+    if let Some((index, page_number)) = find_invalid_page_in_map(page_map, pages) {
         return Err(EngineError::new(
             ErrorCode::PageOutOfRange,
             format!("selected page {page_number} is outside the document"),
         )
         .with_details(format!(
-            "document has {page_count} pages; invalid entry at selection index {index}"
+            "document has {} pages; invalid entry at selection index {index}",
+            page_map.len()
         )));
     }
 
+    let src = source.raw_document();
     let mut out = lopdf::Document::with_version(src.version.clone());
     let out_pages_id = out.new_object_id();
     let mut kids = Vec::with_capacity(pages.len());
 
     for (index, page_number) in pages.iter().enumerate() {
         // Validated above; the lookup cannot fail.
-        let src_page_id = src_pages[page_number];
+        let src_page_id = page_map[page_number];
         let new_page_id = copy_single_page(src, src_page_id, *page_number, &mut out, out_pages_id)?;
         kids.push(Object::Reference(new_page_id));
         on_page_copied(index + 1, pages.len())?;
@@ -179,8 +205,13 @@ pub(crate) fn merge_documents(
 
     for (doc_index, source) in sources.iter().enumerate() {
         let src = source.raw_document();
-        // BTreeMap iteration is page-number ordered.
-        let ordered: Vec<(u32, ObjectId)> = src.get_pages().into_iter().collect();
+        // BTreeMap iteration is page-number ordered; the cached map avoids
+        // re-walking this source's page tree here and in `page_count`.
+        let ordered: Vec<(u32, ObjectId)> = source
+            .page_map()
+            .iter()
+            .map(|(page_number, page_id)| (*page_number, *page_id))
+            .collect();
         // Pre-register every page up front (first registration wins, so a
         // degenerate shared page object stays a single output page).
         let mut table = BTreeMap::new();

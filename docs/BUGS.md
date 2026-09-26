@@ -4,6 +4,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-17 — Live scanner detection could never fire (corner shape mismatch)
+
+- **Status.** Resolved. **Area.** Scan bridge (`scan/src/wasm.rs` envelope ↔ `app/src/studio/tools/scan/scanWorkerClient.ts` parsing; live path in `useScanProcessor.ts`). **Severity.** Medium (guidance-only: the "Document detected — capture when ready" pill never appeared; scanning itself worked).
+- **Symptoms.** Live framing guidance never reported a detection even on clear pages; `liveDetected` stayed false.
+- **Root cause.** The WASM glue serializes corners as `[[x, y] × 4]` arrays, but the client parsed `{x, y}` objects only — the filter yielded an empty list, so `corners` was always `null` and the status gate could never be satisfied.
+- **Fix.** `parseCorners` accepts both shapes, hardened by scan protocol v2's `detected` status; the live tick now runs detection-only and reports corners honestly.
+- **Verification.** Scan unit tests (detect-only corners + fallback), scan worker/client tests, canonical E2E 46/46 + 4 SKIP.
+
 ### F-13 — Hard-cached PWA with no update path after a deploy
 
 - **Status.** Resolved (update manager). **Area.** PWA/service-worker boundary (`app/src/pwa/`, `StudioApp.tsx`, `About.tsx`). **Severity.** High (after every deploy, mobile and desktop users sat on the stale precache with no in-app recourse — only a manual hard refresh, undiscoverable on phones).

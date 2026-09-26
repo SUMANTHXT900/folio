@@ -52,7 +52,7 @@ Global rules for all operations: inputs arrive as bytes (never paths); validatio
 - **Purpose.** Rotate individual pages or the whole document.
 - **Input.** One PDF. **Options.** `pages: number[]` (1-based, need not cover the document; order irrelevant; duplicates rejected) + `angleDeg: number`.
 - **Output.** New PDF with each selected page's rotation advanced by the angle.
-- **Semantics.** Relative: a page showing 90° rotated by +90° shows 180°. Results normalize to 0/90/180/270. Any integer equivalent to a multiple of 90° is accepted (`360`→`0`, `450`→`90`, `-90`→`270`); anything else is rejected. Empty selection or 0° is valid (no-op success).
+- **Semantics.** Relative: a page showing 90° rotated by +90° shows 180°. Results normalize to 0/90/180/270. Any integer equivalent to a multiple of 90° is accepted (`360`→`0`, `450`→`90`, `-90`→`270`); anything else is rejected. Empty selection or 0° is valid (no-op success). Because the operation mutates a private parse in place (D19), unselected pages keep inherited page-tree `/Rotate` values exactly as they were; selected pages get the resolved value materialized on their own dictionary.
 - **Errors.** `INVALID_OPTIONS` for non-quarter-turn angles or duplicates.
 - **Testing.** `engine/tests/pdf_rotate.rs` + unit tests + E2E (rotated download).
 

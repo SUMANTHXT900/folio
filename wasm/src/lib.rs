@@ -12,9 +12,11 @@
 //!
 //! This layer contains NO PDF processing logic: it converts JS values to
 //! the engine's typed inputs, forwards REAL progress/log events to a JS
-//! callback, and converts the typed outcome (plus serialized output PDFs)
-//! back to JS. Validation, timing, errors, and cancellation semantics are
-//! 100% the engine's — identical to native/CLI behavior.
+//! callback (redundant in-between progress events are coalesced; see
+//! [`should_forward_progress`]), and converts the typed outcome (plus
+//! serialized output PDFs) back to JS. Validation, timing, errors, and
+//! cancellation semantics are 100% the engine's — identical to native/CLI
+//! behavior.
 //!
 //! Threading model: the worker calls `execute` synchronously on its own
 //! thread, so blocking the worker during a run is by design (the UI thread
@@ -95,8 +97,11 @@ impl WasmEngine {
     /// - `options_json`: JSON string of per-operation options
     ///   (`{level}`, `{pages}`, `{order}`, `{pages,angle_deg}`,
     ///   `{parts:[{pages,name?}]`, `{page_size,background_rgb?}`, `{}`).
-    /// - `emit`: JS function called with one JSON string per REAL engine
-    ///   progress/log event, in emission order.
+    /// - `emit`: JS function called with one JSON string per forwarded
+    ///   REAL engine progress/log event, in emission order. Progress is
+    ///   coalesced (phase-first, Δ≥1 percentage point, always 100%) so a
+    ///   1000-page job does not round-trip 1000 events; log/lifecycle
+    ///   events are never dropped.
     ///
     /// Returns `{ result_json, outputs }`: the terminal result envelope
     /// (same shapes as the former dev bridge: state/timing/summary/error)
@@ -131,7 +136,7 @@ impl WasmEngine {
         let token = CancellationToken::new();
 
         let outcome: Result<DispatchOk, (EngineError, Duration)> =
-            dispatch(&engine, operation, &names, &blobs, &options, token);
+            dispatch(&engine, operation, &names, blobs, &options, token);
 
         let completed_at_ms = system_millis(crate::clock_now());
         let (envelope, outputs) = match outcome {
@@ -218,7 +223,8 @@ impl Default for WasmEngine {
 // ---------------------------------------------------------------------------
 
 /// Shared per-execution glue state: the emit callback, an event counter,
-/// the worker-side start mark, and the real engine job id once observed.
+/// the worker-side start mark, the real engine job id once observed, and
+/// the progress coalescing state.
 ///
 /// One `Arc` instance implements BOTH sink traits, so progress and log
 /// events share the counter and job capture. Atomics + mutex (not
@@ -229,6 +235,49 @@ struct CallbackSink {
     count: std::sync::atomic::AtomicUsize,
     started_ms: u64,
     job_id: std::sync::Mutex<Option<String>>,
+    progress_forward: std::sync::Mutex<ProgressForwardState>,
+}
+
+/// Coalescing cursor: the phase and percentage of the last progress event
+/// actually forwarded to JS. Only forward decisions mutate it.
+#[derive(Debug, Default, PartialEq)]
+struct ProgressForwardState {
+    phase: Option<String>,
+    percentage: Option<f64>,
+}
+
+/// Decides whether one engine progress event must be forwarded to JS.
+///
+/// Coalescing rule — drop only redundant in-between events:
+/// - `percentage == None` (indeterminate/lifecycle progress) → always
+///   forward, and do not touch the cursor (nothing to compare);
+/// - first percentage-bearing event of a phase → forward (sets the
+///   phase baseline, so a new phase's 0% is never swallowed);
+/// - percentage advanced by ≥ 1.0 since the last forwarded one → forward;
+/// - `percentage == 100.0` → always forward, so the terminal 100% event
+///   of a successful job can never be dropped by throttling.
+///
+/// Returns `true` when the event is forwarded; `state` then advances to it.
+fn should_forward_progress(
+    state: &mut ProgressForwardState,
+    phase: Option<&str>,
+    percentage: Option<f64>,
+) -> bool {
+    let Some(pct) = percentage else {
+        return true;
+    };
+    let phase_changed = state.phase.as_deref() != phase;
+    let advanced = match state.percentage {
+        Some(last) => pct - last >= 1.0,
+        None => true,
+    };
+    if phase_changed || advanced || pct >= 100.0 {
+        state.phase = phase.map(str::to_string);
+        state.percentage = Some(pct);
+        true
+    } else {
+        false
+    }
 }
 
 impl CallbackSink {
@@ -238,6 +287,7 @@ impl CallbackSink {
             count: std::sync::atomic::AtomicUsize::new(0),
             started_ms: system_millis(crate::clock_now()),
             job_id: std::sync::Mutex::new(None),
+            progress_forward: std::sync::Mutex::new(ProgressForwardState::default()),
         }
     }
 
@@ -276,6 +326,16 @@ impl CallbackSink {
 impl ProgressSink for CallbackSink {
     fn emit(&self, event: ProgressEvent) {
         self.note_job(event.job_id());
+        // Coalesce: only forward phase-first / Δ≥1 pp / 100% progress
+        // events (indeterminate ones always pass). The guard is released
+        // before calling back into JS.
+        let forward = {
+            let mut state = self.progress_forward.lock().expect("glue progress lock");
+            should_forward_progress(&mut state, event.phase(), event.percentage())
+        };
+        if !forward {
+            return;
+        }
         self.send(json!({
             "timestamp_ms": system_millis(event.timestamp()),
             "kind": "progress",
@@ -502,15 +562,21 @@ fn decode_pdf_date(field: &str, value: &Value) -> Result<PdfDate, EngineError> {
     PdfDate::new(year, month, day, hour, minute, second, tz)
 }
 
+/// Moves input `index` out of `blobs` (no byte copy — the displaced slot
+/// is left empty) and clones only its human label. Single-input
+/// operations call this once with index 0.
+fn take_input(blobs: &mut [Vec<u8>], names: &[String], index: usize) -> (String, Vec<u8>) {
+    (names[index].clone(), std::mem::take(&mut blobs[index]))
+}
+
 fn dispatch(
     engine: &ExecutionEngine,
     operation: &str,
     names: &[String],
-    blobs: &[Vec<u8>],
+    mut blobs: Vec<Vec<u8>>,
     options: &Value,
     token: CancellationToken,
 ) -> Result<DispatchOk, (EngineError, Duration)> {
-    let input_at = |index: usize| (names[index].clone(), blobs[index].clone());
     let fail = |err: EngineError| (err, Duration::ZERO);
 
     // Single-document operations require exactly one input; multi-input
@@ -537,7 +603,7 @@ fn dispatch(
                 Some("detailed") => InspectLevel::Detailed,
                 _ => InspectLevel::Basic,
             };
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = InspectInput {
                 data,
                 name: Some(name),
@@ -571,7 +637,7 @@ fn dispatch(
         }
         "pdf.extract_pages" => {
             let pages = decode_pages(options.get("pages")).map_err(|err| (err, Duration::ZERO))?;
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = ExtractPagesInput {
                 data,
                 name: Some(name.clone()),
@@ -614,7 +680,7 @@ fn dispatch(
                     None => SplitPart::new(pages),
                 });
             }
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = SplitInput {
                 data,
                 name: Some(name.clone()),
@@ -653,7 +719,7 @@ fn dispatch(
         }
         "pdf.reorder" => {
             let order = decode_pages(options.get("order")).map_err(|err| (err, Duration::ZERO))?;
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = ReorderInput {
                 data,
                 name: Some(name.clone()),
@@ -677,7 +743,7 @@ fn dispatch(
         }
         "pdf.delete_pages" => {
             let pages = decode_pages(options.get("pages")).map_err(|err| (err, Duration::ZERO))?;
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = DeletePagesInput {
                 data,
                 name: Some(name.clone()),
@@ -709,7 +775,7 @@ fn dispatch(
                 .and_then(Value::as_i64)
                 .and_then(|n| i32::try_from(n).ok())
                 .unwrap_or(0);
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = RotateInput {
                 data,
                 name: Some(name.clone()),
@@ -736,8 +802,8 @@ fn dispatch(
             // carry the REAL loader error with zero engine duration — the
             // engine never ran.
             let mut documents = Vec::with_capacity(blobs.len());
-            for (index, bytes) in blobs.iter().enumerate() {
-                match load_pdf(bytes) {
+            for (index, bytes) in blobs.into_iter().enumerate() {
+                match load_pdf(&bytes) {
                     Ok(document) => documents.push(document),
                     Err(err) => {
                         let prior = err.details().unwrap_or("").to_string();
@@ -793,8 +859,10 @@ fn dispatch(
                 Some(value) => decode_background(value)?,
             };
             let mut images = Vec::with_capacity(blobs.len());
-            for (name, data) in names.iter().zip(blobs.iter()) {
-                match ImageInput::new(name.clone(), data.clone()) {
+            // Input order is the output page order: move each blob into
+            // its `ImageInput` (no clone) and keep the zip aligned.
+            for (name, data) in names.iter().zip(blobs) {
+                match ImageInput::new(name.clone(), data) {
                     Ok(image) => images.push(image),
                     Err(err) => return Err((err, Duration::ZERO)),
                 }
@@ -822,7 +890,7 @@ fn dispatch(
                 .map_err(|err| (err, duration))
         }
         "pdf.read_metadata" => {
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = ReadMetadataInput {
                 data,
                 name: Some(name),
@@ -848,7 +916,7 @@ fn dispatch(
         "pdf.set_metadata" => {
             let patch =
                 decode_metadata_patch(options.get("patch")).map_err(|err| (err, Duration::ZERO))?;
-            let (name, data) = input_at(0);
+            let (name, data) = take_input(&mut blobs, names, 0);
             let input = SetMetadataInput {
                 data,
                 name: Some(name.clone()),
@@ -953,4 +1021,130 @@ fn read_blob_array(array: &Array) -> Result<Vec<Vec<u8>>, JsValue> {
 /// so envelope timestamps agree with engine timestamps.
 fn clock_now() -> SystemTime {
     folio_engine::core::clock::wall_now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(
+        state: &mut ProgressForwardState,
+        forwarded: &mut Vec<f64>,
+        phase: &str,
+        percentage: f64,
+    ) {
+        if should_forward_progress(state, Some(phase), Some(percentage)) {
+            forwarded.push(percentage);
+        }
+    }
+
+    #[test]
+    fn indeterminate_progress_always_forwards_without_touching_cursor() {
+        let mut state = ProgressForwardState::default();
+        assert!(should_forward_progress(&mut state, Some("loading"), None));
+        assert_eq!(state, ProgressForwardState::default());
+        assert!(should_forward_progress(&mut state, Some("loading"), None));
+        assert_eq!(state, ProgressForwardState::default());
+    }
+
+    #[test]
+    fn first_percentage_event_of_each_phase_forwards() {
+        let mut state = ProgressForwardState::default();
+        assert!(should_forward_progress(
+            &mut state,
+            Some("validating"),
+            Some(5.0)
+        ));
+        // Same phase, sub-1 pp step: redundant.
+        assert!(!should_forward_progress(
+            &mut state,
+            Some("validating"),
+            Some(5.5)
+        ));
+        // New phase: its first event resets the baseline and forwards.
+        assert!(should_forward_progress(
+            &mut state,
+            Some("preparing"),
+            Some(10.0)
+        ));
+        assert!(!should_forward_progress(
+            &mut state,
+            Some("preparing"),
+            Some(10.5)
+        ));
+    }
+
+    #[test]
+    fn sub_one_point_advance_is_dropped_but_one_point_is_forwarded() {
+        let mut state = ProgressForwardState::default();
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(10.0)
+        ));
+        assert!(!should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(10.9)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(11.0)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(12.5)
+        ));
+    }
+
+    #[test]
+    fn hundred_percent_always_forwards_even_without_advance() {
+        let mut state = ProgressForwardState::default();
+        assert!(should_forward_progress(
+            &mut state,
+            Some("finalizing"),
+            Some(95.0)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("finalizing"),
+            Some(100.0)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("finalizing"),
+            Some(100.0)
+        ));
+    }
+
+    #[test]
+    fn thousand_page_loop_throttles_and_still_terminates_at_100() {
+        // Mirrors a 1000-page delete: validating 5%, preparing 10%, the
+        // 10..=95% copy band (one raw event per page), then 100%.
+        let mut state = ProgressForwardState::default();
+        let mut forwarded: Vec<f64> = Vec::new();
+        feed(&mut state, &mut forwarded, "validating", 5.0);
+        feed(&mut state, &mut forwarded, "preparing", 10.0);
+        let total = 1000u64;
+        for done in 1..=total {
+            let completed = 10 + (done * 85) / total;
+            feed(
+                &mut state,
+                &mut forwarded,
+                "copying",
+                completed.min(95) as f64,
+            );
+        }
+        feed(&mut state, &mut forwarded, "finalizing", 100.0);
+
+        assert_eq!(forwarded.first(), Some(&5.0));
+        assert_eq!(forwarded.last(), Some(&100.0));
+        // ~88 forwarded vs 1003 raw events.
+        assert!(forwarded.len() < 100, "forwarded {}", forwarded.len());
+        // Non-decreasing overall; phase boundaries may legitimately repeat
+        // a percentage (e.g. preparing 10% → copying 10%).
+        assert!(forwarded.windows(2).all(|w| w[1] >= w[0]));
+    }
 }

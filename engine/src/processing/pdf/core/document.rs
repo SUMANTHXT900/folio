@@ -7,6 +7,9 @@
 //! The source document stays read-only; transformation primitives (see
 //! [`copy`](super::copy)) build new documents rather than mutating.
 
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
 use lopdf::{Dictionary, Object, ObjectId};
 
 use crate::core::error::{EngineError, ErrorCode};
@@ -48,16 +51,29 @@ pub struct PageGeometry {
 
 /// Our PDF abstraction: owns the parsed document, exposes only what the
 /// engine needs. Constructed via the [`loader`](super::loader) from bytes.
+///
+/// The resolved page map (1-based page number → page object id) is cached:
+/// `lopdf::Document::get_pages` walks the whole page tree, so calling it
+/// once per page turns every per-page loop into O(N²). The cache is
+/// resolved lazily and dropped by mutations (see
+/// [`invalidate_page_map`](Self::invalidate_page_map)); read-only methods
+/// never rebuild it.
 #[derive(Debug)]
 pub struct PdfDocument {
     inner: lopdf::Document,
+    /// Lazily resolved page map. Interior mutability keeps every reader on
+    /// `&self`; `OnceLock` (rather than `RefCell`) keeps the type `Sync`.
+    page_map: OnceLock<BTreeMap<u32, ObjectId>>,
 }
 
 impl PdfDocument {
     /// Wraps an already-parsed document. Crate-internal: only the loader,
     /// transformation primitives, and white-box tests may construct this type.
     pub(crate) fn from_lopdf(inner: lopdf::Document) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            page_map: OnceLock::new(),
+        }
     }
 
     /// Crate-internal raw access for shared PDF transformation primitives
@@ -65,6 +81,23 @@ impl PdfDocument {
     /// [`PdfDocument`] methods and never this accessor.
     pub(crate) fn raw_document(&self) -> &lopdf::Document {
         &self.inner
+    }
+
+    /// Returns the resolved page map (1-based page number → page object id),
+    /// building it once on first use. Every internal page lookup goes through
+    /// this cache instead of `lopdf`'s full page-tree walk.
+    pub(crate) fn page_map(&self) -> &BTreeMap<u32, ObjectId> {
+        self.page_map.get_or_init(|| self.inner.get_pages())
+    }
+
+    /// Drops the cached page map; the next access rebuilds it. Public
+    /// mutators call this conservatively even when they only touch a page
+    /// dictionary (`/Rotate`) or the trailer, so a future structural change
+    /// can never silently outlive a stale map. The internal resolved-write
+    /// path used inside `pdf.rotate`'s loop deliberately skips it: a
+    /// `/Rotate` write cannot change the page-number → object-id mapping.
+    pub(crate) fn invalidate_page_map(&mut self) {
+        self.page_map.take();
     }
 
     /// Serializes the document to a fresh byte buffer (file output, WASM
@@ -85,7 +118,7 @@ impl PdfDocument {
     /// Returns the number of pages.
     #[must_use]
     pub fn page_count(&self) -> u32 {
-        self.inner.get_pages().len() as u32
+        self.page_map().len() as u32
     }
 
     /// Returns the PDF specification version (e.g. `"1.7"`).
@@ -137,25 +170,35 @@ impl PdfDocument {
     /// Resolves the geometry of a 1-based page number, following
     /// inheritable attributes up the page tree.
     pub fn page_geometry(&self, page_number: u32) -> Result<PageGeometry, EngineError> {
-        let page_id = self
-            .inner
-            .get_pages()
-            .get(&page_number)
-            .copied()
-            .ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::PageOutOfRange,
-                    format!("page {page_number} is outside the document"),
-                )
-                .with_details(format!("document has {} pages", self.page_count()))
-            })?;
+        let page_id = self.page_map().get(&page_number).copied().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::PageOutOfRange,
+                format!("page {page_number} is outside the document"),
+            )
+            .with_details(format!("document has {} pages", self.page_count()))
+        })?;
         self.page_geometry_by_id(page_number, page_id)
     }
 
     /// Returns the 1-based page numbers in document order.
     #[must_use]
     pub fn page_numbers(&self) -> Vec<u32> {
-        self.inner.get_pages().keys().copied().collect()
+        self.page_map().keys().copied().collect()
+    }
+
+    /// Iterates the cached page map in document order, resolving each page's
+    /// geometry in a single traversal. Failed pages yield their error at the
+    /// position where they appear. Crate-internal: used by `pdf.inspect` to
+    /// avoid one page-map rebuild per page.
+    pub(crate) fn page_geometry_entries(
+        &self,
+    ) -> impl Iterator<Item = (u32, Result<PageGeometry, EngineError>)> + '_ {
+        self.page_map().iter().map(|(page_number, page_id)| {
+            (
+                *page_number,
+                self.page_geometry_by_id(*page_number, *page_id),
+            )
+        })
     }
 
     /// Resolves the effective rotation of a 1-based page in degrees,
@@ -168,18 +211,13 @@ impl PdfDocument {
     /// untouched, so the two agree whenever at most one `/Rotate` exists
     /// in a chain — the overwhelmingly common case.)
     pub fn effective_rotation(&self, page_number: u32) -> Result<i32, EngineError> {
-        let page_id = self
-            .inner
-            .get_pages()
-            .get(&page_number)
-            .copied()
-            .ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::PageOutOfRange,
-                    format!("page {page_number} is outside the document"),
-                )
-                .with_details(format!("document has {} pages", self.page_count()))
-            })?;
+        let page_id = self.page_map().get(&page_number).copied().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::PageOutOfRange,
+                format!("page {page_number} is outside the document"),
+            )
+            .with_details(format!("document has {} pages", self.page_count()))
+        })?;
         let mut id = page_id;
         for _ in 0..super::copy::MAX_INHERITANCE_DEPTH {
             let dict = self.inner.get_dictionary(id).map_err(|err| {
@@ -247,18 +285,48 @@ impl PdfDocument {
                 format!("cannot store non-quarter-turn rotation of {rotation_deg} degrees"),
             )
         })?;
-        let page_id = self
-            .inner
-            .get_pages()
-            .get(&page_number)
-            .copied()
-            .ok_or_else(|| {
-                EngineError::new(
-                    ErrorCode::PageOutOfRange,
-                    format!("page {page_number} is outside the document"),
-                )
-                .with_details(format!("document has {} pages", self.page_count()))
-            })?;
+        let page_id = self.page_map().get(&page_number).copied().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::PageOutOfRange,
+                format!("page {page_number} is outside the document"),
+            )
+            .with_details(format!("document has {} pages", self.page_count()))
+        })?;
+        self.write_page_rotation(page_number, page_id, normalized)?;
+        // A `/Rotate` write cannot change the page tree today, but every
+        // mutation through the public API invalidates the cache: structural
+        // changes can never silently outlive a stale map.
+        self.invalidate_page_map();
+        Ok(())
+    }
+
+    /// Applies an already-normalized rotation to a 1-based page, resolving
+    /// its object id from the cached page map without invalidating the map.
+    /// Crate-internal fast path for `pdf.rotate`'s single-pass loop, where
+    /// the caller has validated the page and the map cannot change between
+    /// `/Rotate` writes.
+    pub(crate) fn set_page_rotation_resolved(
+        &mut self,
+        page_number: u32,
+        rotation_deg: i32,
+    ) -> Result<(), EngineError> {
+        let page_id = self.page_map().get(&page_number).copied().ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::PageOutOfRange,
+                format!("page {page_number} is outside the document"),
+            )
+            .with_details(format!("document has {} pages", self.page_count()))
+        })?;
+        self.write_page_rotation(page_number, page_id, rotation_deg)
+    }
+
+    /// Writes a canonical `/Rotate` value onto a resolved page dictionary.
+    fn write_page_rotation(
+        &mut self,
+        page_number: u32,
+        page_id: ObjectId,
+        normalized: i32,
+    ) -> Result<(), EngineError> {
         let dict = self.inner.get_dictionary_mut(page_id).map_err(|err| {
             EngineError::new(
                 ErrorCode::InvalidDocument,
@@ -665,6 +733,43 @@ mod tests {
             fixtures::build_pdf(&fixtures::pdf_spec("1.7", vec![(612.0, 792.0, None)], None));
         let plain_doc = super::super::loader::load_pdf(&plain).expect("fixture loads");
         assert_eq!(plain_doc.metadata(), PdfMetadata::default());
+    }
+
+    #[test]
+    fn page_map_cache_reflects_rotation_mutation() {
+        let bytes = fixtures::mixed_pages_pdf();
+        let mut doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
+        // Prime the cache with reads before mutating.
+        assert_eq!(doc.page_count(), 3);
+        assert_eq!(doc.page_geometry(1).expect("p1").rotation_deg, 0);
+        doc.set_page_rotation(1, 90).expect("rotation applies");
+        // The cached map must not serve stale structure after mutation.
+        assert_eq!(doc.page_geometry(1).expect("p1 after").rotation_deg, 90);
+        assert_eq!(doc.effective_rotation(1).expect("effective"), 90);
+        assert_eq!(doc.page_count(), 3);
+        // Unselected pages keep their geometry and rotation.
+        assert_eq!(doc.page_geometry(2).expect("p2").rotation_deg, 90);
+        assert_eq!(doc.page_geometry(3).expect("p3").rotation_deg, 270);
+    }
+
+    #[test]
+    fn geometry_entries_follow_document_order() {
+        let bytes = fixtures::mixed_pages_pdf();
+        let doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
+        let entries: Vec<(u32, PageGeometry)> = doc
+            .page_geometry_entries()
+            .map(|(page_number, geometry)| (page_number, geometry.expect("geometry")))
+            .collect();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!((entries[0].1.width_pt - 612.0).abs() < f64::EPSILON);
+        assert_eq!(entries[1].1.rotation_deg, 90);
+        assert_eq!(entries[2].1.rotation_deg, 270);
     }
 
     #[test]

@@ -46,12 +46,14 @@ export interface PdfRenderEngine {
 
   /**
    * Returns the intrinsic page size at scale 1 with the effective rotation
-   * applied, without rasterizing. Lesson 13 seam: the thumbnail engine
-   * uses this to calculate a deliberately small render scale that fits
-   * inside a target box. Rejects with a structured `RenderError`
-   * (invalid page, closed document, or page failure). `rotation` is an
-   * absolute override like `renderPage`; when omitted the intrinsic
-   * `/Rotate` is respected. Never returns PDF.js objects.
+   * applied, without rasterizing. Fast path: `renderPage` returns the same
+   * geometry (`sourceWidth`/`sourceHeight`), so thumbnails never need a
+   * separate dimensions call; this entry point remains for callers that
+   * need geometry only, and its results are cached per document/page/rotation
+   * (seeded by renders) until the document closes. Rejects with a structured
+   * `RenderError` (invalid page, closed document, or page failure).
+   * `rotation` is an absolute override like `renderPage`; when omitted the
+   * intrinsic `/Rotate` is respected. Never returns PDF.js objects.
    */
   getPageDimensions(
     documentId: string,

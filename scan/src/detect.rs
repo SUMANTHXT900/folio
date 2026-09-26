@@ -1,15 +1,18 @@
 //! Document detection: Canny edges → contours → quadrilateral select.
 //!
 //! Operates on a downscaled copy (long edge [`DETECT_LONG_EDGE`] px) —
-//! detection needs shapes, not megapixels. The returned corners are in
-//! FULL-resolution coordinates (scaled back up) so the warp stage uses
-//! the original pixels.
+//! detection needs shapes, not megapixels. The downscale reads the
+//! caller's RGB bytes through a borrowed view: no full-resolution copy
+//! is materialized. The returned corners are in FULL-resolution
+//! coordinates (scaled back up) so the warp stage uses the original
+//! pixels.
 //!
 //! Confidence is earned, not assumed: the fraction of sampled quad-edge
 //! pixels landing on dilated edge pixels, gated by a hard support
 //! threshold plus the geometric validation in `geometry`.
 
-use image::{imageops, GrayImage, Luma};
+use image::flat::{FlatSamples, SampleLayout};
+use image::{imageops, GrayImage, Luma, Rgb};
 
 use crate::error::{ScanError, ScanErrorKind};
 use crate::geometry::{order_corners, validate_quad, Point, Quad};
@@ -27,12 +30,26 @@ const DILATE_RADIUS: i32 = 2;
 const MAX_CONTOUR_CANDIDATES: usize = 8;
 /// Contours below this frame-area fraction are skipped before fitting.
 const MIN_CONTOUR_AREA_FRAC: f64 = 0.015;
+/// Contours with fewer points than this are never page boundaries.
+const MIN_CONTOUR_POINTS: usize = 20;
+/// Closed loops with a shorter perimeter (px) are noise, not page edges.
+const MIN_CONTOUR_PERIMETER: f64 = 50.0;
 
 /// A detected document: normalized corners + earned confidence 0–1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detection {
     pub quad: Quad,
     pub confidence: f64,
+}
+
+/// Describes raw RGB bytes (`w*h*3`) as a flat sample buffer. Callers
+/// view it without copying.
+fn rgb_samples(rgb: &[u8], w: u32, h: u32) -> FlatSamples<&[u8]> {
+    FlatSamples {
+        samples: rgb,
+        layout: SampleLayout::row_major_packed(3, w, h),
+        color_hint: Some(image::ColorType::Rgb8),
+    }
 }
 
 /// Detects a document in an RGB buffer (`w*h*3` bytes). Returns `None`
@@ -53,14 +70,18 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
         ));
     }
 
-    // Downscaled working copy (grayscale).
+    // Downscaled working copy (grayscale). The RGB bytes are borrowed as
+    // an image view — `resize` reads straight from the caller's buffer,
+    // so no full-resolution `RgbImage` copy is materialized.
     let scale = DETECT_LONG_EDGE as f64 / u32::max(w, h).max(1) as f64;
     let scale = scale.min(1.0);
     let sw = ((w as f64 * scale).round() as u32).max(1);
     let sh = ((h as f64 * scale).round() as u32).max(1);
-    let full: image::RgbImage =
-        image::RgbImage::from_raw(w, h, rgb.to_vec()).expect("length checked");
-    let small_rgb = imageops::resize(&full, sw, sh, imageops::FilterType::Triangle);
+    let flat = rgb_samples(rgb, w, h);
+    let view = flat
+        .as_view::<Rgb<u8>>()
+        .expect("RGB buffer length checked above");
+    let small_rgb = imageops::resize(&view, sw, sh, imageops::FilterType::Triangle);
     let gray = imageops::grayscale(&small_rgb);
     let blurred = imageproc::filter::gaussian_blur_f32(&gray, 1.5);
     // Otsu binarization: adapts to the photo's own lighting instead of
@@ -75,16 +96,23 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
 
     // Largest contours first: the document is usually among the biggest
     // shapes; text/texture loops are rejected by area before fitting.
+    // Cheap prefilter during iteration (point count + bounding extent)
+    // keeps thousands of tiny texture loops from ever being materialized
+    // as f64 point vectors; the exact perimeter gate below is unchanged.
     let frame_area = f64::from(sw) * f64::from(sh);
     let mut contours: Vec<Vec<Point>> = imageproc::contours::find_contours::<u32>(&edges)
         .iter()
+        .filter(|c| {
+            c.points.len() >= MIN_CONTOUR_POINTS
+                && 2.0 * f64::from(contour_extent(&c.points)) >= MIN_CONTOUR_PERIMETER
+        })
         .map(|c| {
             c.points
                 .iter()
                 .map(|p| Point::new(f64::from(p.x), f64::from(p.y)))
                 .collect::<Vec<_>>()
         })
-        .filter(|pts| pts.len() >= 20 && poly_perimeter(pts) >= 50.0)
+        .filter(|pts| poly_perimeter(pts) >= MIN_CONTOUR_PERIMETER)
         .collect();
     contours.sort_by(|a, b| {
         poly_area(b)
@@ -218,6 +246,26 @@ fn poly_area(pts: &[Point]) -> f64 {
         sum += a.x * b.y - b.x * a.y;
     }
     sum.abs() / 2.0
+}
+
+/// Bounding-box extent (px) of a raw contour: `max(width, height)`.
+///
+/// A closed loop's perimeter is at least twice its bounding-box extent,
+/// so this is a cheap necessary condition for [`MIN_CONTOUR_PERIMETER`]:
+/// tiny loops are dropped before any `f64` points are allocated.
+fn contour_extent(pts: &[imageproc::point::Point<u32>]) -> u32 {
+    if pts.is_empty() {
+        return 0;
+    }
+    let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
+    let (mut max_x, mut max_y) = (0u32, 0u32);
+    for p in pts {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    (max_x - min_x).max(max_y - min_y)
 }
 
 /// Otsu's threshold: the gray level maximizing between-class variance.
@@ -698,6 +746,26 @@ mod tests {
             }
         }
         assert!(detect_document(&tiny, 400, 400).expect("runs").is_none());
+    }
+
+    #[test]
+    fn borrowed_rgb_view_downscales_like_an_owned_image() {
+        // Removing the full-resolution copy must not change a single
+        // detection pixel: the borrowed FlatSamples view has to downscale
+        // bit-identically to the previous owned `RgbImage` path.
+        let q = Quad::new(
+            Point::new(100.0, 120.0),
+            Point::new(540.0, 120.0),
+            Point::new(540.0, 680.0),
+            Point::new(100.0, 680.0),
+        );
+        let rgb = quad_fixture(640, 800, &q);
+        let owned = image::RgbImage::from_raw(640, 800, rgb.clone()).expect("fits");
+        let from_owned = imageops::resize(&owned, 80, 100, imageops::FilterType::Triangle);
+        let flat = rgb_samples(&rgb, 640, 800);
+        let view = flat.as_view::<Rgb<u8>>().expect("view");
+        let from_view = imageops::resize(&view, 80, 100, imageops::FilterType::Triangle);
+        assert_eq!(from_view.as_raw(), from_owned.as_raw());
     }
 
     #[test]

@@ -8,17 +8,21 @@
 //! Envelope convention (mirrors `folio-wasm`, scan-flavored):
 //!
 //! ```text
-//! scan_process(input: &[u8], mode: &str)
+//! scan_process(input: Vec<u8>, mode: &str, detect_only: bool)
 //!   → { result_json: string, output: Uint8Array | null }
 //!
 //! result_json = {
-//!   status: "processed" | "original" | "error",
+//!   status: "processed" | "detected" | "original" | "error",
 //!   width, height, mode,
 //!   corners: [[x,y] × 4] | null, confidence: number,
 //!   reason?: "no-document-detected",            // status "original"
 //!   code?: string, message?: string             // status "error"
 //! }
 //! ```
+//!
+//! `detect_only` is the live-guidance fast path: detection runs, warp and
+//! JPEG encoding do not (`status: "detected"`, `output: null`). The
+//! shutter always uses the full pipeline.
 //!
 //! "No document detected" is NOT an error: it returns status
 //! `"original"` with `output: null`, and the caller falls back to the
@@ -40,19 +44,27 @@ pub fn scan_init() {
 
 /// Runs one scan job over owned image bytes.
 ///
+/// `input`: JPEG/PNG bytes. Ownership moves into WASM (wasm-bindgen
+/// copies the JS buffer once, straight into the owned `Vec` — no second
+/// copy).
 /// `mode`: `"original" | "grayscale" | "blackwhite"` (see
-/// [`ScanMode::parse`]). Returns the envelope object described above.
-/// Engine errors surface as a JS throw carrying a short code string —
-/// transport failure, not scan semantics.
+/// [`ScanMode::parse`]).
+/// `detect_only`: skip warp + JPEG; answer with status `"detected"` and
+/// no output bytes (live guidance).
+///
+/// Returns the envelope object described above. Engine errors surface as
+/// a JS throw carrying a short code string — transport failure, not scan
+/// semantics.
 #[wasm_bindgen]
-pub fn scan_process(input: &[u8], mode: &str) -> Result<JsValue, JsValue> {
+pub fn scan_process(input: Vec<u8>, mode: &str, detect_only: bool) -> Result<JsValue, JsValue> {
     let mode = ScanMode::parse(mode).ok_or_else(|| {
         JsValue::from_str("unknown scan mode (expected original|grayscale|blackwhite)")
     })?;
     let mode_name = mode_name(mode);
     let outcome = scan_document(&ScanRequest {
-        bytes: input.to_vec(),
+        bytes: input,
         mode,
+        detect_only,
     });
     let output = match outcome {
         Ok(done) => {
@@ -71,6 +83,20 @@ pub fn scan_process(input: &[u8], mode: &str) -> Result<JsValue, JsValue> {
                         "corners": null,
                         "confidence": 0.0,
                         "reason": "no-document-detected",
+                    }),
+                    None,
+                ));
+            }
+            if detect_only {
+                // Live guidance: corners/confidence only — never bytes.
+                return Ok(envelope(
+                    &json!({
+                        "status": "detected",
+                        "width": done.width,
+                        "height": done.height,
+                        "mode": mode_name,
+                        "corners": corners,
+                        "confidence": round3(done.confidence),
                     }),
                     None,
                 ));

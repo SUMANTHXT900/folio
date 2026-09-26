@@ -12,10 +12,11 @@
  * create pages, replace previews, or resurrect sessions. Rapid captures
  * discard the previous pending review (latest wins).
  *
- * Live detection: `requestLive()` sends the LATEST frame only; calls
- * while a live request, capture scan, or review is active are skipped
- * (no queue of stale frames). Live corners are guidance ONLY — the
- * shutter always runs a fresh full-resolution detection.
+ * Live detection: `requestLive()` sends the LATEST frame only through
+ * the detect-only path (status `detected`, no warp/encode, no bytes);
+ * calls while a live request, capture scan, or review is active are
+ * skipped (no queue of stale frames). Live corners are guidance ONLY —
+ * the shutter always runs a fresh full-resolution detection.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -183,9 +184,10 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       try {
         const bytes = new Uint8Array(await frame.arrayBuffer());
         // Client is created lazily here: first live tick loads WASM.
-        const result = await client().process(bytes, 'original');
+        // detectOnly: guidance needs corners, never warped bytes.
+        const result = await client().process(bytes, 'original', true);
         if (genRef.current !== gen) return;
-        setLiveDetected(result.status === 'processed' && result.corners !== null);
+        setLiveDetected(result.status === 'detected' && result.corners !== null);
       } catch {
         if (genRef.current === gen) setLiveDetected(false);
       } finally {

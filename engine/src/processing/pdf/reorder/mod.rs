@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
-use crate::processing::pdf::core::copy::{copy_pages, find_invalid_page};
+use crate::processing::pdf::core::copy::{copy_pages_with_map, find_invalid_page};
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
 /// Input for [`ReorderOperation`]: owned PDF bytes plus an optional label.
@@ -146,19 +146,21 @@ impl Operation for ReorderOperation {
         // Validate the ENTIRE order before constructing anything.
         validate_order(&source, &options.order)?;
 
-        // Copied pages occupy the 10–95% band.
+        // Copied pages occupy the 10–95% band. The order was validated
+        // against the cached page map, which the copy reuses.
         let total = options.order.len() as u64;
-        let document = copy_pages(&source, &options.order, |done, _| {
-            ctx.check_cancellation()?;
-            let completed = 10 + (done as u64 * 85) / total.max(1);
-            ctx.report_progress(
-                Some("reordering pages"),
-                completed.min(95),
-                100,
-                Some(&format!("page {done} of {total}")),
-            );
-            Ok(())
-        })?;
+        let document =
+            copy_pages_with_map(&source, source.page_map(), &options.order, |done, _| {
+                ctx.check_cancellation()?;
+                let completed = 10 + (done as u64 * 85) / total.max(1);
+                ctx.report_progress(
+                    Some("reordering pages"),
+                    completed.min(95),
+                    100,
+                    Some(&format!("page {done} of {total}")),
+                );
+                Ok(())
+            })?;
 
         ctx.check_cancellation()?;
         ctx.report_progress(Some("finalizing"), 100, 100, Some("reorder complete"));

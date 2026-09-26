@@ -27,13 +27,13 @@ class FakeWorker {
   deliver(msg: ScanWorkerToMain): void {
     this.onmessage?.({ data: msg } as MessageEvent);
   }
-  processJob(): { jobId: string } {
+  processJob(): { jobId: string; mode: string; detectOnly: boolean } {
     const found = this.posted.find(
-      (p): p is { kind: string; jobId: string } =>
+      (p): p is { kind: string; jobId: string; mode: string; detectOnly: boolean } =>
         typeof p === 'object' && p !== null && (p as { kind?: string }).kind === 'process',
     );
     if (found === undefined) throw new Error('no process posted');
-    return { jobId: found.jobId };
+    return { jobId: found.jobId, mode: found.mode, detectOnly: found.detectOnly };
   }
 }
 
@@ -62,6 +62,23 @@ function fallbackJson(): string {
     corners: null,
     confidence: 0,
     reason: 'no-document-detected',
+  });
+}
+
+function detectedJson(confidence = 0.8): string {
+  return JSON.stringify({
+    status: 'detected',
+    width: 640,
+    height: 800,
+    mode: 'original',
+    // The WASM glue emits corner pairs as [x, y] arrays.
+    corners: [
+      [1, 1],
+      [2, 1],
+      [2, 2],
+      [1, 2],
+    ],
+    confidence,
   });
 }
 
@@ -95,7 +112,7 @@ async function startAndReady(
   });
   await act(async () => undefined);
   act(() => {
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
   });
   await waitFor(() => {
     expect(worker.posted.some((p) => (p as { kind?: string }).kind === 'process')).toBe(true);
@@ -113,11 +130,15 @@ describe('useScanProcessor', () => {
     const { result } = renderHook(() => useScanProcessor(() => worker as unknown as Worker));
     await startAndReady(result, worker, captureFile());
     expect(result.current.processing).toBe(true);
-    const { jobId } = worker.processJob();
+    const job = worker.processJob();
+    // Shutter path: full pipeline, never detect-only.
+    expect(job.mode).toBe('original');
+    expect(job.detectOnly).toBe(false);
+    const { jobId } = job;
     const out = new Uint8Array([7, 7]).buffer;
     act(() => {
       worker.deliver({
-        protocol: 1,
+        protocol: 2,
         kind: 'result',
         jobId,
         resultJson: processedJson(),
@@ -144,7 +165,7 @@ describe('useScanProcessor', () => {
     await startAndReady(result, worker, captureFile());
     const { jobId } = worker.processJob();
     act(() => {
-      worker.deliver({ protocol: 1, kind: 'result', jobId, resultJson: fallbackJson() });
+      worker.deliver({ protocol: 2, kind: 'result', jobId, resultJson: fallbackJson() });
     });
     await waitFor(() => expect(result.current.pending).not.toBeNull());
     expect(result.current.pending?.result.status).toBe('original');
@@ -169,7 +190,7 @@ describe('useScanProcessor', () => {
     expect(worker.terminated).toBe(true);
     expect(result.current.pending).toBeNull();
     act(() => {
-      worker.deliver({ protocol: 1, kind: 'result', jobId, resultJson: processedJson() });
+      worker.deliver({ protocol: 2, kind: 'result', jobId, resultJson: processedJson() });
     });
     await new Promise((r) => setTimeout(r, 50));
     expect(result.current.pending).toBeNull();
@@ -189,7 +210,7 @@ describe('useScanProcessor', () => {
     });
     await act(async () => undefined);
     act(() => {
-      worker.deliver({ protocol: 1, kind: 'ready' });
+      worker.deliver({ protocol: 2, kind: 'ready' });
     });
     await waitFor(() => {
       const jobs = worker.posted.filter(
@@ -205,7 +226,7 @@ describe('useScanProcessor', () => {
     // First resolves late: must not install.
     act(() => {
       worker.deliver({
-        protocol: 1,
+        protocol: 2,
         kind: 'result',
         jobId: jobs[0].jobId,
         resultJson: processedJson(),
@@ -214,7 +235,7 @@ describe('useScanProcessor', () => {
     });
     act(() => {
       worker.deliver({
-        protocol: 1,
+        protocol: 2,
         kind: 'result',
         jobId: jobs[1].jobId,
         resultJson: processedJson(),
@@ -235,16 +256,24 @@ describe('useScanProcessor', () => {
     });
     await act(async () => undefined);
     act(() => {
-      worker.deliver({ protocol: 1, kind: 'ready' });
+      worker.deliver({ protocol: 2, kind: 'ready' });
     });
     const jobs = worker.posted.filter(
       (p) => typeof p === 'object' && p !== null && (p as { kind?: string }).kind === 'process',
     );
     expect(jobs).toHaveLength(1);
+    // Live tick is deliberately detect-only: no warp, no encoded bytes.
+    const live = jobs[0] as { jobId: string; mode: string; detectOnly: boolean };
+    expect(live.mode).toBe('original');
+    expect(live.detectOnly).toBe(true);
     expect(result.current.liveDetected).toBe(false);
-    const { jobId } = jobs[0] as { jobId: string };
     act(() => {
-      worker.deliver({ protocol: 1, kind: 'result', jobId, resultJson: processedJson(0.9) });
+      worker.deliver({
+        protocol: 2,
+        kind: 'result',
+        jobId: live.jobId,
+        resultJson: detectedJson(0.9),
+      });
     });
     await waitFor(() => expect(result.current.liveDetected).toBe(true));
   });

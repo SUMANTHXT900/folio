@@ -70,63 +70,79 @@ export function isPngFile(file: File): boolean {
   if (file.type === 'image/jpeg') return false;
   return /\.png$/i.test(file.name);
 }
-/** Minimal renderer seam so planning logic is testable without a DOM. */
-export interface ImportRenderer {
-  decode(file: File | Blob): Promise<ImageDimensions>;
-  resizeToJpeg(file: File | Blob, target: ImageDimensions, quality: number): Promise<Uint8Array>;
+/**
+ * One decode's result: pixel dimensions plus the live decoder handle.
+ * `resizeToJpeg` reads pixels from `bitmap`; the caller releases it via
+ * `ImportRenderer.close` in a `finally`.
+ */
+export interface DecodedImage extends ImageDimensions {
+  /** Renderer-private handle (`ImageBitmap` in the browser). */
+  bitmap: unknown;
 }
 
-/** Browser renderer: one decode, one canvas, both released immediately. */
+/** Minimal renderer seam so planning logic is testable without a DOM. */
+export interface ImportRenderer {
+  /** Decodes ONCE; the caller must release the handle via `close`. */
+  decode(file: File | Blob): Promise<DecodedImage>;
+  /** Re-encodes the decoded pixels; never re-reads the source file. */
+  resizeToJpeg(
+    decoded: DecodedImage,
+    target: ImageDimensions,
+    quality: number,
+  ): Promise<Uint8Array>;
+  /** Releases a decode's backing memory (browser: `ImageBitmap.close`). */
+  close(decoded: DecodedImage): void;
+}
+
+/** Browser renderer: one decode serves dimensions + resize. */
 export const browserImportRenderer: ImportRenderer = {
   async decode(file) {
     const bitmap = await createImageBitmap(file);
-    try {
-      return { width: bitmap.width, height: bitmap.height };
-    } finally {
-      bitmap.close();
-    }
+    return { width: bitmap.width, height: bitmap.height, bitmap };
   },
 
-  async resizeToJpeg(file, target, quality) {
-    const bitmap = await createImageBitmap(file);
-    try {
-      const canvas =
-        typeof OffscreenCanvas !== 'undefined'
-          ? new OffscreenCanvas(target.width, target.height)
-          : document.createElement('canvas');
-      if (canvas instanceof HTMLCanvasElement) {
-        canvas.width = target.width;
-        canvas.height = target.height;
-      }
-      const ctx = (canvas as HTMLCanvasElement | OffscreenCanvas).getContext('2d') as
-        CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-      if (ctx === null) throw new Error('2D canvas unavailable for import normalization.');
-      // White-fill first: transparent PNG pixels must composite to white
-      // (JPEG has no alpha; an unfilled canvas bakes them to black).
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, target.width, target.height);
-      ctx.drawImage(bitmap, 0, 0, target.width, target.height);
-      if (canvas instanceof HTMLCanvasElement) {
-        const blob = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob(resolve, 'image/jpeg', quality),
-        );
-        canvas.width = 0;
-        canvas.height = 0;
-        if (blob === null) throw new Error('Import re-encode failed.');
-        return new Uint8Array(await blob.arrayBuffer());
-      }
-      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
-      return new Uint8Array(await blob.arrayBuffer());
-    } finally {
-      bitmap.close();
+  async resizeToJpeg(decoded, target, quality) {
+    const bitmap = decoded.bitmap as ImageBitmap;
+    const canvas =
+      typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(target.width, target.height)
+        : document.createElement('canvas');
+    if (canvas instanceof HTMLCanvasElement) {
+      canvas.width = target.width;
+      canvas.height = target.height;
     }
+    const ctx = (canvas as HTMLCanvasElement | OffscreenCanvas).getContext('2d') as
+      CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    if (ctx === null) throw new Error('2D canvas unavailable for import normalization.');
+    // White-fill first: transparent PNG pixels must composite to white
+    // (JPEG has no alpha; an unfilled canvas bakes them to black).
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, target.width, target.height);
+    ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+    if (canvas instanceof HTMLCanvasElement) {
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, 'image/jpeg', quality),
+      );
+      canvas.width = 0;
+      canvas.height = 0;
+      if (blob === null) throw new Error('Import re-encode failed.');
+      return new Uint8Array(await blob.arrayBuffer());
+    }
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+    return new Uint8Array(await blob.arrayBuffer());
+  },
+
+  close(decoded) {
+    (decoded.bitmap as ImageBitmap).close();
   },
 };
 
 /**
- * Prepares ONE selected file for import. Decodes a single bitmap,
- * decides by pixel dimensions, and either retains the original bytes or
- * re-encodes once — no temporary object URLs, no retained canvas.
+ * Prepares ONE selected file for import. Decodes a single bitmap ONCE
+ * (dimension check + re-encode share it), decides by pixel dimensions,
+ * and either retains the original bytes or re-encodes once — no
+ * temporary object URLs, no retained canvas. The decode handle is
+ * released exactly once, in this function's `finally`.
  * PNGs always re-encode (white-filled JPEG): retained PNG bytes would
  * embed as uncompressed raw RGB downstream.
  */
@@ -137,30 +153,35 @@ export async function prepareImportFile(
 ): Promise<PrepareImportResult> {
   const maxLongEdge = options.maxLongEdge ?? MAX_IMPORT_LONG_EDGE;
   const quality = options.quality ?? IMPORT_JPEG_QUALITY;
-  const dims = await renderer.decode(file);
-  if (!(dims.width > 0 && dims.height > 0)) {
-    throw new Error(`could not read image dimensions for ${file.name}`);
-  }
-  const target = planNormalization(dims, maxLongEdge);
-  if (target === null && !isPngFile(file)) {
+  const decoded = await renderer.decode(file);
+  try {
+    const dims: ImageDimensions = { width: decoded.width, height: decoded.height };
+    if (!(dims.width > 0 && dims.height > 0)) {
+      throw new Error(`could not read image dimensions for ${file.name}`);
+    }
+    const target = planNormalization(dims, maxLongEdge);
+    if (target === null && !isPngFile(file)) {
+      return {
+        file,
+        name: file.name,
+        retainedOriginal: true,
+        width: dims.width,
+        height: dims.height,
+      };
+    }
+    const size = target ?? dims;
+    const bytes = await renderer.resizeToJpeg(decoded, size, quality);
+    const name = file.name.replace(/\.(jpe?g|png)$/i, '') + '.jpg';
     return {
-      file,
-      name: file.name,
-      retainedOriginal: true,
-      width: dims.width,
-      height: dims.height,
+      file: new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' }),
+      name,
+      retainedOriginal: false,
+      width: size.width,
+      height: size.height,
     };
+  } finally {
+    renderer.close(decoded);
   }
-  const size = target ?? dims;
-  const bytes = await renderer.resizeToJpeg(file, size, quality);
-  const name = file.name.replace(/\.(jpe?g|png)$/i, '') + '.jpg';
-  return {
-    file: new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' }),
-    name,
-    retainedOriginal: false,
-    width: size.width,
-    height: size.height,
-  };
 }
 
 /** One queued file's outcome. */

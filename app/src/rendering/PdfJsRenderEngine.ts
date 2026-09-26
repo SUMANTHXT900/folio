@@ -51,6 +51,18 @@ interface OpenDocument {
   closed: boolean;
   /** Cancellers for in-flight renders; drained on close. */
   pendingRenders: Set<() => void>;
+  /**
+   * Scale-1 page geometry, keyed by page number + requested rotation
+   * ('auto' = intrinsic). Populated by `getPageDimensions`, seeded by
+   * `renderPage`; a document's geometry never changes while it is open, so
+   * the map is dropped with the record in `closeDocument`.
+   */
+  dimensions: Map<string, PageDimensions>;
+}
+
+/** Cache key for `OpenDocument.dimensions`: page + requested rotation. */
+function dimensionsKey(pageNumber: number, overrideRotation: number | undefined): string {
+  return `${pageNumber}|${overrideRotation ?? 'auto'}`;
 }
 
 function measureTiming(startedAt: string, startMark: number): RenderTiming {
@@ -161,6 +173,7 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           loadingTask,
           closed: false,
           pendingRenders: new Set(),
+          dimensions: new Map(),
         });
         return {
           document: snapshot(this.documents.get(id) as OpenDocument),
@@ -215,8 +228,38 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
         });
       }
       validatePageNumber(pageNumber, record.handle.pageCount);
-      const scale = normalizeScale(options?.scale);
+      const requestedScale = options?.scale;
+      const targetBox = options?.targetBox;
+      // Validated up front so existing callers keep failing before any
+      // PDF.js work; the fitted scale is normalized after the page load.
+      const explicitScale = normalizeScale(requestedScale);
       const overrideRotation = normalizeRotation(options?.rotation);
+      if (targetBox !== undefined) {
+        if (requestedScale !== undefined) {
+          throw new RenderError(
+            'RENDER_INVALID_INPUT',
+            'renderPage accepts either scale or targetBox, not both',
+            context,
+          );
+        }
+        if (
+          typeof targetBox.width !== 'number' ||
+          typeof targetBox.height !== 'number' ||
+          !Number.isFinite(targetBox.width) ||
+          !Number.isFinite(targetBox.height) ||
+          targetBox.width <= 0 ||
+          targetBox.height <= 0
+        ) {
+          throw new RenderError(
+            'RENDER_INVALID_INPUT',
+            `render target box must be finite positive dimensions, got ${String(targetBox.width)}x${String(targetBox.height)}`,
+            {
+              details: `targetBox=${String(targetBox.width)}x${String(targetBox.height)}`,
+              ...context,
+            },
+          );
+        }
+      }
       if (!(canvas instanceof HTMLCanvasElement)) {
         throw new RenderError(
           'RENDER_INVALID_INPUT',
@@ -246,6 +289,31 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           }
           const intrinsic = ((pdfPage.rotate % 360) + 360) % 360;
           const rotation = overrideRotation ?? intrinsic;
+          // Scale-1 geometry from pure viewport math on the page already
+          // fetched above — no second PDF.js page access. This is the
+          // geometry a thumbnail fit needs.
+          const sourceViewport = pdfPage.getViewport({ scale: 1, rotation });
+          const sourceWidth = sourceViewport.width;
+          const sourceHeight = sourceViewport.height;
+          if (
+            !Number.isFinite(sourceWidth) ||
+            !Number.isFinite(sourceHeight) ||
+            sourceWidth <= 0 ||
+            sourceHeight <= 0
+          ) {
+            throw new RenderError('RENDER_PAGE_FAILED', 'viewport produced empty dimensions', {
+              details: `viewport=${String(sourceWidth)}x${String(sourceHeight)} scale=1`,
+              ...context,
+            });
+          }
+          // Fit-to-box (thumbnail case): ONE getPage serves both the
+          // dimension read and the render. Explicit scale wins when given.
+          const scale =
+            targetBox === undefined
+              ? explicitScale
+              : normalizeScale(
+                  Math.min(targetBox.width / sourceWidth, targetBox.height / sourceHeight),
+                );
           const viewport = pdfPage.getViewport({ scale, rotation });
           // Integer bitmap size (deterministic floor); reported geometry is
           // what future thumbnails/viewer code must trust.
@@ -273,7 +341,25 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           if (cancelled || record.closed) {
             throw new RenderError('RENDER_CANCELLED', 'page render was cancelled', context);
           }
-          const page: RenderedPage = { documentId, pageNumber, scale, rotation, width, height };
+          const page: RenderedPage = {
+            documentId,
+            pageNumber,
+            scale,
+            rotation,
+            width,
+            height,
+            sourceWidth,
+            sourceHeight,
+          };
+          // Seed the dimension cache from this render, so a later
+          // getPageDimensions for the same page/rotation needs no getPage.
+          record.dimensions.set(dimensionsKey(pageNumber, overrideRotation), {
+            documentId,
+            pageNumber,
+            width: sourceWidth,
+            height: sourceHeight,
+            rotation,
+          });
           return { page, timing: measureTiming(startedAt, startMark) };
         } finally {
           // Release per-page operator lists; the document stays open for re-render.
@@ -308,6 +394,8 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
     }
     record.closed = true;
     this.documents.delete(documentId);
+    // Cached geometry dies with the document record (the only teardown).
+    record.dimensions.clear();
     // In-flight renders reject with RENDER_CANCELLED via the closed flag.
     record.pendingRenders.forEach((fn) => fn());
     record.pendingRenders.clear();
@@ -330,6 +418,12 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
     }
     validatePageNumber(pageNumber, record.handle.pageCount);
     const overrideRotation = normalizeRotation(rotation);
+    const cacheKey = dimensionsKey(pageNumber, overrideRotation);
+    const cached = record.dimensions.get(cacheKey);
+    if (cached !== undefined) {
+      // Copy out: callers never share mutable state with the cache.
+      return { ...cached };
+    }
     try {
       // PDF.js pages are 1-based, matching Folio's convention — no index translation.
       const pdfPage = await record.proxy.getPage(pageNumber);
@@ -348,7 +442,15 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
             ...context,
           });
         }
-        return { documentId, pageNumber, width, height, rotation: effectiveRotation };
+        const dimensions: PageDimensions = {
+          documentId,
+          pageNumber,
+          width,
+          height,
+          rotation: effectiveRotation,
+        };
+        record.dimensions.set(cacheKey, dimensions);
+        return { ...dimensions };
       } finally {
         // Release per-page operator lists; the document stays open for re-render.
         pdfPage.cleanup();

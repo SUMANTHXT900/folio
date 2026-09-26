@@ -28,12 +28,18 @@ class FakeWorker {
     this.onmessage?.({ data: msg } as MessageEvent);
   }
 
-  lastProcess(): { jobId: string; mode: string; buffer: ArrayBuffer } {
+  lastProcess(): { jobId: string; mode: string; buffer: ArrayBuffer; detectOnly: boolean } {
     const found = this.posted.find(
       (
         p,
       ): p is {
-        message: { kind: string; jobId: string; mode: string; buffer: ArrayBuffer };
+        message: {
+          kind: string;
+          jobId: string;
+          mode: string;
+          buffer: ArrayBuffer;
+          detectOnly: boolean;
+        };
         transfer?: unknown;
       } =>
         typeof p.message === 'object' &&
@@ -45,6 +51,7 @@ class FakeWorker {
       jobId: found.message.jobId,
       mode: found.message.mode,
       buffer: found.message.buffer,
+      detectOnly: found.message.detectOnly,
     };
   }
 }
@@ -70,13 +77,14 @@ describe('ScanWorkerClient', () => {
     const worker = new FakeWorker();
     const client = new ScanWorkerClient(() => worker as unknown as Worker);
     const done = client.process(new Uint8Array([1, 2, 3]), 'original');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     const req = worker.lastProcess();
     expect(req.mode).toBe('original');
+    expect(req.detectOnly).toBe(false);
     expect(new Uint8Array(req.buffer)).toEqual(new Uint8Array([1, 2, 3]));
     const out = new Uint8Array([9, 9]).buffer;
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req.jobId,
       resultJson: processedJson(),
@@ -90,14 +98,52 @@ describe('ScanWorkerClient', () => {
     expect(result.wallMs).toBeGreaterThanOrEqual(0);
   });
 
+  it('maps a detect-only result with array corners and no bytes', async () => {
+    const worker = new FakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.process(new Uint8Array([6, 6]), 'original', true);
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastProcess();
+    expect(req.detectOnly).toBe(true);
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      // The WASM glue emits corner pairs as [x, y] arrays.
+      resultJson: JSON.stringify({
+        status: 'detected',
+        width: 640,
+        height: 800,
+        mode: 'original',
+        corners: [
+          [10, 10],
+          [630, 10],
+          [630, 790],
+          [10, 790],
+        ],
+        confidence: 0.9,
+      }),
+    });
+    const result = await done;
+    expect(result.status).toBe('detected');
+    expect(result.corners).toEqual([
+      { x: 10, y: 10 },
+      { x: 630, y: 10 },
+      { x: 630, y: 790 },
+      { x: 10, y: 790 },
+    ]);
+    expect(result.confidence).toBeCloseTo(0.9);
+    expect(result.bytes).toBeNull();
+  });
+
   it('maps fallback distinctly from errors', async () => {
     const worker = new FakeWorker();
     const client = new ScanWorkerClient(() => worker as unknown as Worker);
     const done = client.process(new Uint8Array([4]), 'grayscale');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     const req = worker.lastProcess();
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req.jobId,
       resultJson: JSON.stringify({
@@ -120,10 +166,10 @@ describe('ScanWorkerClient', () => {
     const worker = new FakeWorker();
     const client = new ScanWorkerClient(() => worker as unknown as Worker);
     const done = client.process(new Uint8Array([5]), 'blackwhite');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     const req = worker.lastProcess();
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req.jobId,
       resultJson: JSON.stringify({ status: 'error', code: 'decode-failed', message: 'bad bytes' }),
@@ -141,13 +187,13 @@ describe('ScanWorkerClient', () => {
       return current as unknown as Worker;
     });
     const first = client.process(new Uint8Array([1]), 'original');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     const req = worker.lastProcess();
     client.terminate();
     await expect(first).rejects.toMatchObject({ code: 'SCAN_CANCELLED' });
     // Late result for the dead epoch: must not throw, must not resolve.
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req.jobId,
       resultJson: processedJson(),
@@ -156,10 +202,10 @@ describe('ScanWorkerClient', () => {
     worker = new FakeWorker();
     factories.push(worker);
     const second = client.process(new Uint8Array([2]), 'original');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     const req2 = worker.lastProcess();
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req2.jobId,
       resultJson: processedJson(),
@@ -173,7 +219,7 @@ describe('ScanWorkerClient', () => {
     const worker = new FakeWorker();
     const client = new ScanWorkerClient(() => worker as unknown as Worker);
     const done = client.process(new Uint8Array([1]), 'original');
-    worker.deliver({ protocol: 1, kind: 'fatal', jobId: null, message: 'wasm exploded' });
+    worker.deliver({ protocol: 2, kind: 'fatal', jobId: null, message: 'wasm exploded' });
     const result = await done;
     expect(result.status).toBe('error');
     expect(result.code).toBe('worker-fatal');
@@ -184,12 +230,12 @@ describe('ScanWorkerClient', () => {
     const worker = new FakeWorker();
     const client = new ScanWorkerClient(() => worker as unknown as Worker);
     const done = client.process(new Uint8Array([1]), 'original');
-    worker.deliver({ protocol: 1, kind: 'ready' });
+    worker.deliver({ protocol: 2, kind: 'ready' });
     worker.deliver({ protocol: 999, kind: 'ready' } as unknown as ScanWorkerToMain);
     worker.deliver(null as unknown as ScanWorkerToMain);
     const req = worker.lastProcess();
     worker.deliver({
-      protocol: 1,
+      protocol: 2,
       kind: 'result',
       jobId: req.jobId,
       resultJson: processedJson(),

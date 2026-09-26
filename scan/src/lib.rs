@@ -10,9 +10,12 @@
 //! Pipeline (`pipeline::scan_document`):
 //!
 //! ```text
-//! JPEG/PNG bytes → decode → detect (downscaled copy) → warp (full-res)
-//!   → enhance (mode) → JPEG bytes + corners + confidence
+//! JPEG/PNG bytes → decode → detect (downscaled, borrowed)
+//!   → warp (full-res) → enhance (mode) → JPEG bytes + corners + confidence
 //! ```
+//!
+//! `ScanRequest::detect_only` stops after detection (corners/confidence,
+//! no output bytes) — the live-guidance fast path.
 //!
 //! Detection failure is never fatal: the pipeline returns the original
 //! bytes with `fallback: true` so the caller can offer "Use original".

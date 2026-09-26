@@ -33,25 +33,27 @@ import/capture decode → encode         main thread (normalization)          �
 
 ## Findings register
 
-| #   | Finding                                                                                                                                                                                                            | Where                                                                          | Impact     | Effort | Status   |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ---------- | ------ | -------- |
-| 1   | Rendering-backed inputs are `slice()`d in full on the main thread before every execution; the store copy cannot be transferred because re-runs need it.                                                            | `app/src/engine/WasmWorkerEngineAdapter.ts:213-229`                            | **High**   | S      | verified |
-| 2   | WASM intake copies each input twice: `Uint8Array::to_vec()` into `Vec<Vec<u8>>`, then `input_at` `clone()`s again per dispatch (≈2× file size resident in WASM).                                                   | `wasm/src/lib.rs:941-950`, `:513`                                              | **High**   | S      | verified |
-| 3   | `PdfDocument::page_count()` rebuilds the full page map (`get_pages()`) on every call; per-page loops that call geometry/rotation helpers become O(N²).                                                             | `engine/src/processing/pdf/core/document.rs:87-89` (+ `:139-182`, `:239-271`)  | **High**   | M      | verified |
-| 4   | Rotate deep-copies **every** page (all streams, images) even when one page is selected, then does per-selected-page traversals. Any rotate on a large doc rewrites the whole file.                                 | `engine/src/processing/pdf/rotate/mod.rs:178-207`                              | **High**   | M      | verified |
-| 5   | Inspect-detailed does one page-tree rebuild per page.                                                                                                                                                              | `engine/src/processing/pdf/inspect/mod.rs:185-204`                             | **High**   | S      | verified |
-| 6   | `copy_pages` re-derives page count, re-runs `find_invalid_page`, and re-resolves the page map even though callers validated already; split repeats it per part (~4 traversals/part).                               | `engine/src/processing/pdf/core/copy.rs:78-91`; `split/mod.rs` (per part)      | **High**   | M      | verified |
-| 7   | One progress event per page: `format!` → event → JSON → `postMessage` → `JSON.parse` → React `setState` per page. 1000 pages ≈ 2000 events/renders.                                                                | `engine/src/processing/pdf/*/mod.rs` loops; `wasm/src/lib.rs:244-251`; adapter | **High**   | S      | verified |
-| 8   | Every thumbnail does two PDF.js `getPage` round-trips (dims, then render); each triggers parse/cleanup. 100-page doc wave ≈ 200 round-trips.                                                                       | `DefaultPdfThumbnailEngine.ts:286,315`; `PdfJsRenderEngine.ts:242`             | **High**   | S      | verified |
-| 9   | Scan pipeline duplicates full-res RGB: `to_rgb8()` clone + `RgbImage::from_raw(rgb.to_vec())` inside detection, plus glue `to_vec()`. 12 MP capture ≈ 3× 36 MB churn.                                              | `scan/src/pipeline.rs:61-82`; `scan/src/detect.rs` (`from_raw`)                | **High**   | S      | verified |
-| 10  | Live detection runs the full warp + JPEG encode and throws the bytes away; only `status`/`corners` are read.                                                                                                       | `scan/src/pipeline.rs:70-88`; `useScanProcessor.ts` live path                  | Medium     | S      | verified |
-| 11  | Import normalizes with a double decode (bitmap for dims, then again to resize) and serial main-thread canvas encodes.                                                                                              | `app/src/studio/tools/imageImport.ts:140,155,90-119`                           | Medium     | M      | reported |
-| 12  | Capture encodes full-res JPEG on the main thread at shutter.                                                                                                                                                       | `CameraCapture.tsx` capture path                                               | Medium     | M      | reported |
-| 13  | Thumbnail encode (`toBlob` webp→jpeg→png) is sequential per batch on the main thread for 24 live canvases.                                                                                                         | `folio.ts:383-413` (encode), `:498-505`                                        | Medium     | S      | reported |
-| 14  | `ExecutionStrategy::Parallel` + `InputTransfer`-grade hints exist but the scheduler always returns `Inline`; `OperationCapabilities` parallelism is unused. Loophole: README of the scheduler suggests capability. | `engine/src/execution/scheduler.rs:22-51`                                      | Medium     | M      | verified |
-| 15  | Dead perf surfaces: `binaryStore.copyBytes`, `getStudioBytes` have no callers; `apply_mode` re-encode path unreachable from UI (latent double decode/encode).                                                      | `app/src/engine/binaryStore.ts`; `scan/src/pipeline.rs:83-88`                  | Low        | S      | reported |
-| 16  | Detection collects all contours before filtering (thousands of tiny `Vec`s at 800 px) rather than filtering cheaply first.                                                                                         | `scan/src/detect.rs:79-88`                                                     | Low-Medium | S      | verified |
-| 17  | Full-res previews re-render per open (scale 2, webp encode), cached only per-mount in tool state, not in a service LRU.                                                                                            | `folio.ts:532-543`; `RearrangeTool.tsx:164-180`                                | Low-Medium | S      | reported |
+Status: ✅ = fixed in the 2026-09-26 performance pass; ◻ = open (phase in parentheses). Every finding was either **verified** (read directly in source by the planning pass) or **reported** (found by the audit pass) before it was fixed.
+
+| #   | Finding                                                                                                                                                                                                            | Where                                                                          | Impact     | Effort | Status                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ---------- | ------ | --------------------- |
+| 1   | Rendering-backed inputs are `slice()`d in full on the main thread before every execution; the store copy cannot be transferred because re-runs need it.                                                            | `app/src/engine/WasmWorkerEngineAdapter.ts:213-229`                            | **High**   | S      | ◻ design-gated (P0.2) |
+| 2   | WASM intake copies each input twice: `Uint8Array::to_vec()` into `Vec<Vec<u8>>`, then `input_at` `clone()`s again per dispatch (≈2× file size resident in WASM).                                                   | `wasm/src/lib.rs:941-950`, `:513`                                              | **High**   | S      | ✅ verified           |
+| 3   | `PdfDocument::page_count()` rebuilds the full page map (`get_pages()`) on every call; per-page loops that call geometry/rotation helpers become O(N²).                                                             | `engine/src/processing/pdf/core/document.rs:87-89` (+ `:139-182`, `:239-271`)  | **High**   | M      | ✅ verified           |
+| 4   | Rotate deep-copies **every** page (all streams, images) even when one page is selected, then does per-selected-page traversals. Any rotate on a large doc rewrites the whole file.                                 | `engine/src/processing/pdf/rotate/mod.rs:178-207`                              | **High**   | M      | ✅ verified           |
+| 5   | Inspect-detailed does one page-tree rebuild per page.                                                                                                                                                              | `engine/src/processing/pdf/inspect/mod.rs:185-204`                             | **High**   | S      | ✅ verified           |
+| 6   | `copy_pages` re-derives page count, re-runs `find_invalid_page`, and re-resolves the page map even though callers validated already; split repeats it per part (~4 traversals/part).                               | `engine/src/processing/pdf/core/copy.rs:78-91`; `split/mod.rs` (per part)      | **High**   | M      | ✅ verified           |
+| 7   | One progress event per page: `format!` → event → JSON → `postMessage` → `JSON.parse` → React `setState` per page. 1000 pages ≈ 2000 events/renders.                                                                | `engine/src/processing/pdf/*/mod.rs` loops; `wasm/src/lib.rs:244-251`; adapter | **High**   | S      | ✅ verified           |
+| 8   | Every thumbnail does two PDF.js `getPage` round-trips (dims, then render); each triggers parse/cleanup. 100-page doc wave ≈ 200 round-trips.                                                                       | `DefaultPdfThumbnailEngine.ts:286,315`; `PdfJsRenderEngine.ts:242`             | **High**   | S      | ✅ verified           |
+| 9   | Scan pipeline duplicates full-res RGB: `to_rgb8()` clone + `RgbImage::from_raw(rgb.to_vec())` inside detection, plus glue `to_vec()`. 12 MP capture ≈ 3× 36 MB churn.                                              | `scan/src/pipeline.rs:61-82`; `scan/src/detect.rs` (`from_raw`)                | **High**   | S      | ✅ verified           |
+| 10  | Live detection runs the full warp + JPEG encode and throws the bytes away; only `status`/`corners` are read.                                                                                                       | `scan/src/pipeline.rs:70-88`; `useScanProcessor.ts` live path                  | Medium     | S      | ✅ verified           |
+| 11  | Import normalizes with a double decode (bitmap for dims, then again to resize) and serial main-thread canvas encodes.                                                                                              | `app/src/studio/tools/imageImport.ts:140,155,90-119`                           | Medium     | M      | ✅ reported           |
+| 12  | Capture encodes full-res JPEG on the main thread at shutter.                                                                                                                                                       | `CameraCapture.tsx` capture path                                               | Medium     | M      | ◻ (P2)                |
+| 13  | Thumbnail encode (`toBlob` webp→jpeg→png) is sequential per batch on the main thread for 24 live canvases.                                                                                                         | `folio.ts:383-413` (encode), `:498-505`                                        | Medium     | S      | ◻ (P2)                |
+| 14  | `ExecutionStrategy::Parallel` + `InputTransfer`-grade hints exist but the scheduler always returns `Inline`; `OperationCapabilities` parallelism is unused. Loophole: README of the scheduler suggests capability. | `engine/src/execution/scheduler.rs:22-51`                                      | Medium     | M      | ◻ (P3)                |
+| 15  | Dead perf surfaces: `binaryStore.copyBytes`, `getStudioBytes` have no callers; `apply_mode` re-encode path unreachable from UI (latent double decode/encode).                                                      | `app/src/engine/binaryStore.ts`; `scan/src/pipeline.rs:83-88`                  | Low        | S      | ◻ (P2/P3)             |
+| 16  | Detection collects all contours before filtering (thousands of tiny `Vec`s at 800 px) rather than filtering cheaply first.                                                                                         | `scan/src/detect.rs:79-88`                                                     | Low-Medium | S      | ✅ verified           |
+| 17  | Full-res previews re-render per open (scale 2, webp encode), cached only per-mount in tool state, not in a service LRU.                                                                                            | `folio.ts:532-543`; `RearrangeTool.tsx:164-180`                                | Low-Medium | S      | ◻ (P2)                |
 
 ## Parallel computing: reality check
 
@@ -66,23 +68,23 @@ import/capture decode → encode         main thread (normalization)          �
 
 ## Phased plan
 
-### P0 — Copy elimination & event hygiene (est. 1–2 focused days)
+### P0 — Copy elimination & event hygiene (est. 1–2 focused days) — **implemented 2026-09-26**
 
-1. **Glue ownership fix (finding 2).** `dispatch` consumes the blob vec (`std::mem::take`/`by-value`) instead of cloning; `read_blob_array` stays the single JS→WASM copy (unavoidable without shared memory).
-2. **Main-thread slice removal (finding 1).** Design: store a re-readable source (`File`/`Blob` handle) for opened docs; execution reads a fresh `ArrayBuffer` per run (transferable, no resident duplicate). Keep current behavior when only bytes exist. Requires care with PDF.js ownership (F-2) and `__resetStudioForTests`.
-3. **Progress coalescing (finding 7).** Emit on Δ≥1% or every 32 pages (whichever first), plus first/last; batch multi-event posts in the adapter. Contract unchanged (events are advisory).
-4. **Scan pipeline (findings 9, 10).** Pass `&[u8]` from `to_rgb8().as_raw()` into detection/warp (drop `RgbImage::from_raw` copy); accept owned bytes in `scan_process`; add `detect_only` to the live path so guidance never warps/encodes.
-5. **Import double decode (finding 11).** `decode` returns the `ImageBitmap`; resize draws from it and closes it.
+1. **Glue ownership fix (finding 2).** ✅ `dispatch` consumes the blob vec (`std::mem::take`); only the unavoidable JS→WASM copy remains; 5 new glue unit tests.
+2. **Main-thread slice removal — design-gated, NOT a pure win (finding 1).** The store's resident copy is what makes re-runs copy-free; removing the `slice()` means re-reading from the retained `File` per run (async, browser-managed, no second resident copy) at the cost of disk I/O — a memory-vs-latency trade that must be decided with P4 measurements on real devices. Design notes recorded; no implementation until measured.
+3. **Progress coalescing (finding 7).** ✅ Implemented at the WASM glue sink: lifecycle always passes, phase changes pass, Δpercentage ≥ 1 passes, terminal 100 always passes; wire shape unchanged (fewer messages).
+4. **Scan pipeline (findings 9, 10).** ✅ Borrowed-view detection (no full-res copy), `into_rgb8()` move, `detect_only` live path (no warp/encode/bytes; protocol v2), contour prefilter. Also fixed a latent corner-parsing bug that disabled live detection entirely (BUGS F-17).
+5. **Import double decode (finding 11).** ✅ One decode per file via a live-bitmap seam, closed exactly once on every path.
 
 **Acceptance:** identical outputs (byte-level tests for passthrough paths), one fewer full-file copy per run and per input; live mode never encodes; all suites green; E2E runtimes unchanged or better.
 
-### P1 — Algorithmic single-pass operations (est. 2–3 focused days)
+### P1 — Algorithmic single-pass operations (est. 2–3 focused days) — **implemented 2026-09-26**
 
-6. **Page-map cache (finding 3).** Resolve once per `PdfDocument`, invalidate on mutation; pass into validation/copy helpers. Kills the O(N²) multiplier for inspect, rotate, split, merge, delete, reorder.
-7. **Rotate in place (finding 4).** Apply `/Rotate` on the freshly parsed input document (no full deep copy), resolve the page map once for the selection.
-8. **Split/copy single-pass (finding 6).** Validate all parts against one resolved map; `copy_pages` takes the map; drop duplicate validation where the caller proved it.
-9. **Thumbnail single `getPage` (finding 8).** `renderPage` returns its viewport geometry; thumbnail engine computes geometry from it; keep `getPageDimensions` for non-render callers with a small per-doc dims cache.
-10. **Contour filtering before materialization (finding 16).** Cheap bbox/point-count filter during iteration; keep only top candidates.
+6. **Page-map cache (finding 3).** ✅ `PdfDocument` owns a lazy page-map cache with explicit invalidation; every internal lookup uses it.
+7. **Rotate in place (finding 4).** ✅ The private parse is mutated in place; one traversal resolves the selection and writes `/Rotate`; ancestor-`/Rotate` unselected pages keep their inherited rotation (pre-existing semantics tests pass; the `page_geometry` accumulation quirk is unchanged and documented in code).
+8. **Split/copy single-pass (finding 6).** ✅ `copy_pages_with_map` validates against a caller-resolved map; split/delete/reorder use it; error codes/messages unchanged.
+9. **Thumbnail single `getPage` (finding 8).** ✅ `renderPage` fits to a `targetBox` and returns `sourceWidth/sourceHeight`; the dimensions cache is seeded by renders and cleared on close; one `getPage` per thumbnail.
+10. **Contour filtering before materialization (finding 16).** ✅ Cheap point-count/bbox filter during iteration.
 
 **Acceptance:** rotate/split/inspect timings scale linearly in synthetic large-N bench (see P4 for harness); unchanged outputs across Rust + E2E suites.
 
@@ -104,6 +106,20 @@ import/capture decode → encode         main thread (normalization)          �
 
 15. **Engine bench CLI:** extend `engine/examples` with a bench runner over synthetic + optional corpus sizes for merge/split/rotate/inspect/images (reuse `testing::pdf::benchmark_operation`); record before/after numbers in `docs/WORKLOG.md`.
 16. **App-side attribution:** Performance marks around intake → staging → transfer → wait → render, surfaced in completion meta in dev builds; lets E2E assert budgets later.
+
+## Pass record — 2026-09-26 (P0 + P1)
+
+| Verification        | Result                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Engine Rust suite   | 357 passing (239 unit + 118 integration; +3 new: cache invalidation, geometry order, 50-page rotate)                             |
+| Scan Rust suite     | 35 passing (+3 new: borrowed-view bit-identical downscale, detect-only corners/no-bytes, detect-only fallback)                   |
+| Glue unit tests     | 5 new (progress-forward rule)                                                                                                    |
+| Frontend unit tests | 240 passing (rendering 71 incl. 7 new; import single-decode suite; scan 21)                                                      |
+| Canonical E2E       | 46/46 + 4 SKIP                                                                                                                   |
+| Builds              | `build:wasm`, `build:scan`, production build all clean; typecheck/lint/format clean                                              |
+| Bug found & fixed   | F-17: live detection could never fire (corner-shape mismatch between glue and client) — surfaced while refactoring the live path |
+
+Implemented in `engine/src/processing/pdf/{core/document,core/copy,rotate,inspect,split,delete,reorder}`, `wasm/src/lib.rs`, `scan/src/{pipeline,detect,wasm}`, `app/src/studio/tools/{imageImport,scan/*}`, `app/src/rendering/*`.
 
 ## Verification protocol (every phase)
 

@@ -122,6 +122,7 @@ fn bench_styled(
     let out = scan_document(&ScanRequest {
         bytes: input.clone(),
         mode,
+        detect_only: false,
     })
     .expect("scans");
     let total_ms = t.elapsed().as_secs_f64() * 1000.0;

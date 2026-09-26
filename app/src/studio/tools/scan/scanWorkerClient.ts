@@ -5,6 +5,8 @@
  *   the WASM module initializes once and is reused for every job.
  * - `process()` transfers input bytes (the caller's buffer is NEUTERED —
  *   never touched after posting) and resolves a terminal `ScanResult`.
+ *   `detectOnly` requests stop after detection (status `detected`, no
+ *   output bytes); the shutter always runs the full pipeline.
  * - Generation safety (§5): every client owns a monotonic `epoch`,
  *   bumped by `terminate()`. Results from older epochs are DISCARDED —
  *   a stale scan can never create/update a page, replace a preview, or
@@ -23,7 +25,7 @@ import {
   type ScanWorkerToMain,
 } from './scanProtocol';
 
-export type ScanStatus = 'processed' | 'original' | 'error';
+export type ScanStatus = 'processed' | 'detected' | 'original' | 'error';
 
 export interface ScanCorner {
   x: number;
@@ -36,9 +38,9 @@ export interface ScanResult {
   width: number;
   height: number;
   mode: ScanModeName;
-  /** Detected corners in input coordinates (processed only). */
+  /** Detected corners in input coordinates (processed/detected only). */
   corners: ScanCorner[] | null;
-  /** Earned detection confidence (processed only). */
+  /** Earned detection confidence (processed/detected only). */
   confidence: number;
   /** Fallback reason (original only, e.g. `no-document-detected`). */
   reason: string | null;
@@ -57,6 +59,7 @@ interface Pending {
   startedAt: number;
   epoch: number;
   mode: ScanModeName;
+  detectOnly: boolean;
   settled: boolean;
 }
 
@@ -88,6 +91,28 @@ function terminalError(
     bytes: null,
     wallMs: 0,
   };
+}
+
+/**
+ * Reads detection corners from an envelope. The WASM glue emits
+ * `[[x, y], …]` pairs; `{x, y}` objects are accepted too (test doubles
+ * and older fixtures). Anything that is not four readable points → null.
+ */
+function parseCorners(raw: unknown): ScanCorner[] | null {
+  if (!Array.isArray(raw)) return null;
+  const points: ScanCorner[] = [];
+  for (const entry of raw) {
+    if (Array.isArray(entry)) {
+      const [x, y] = entry as unknown[];
+      if (typeof x === 'number' && typeof y === 'number') points.push({ x, y });
+    } else if (typeof entry === 'object' && entry !== null) {
+      const point = entry as { x?: unknown; y?: unknown };
+      if (typeof point.x === 'number' && typeof point.y === 'number') {
+        points.push({ x: point.x, y: point.y });
+      }
+    }
+  }
+  return points.length === 4 ? points : null;
 }
 
 export class ScanWorkerClient {
@@ -126,13 +151,25 @@ export class ScanWorkerClient {
     this.pending.clear();
   }
 
-  /** Runs one scan job. The input buffer is TRANSFERRED (neutered). */
-  process(input: Uint8Array, mode: ScanModeName): Promise<ScanResult> {
+  /**
+   * Runs one scan job. The input buffer is TRANSFERRED (neutered).
+   * `detectOnly` selects the live-guidance fast path (no warp/encode,
+   * no output bytes; resolves with status `detected`).
+   */
+  process(input: Uint8Array, mode: ScanModeName, detectOnly = false): Promise<ScanResult> {
     const jobId = `scan-${(this.jobCounter += 1)}`;
     const epoch = this.epoch;
     const startedAt = performance.now();
     return new Promise<ScanResult>((resolve, reject) => {
-      const job: Pending = { resolve, reject, startedAt, epoch, mode, settled: false };
+      const job: Pending = {
+        resolve,
+        reject,
+        startedAt,
+        epoch,
+        mode,
+        detectOnly,
+        settled: false,
+      };
       this.pending.set(jobId, job);
       this.ensureWorker();
       this.whenReady(() => {
@@ -155,7 +192,14 @@ export class ScanWorkerClient {
             : input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength)
         ) as ArrayBuffer;
         this.worker?.postMessage(
-          { protocol: SCAN_PROTOCOL_VERSION, kind: 'process', jobId, buffer, mode },
+          {
+            protocol: SCAN_PROTOCOL_VERSION,
+            kind: 'process',
+            jobId,
+            buffer,
+            mode,
+            detectOnly: job.detectOnly,
+          },
           [buffer],
         );
       });
@@ -237,7 +281,7 @@ export class ScanWorkerClient {
       width?: number;
       height?: number;
       mode?: string;
-      corners?: Array<{ x?: number; y?: number }> | null;
+      corners?: unknown;
       confidence?: number;
       reason?: string;
       code?: string;
@@ -259,20 +303,33 @@ export class ScanWorkerClient {
       mode: job.mode,
       wallMs,
     };
+    const corners = parseCorners(parsed.corners);
+    const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0;
     if (parsed.status === 'processed') {
-      const corners =
-        parsed.corners
-          ?.filter((c) => typeof c?.x === 'number' && typeof c?.y === 'number')
-          .map((c) => ({ x: c.x as number, y: c.y as number })) ?? null;
       job.resolve({
         ...base,
         status: 'processed',
-        corners: corners !== null && corners.length === 4 ? corners : null,
-        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+        corners,
+        confidence,
         reason: null,
         code: null,
         message: null,
-        bytes: msg.output !== undefined ? new Uint8Array(msg.output) : null,
+        // Defensive: a detect-only job may never deliver bytes.
+        bytes: !job.detectOnly && msg.output !== undefined ? new Uint8Array(msg.output) : null,
+      });
+      return;
+    }
+    if (parsed.status === 'detected') {
+      // Live-guidance fast path: corners/confidence only, never bytes.
+      job.resolve({
+        ...base,
+        status: 'detected',
+        corners,
+        confidence,
+        reason: null,
+        code: null,
+        message: null,
+        bytes: null,
       });
       return;
     }

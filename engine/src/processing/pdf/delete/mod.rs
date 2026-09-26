@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
-use crate::processing::pdf::core::copy::{copy_pages, find_invalid_page};
+use crate::processing::pdf::core::copy::{copy_pages_with_map, find_invalid_page};
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
 /// Input for [`DeletePagesOperation`]: owned PDF bytes plus an optional label.
@@ -151,9 +151,10 @@ impl Operation for DeletePagesOperation {
         // before constructing anything.
         let remaining = remaining_pages(ctx, &source, &options.pages)?;
 
-        // Surviving pages occupy the 10–95% band.
+        // Surviving pages occupy the 10–95% band. The request was validated
+        // against the cached page map, which the copy reuses.
         let total = remaining.len() as u64;
-        let document = copy_pages(&source, &remaining, |done, _| {
+        let document = copy_pages_with_map(&source, source.page_map(), &remaining, |done, _| {
             ctx.check_cancellation()?;
             let completed = 10 + (done as u64 * 85) / total.max(1);
             ctx.report_progress(

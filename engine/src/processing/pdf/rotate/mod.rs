@@ -14,22 +14,23 @@
 //! duplicates are rejected. An empty selection or a `0°` angle is a valid
 //! no-op producing an independent full copy (never the original object).
 //!
-//! Implementation: the source is deep-copied once via the shared Lesson 3
-//! primitive (`core::copy`), then each selected page gets its final
-//! effective `/Rotate` materialized directly on its own dictionary. The
-//! copy flattens the page tree with a rotation-free root, so writing the
-//! resolved value onto the page can never shift unselected pages — shared
-//! ancestors are read, never mutated.
+//! Implementation: the freshly parsed input document is mutated in place —
+//! the parse is private to the execution, so the caller's bytes and any
+//! caller-held document stay untouched. The resolved page map is traversed
+//! once to resolve each selected page's effective rotation, then each
+//! selected page gets its final `/Rotate` materialized directly on its own
+//! dictionary. Writing `/Rotate` on a page never shifts unselected pages:
+//! shared ancestors are read, never mutated.
 //!
-//! Never mutates the input. No range-string parsing in the core, no
-//! rendering, no compression, no encryption — those are later lessons.
+//! Never mutates the caller's input. No range-string parsing in the core,
+//! no rendering, no compression, no encryption — those are later lessons.
 
 use std::collections::HashSet;
 
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
-use crate::processing::pdf::core::copy::{copy_pages, find_invalid_page};
+use crate::processing::pdf::core::copy::find_invalid_page;
 use crate::processing::pdf::core::document::normalize_quarter_turn;
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
@@ -112,8 +113,9 @@ pub struct RotateOutput {
     pub page_count: u32,
 }
 
-/// Rotates selected pages via a full deep copy plus per-page `/Rotate`
-/// materialization. Single engine execution, single lifecycle.
+/// Rotates selected pages in place on a private parse of the input, via a
+/// single resolved page-map traversal plus per-selected-page `/Rotate`
+/// writes. Single engine execution, single lifecycle.
 #[derive(Debug, Default)]
 pub struct RotateOperation;
 
@@ -172,31 +174,52 @@ impl Operation for RotateOperation {
             .with_details("password-based decryption is not supported yet"));
         }
 
-        // Validate the ENTIRE page list before constructing anything.
+        // Validate the ENTIRE page list before mutating anything. The parse
+        // is private to this execution (the input bytes are owned by the
+        // operation), so rotation mutates it in place instead of deep-copying
+        // every page into a new document.
         validate_pages(&source, &options.pages)?;
+        let mut document = source;
 
-        // Copying occupies the 10–80% band over all pages.
-        let page_count = source.page_count();
-        let mut document = copy_pages(&source, &all_pages(page_count), |done, total| {
+        // A zero-page document cannot satisfy any rotation request; this
+        // preserves the pre-in-place behavior, where the full-document copy
+        // rejected an empty page set with exactly this error.
+        let page_count = document.page_count();
+        if page_count == 0 {
+            return Err(EngineError::new(
+                ErrorCode::InvalidInput,
+                "page selection must not be empty; select at least one page",
+            ));
+        }
+
+        // Page preparation occupies the 10–80% band over all pages: one
+        // traversal of the resolved page map resolves each selected page's
+        // effective rotation and plans its final value.
+        let selected: HashSet<PageNumber> = options.pages.iter().copied().collect();
+        let mut plan: Vec<(PageNumber, i32)> = Vec::with_capacity(selected.len());
+        for (index, page_number) in document.page_map().keys().copied().enumerate() {
             ctx.check_cancellation()?;
-            let completed = 10 + (done as u64 * 70) / (total as u64).max(1);
+            if selected.contains(&page_number) {
+                let base = document.effective_rotation(page_number)?;
+                let rotated = (base + angle).rem_euclid(360);
+                debug_assert_eq!(rotated % 90, 0, "quarter-turn inputs stay quarter-turn");
+                plan.push((page_number, rotated));
+            }
+            let done = index + 1;
+            let completed = 10 + (done as u64 * 70) / u64::from(page_count).max(1);
             ctx.report_progress(
                 Some("copying pages"),
                 completed.min(80),
                 100,
-                Some(&format!("page {done} of {total}")),
+                Some(&format!("page {done} of {page_count}")),
             );
-            Ok(())
-        })?;
+        }
 
         // Applying rotations occupies the 80–95% band over selected pages.
         let selected = options.pages.len();
-        for (index, page_number) in options.pages.iter().enumerate() {
+        for (index, (page_number, rotated)) in plan.iter().enumerate() {
             ctx.check_cancellation()?;
-            let base = document.effective_rotation(*page_number)?;
-            let rotated = (base + angle).rem_euclid(360);
-            debug_assert_eq!(rotated % 90, 0, "quarter-turn inputs stay quarter-turn");
-            document.set_page_rotation(*page_number, rotated)?;
+            document.set_page_rotation_resolved(*page_number, *rotated)?;
             let completed = 80 + ((index + 1) as u64 * 15) / (selected as u64).max(1);
             ctx.report_progress(
                 Some("applying rotations"),
@@ -222,13 +245,6 @@ impl Operation for RotateOperation {
             page_count,
         })
     }
-}
-
-/// The full 1-based page list `1..=page_count`. Rotation always copies the
-/// whole document first (independent output), then adjusts only selected
-/// pages — so even an empty selection flows through one uniform path.
-fn all_pages(page_count: u32) -> Vec<PageNumber> {
-    (1..=page_count).collect()
 }
 
 /// Validates the rotation page list against the document before anything
@@ -800,6 +816,54 @@ mod tests {
             "{events:?}"
         );
         assert_eq!(*events.last().expect("events"), 100);
+    }
+
+    #[test]
+    fn many_page_rotation_touches_only_selected_page() {
+        // 50-page synthetic document with per-page text, so "unselected
+        // pages unchanged" is checked against real content, not structure.
+        let labels: Vec<String> = (1..=50).map(|n| format!("PAGE {n}")).collect();
+        let texts: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let bytes = fixtures::text_pages_pdf(&texts);
+
+        let mut out = RotateOperation
+            .execute(
+                &ctx(),
+                input(bytes.clone()),
+                RotateOptions::new(vec![1], 90),
+            )
+            .expect("rotation succeeds")
+            .document;
+        assert_eq!(out.page_count(), 50);
+
+        let serialized = out.save_to_bytes().expect("output serializes");
+        let raw = lopdf::Document::load_mem(&serialized).expect("output re-parses");
+        let source_raw = lopdf::Document::load_mem(&bytes).expect("source re-parses");
+        assert_eq!(raw.get_pages().len(), 50);
+
+        let reparsed = load_pdf(&serialized).expect("output re-parses");
+        assert_eq!(reparsed.effective_rotation(1).expect("p1"), 90);
+        for n in 2..=50 {
+            assert_eq!(
+                reparsed.effective_rotation(n).expect("readable"),
+                0,
+                "page {n} rotation changed"
+            );
+        }
+
+        // Page 1 keeps its content; every unselected page keeps its exact
+        // content bytes.
+        let first = raw.get_page_content(raw.get_pages()[&1]);
+        assert!(String::from_utf8_lossy(&first).contains("PAGE 1"));
+        for n in 2..=50 {
+            let source_page = source_raw.get_pages()[&n];
+            let output_page = raw.get_pages()[&n];
+            assert_eq!(
+                source_raw.get_page_content(source_page),
+                raw.get_page_content(output_page),
+                "page {n} content changed"
+            );
+        }
     }
 
     #[test]

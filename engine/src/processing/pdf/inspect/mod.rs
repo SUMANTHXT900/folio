@@ -184,11 +184,13 @@ impl Operation for InspectOperation {
         // Basic mode stops here: no page iteration, no page-detail records.
         let pages = if options.level == InspectLevel::Detailed {
             let mut details = Vec::with_capacity(page_count as usize);
-            for (index, page_number) in document.page_numbers().iter().enumerate() {
+            // One traversal of the cached page map; each page's geometry is
+            // resolved on the way through, never by rebuilding the map.
+            for (index, (page_number, geometry)) in document.page_geometry_entries().enumerate() {
                 ctx.check_cancellation()?;
-                let geometry = document.page_geometry(*page_number)?;
+                let geometry = geometry?;
                 details.push(PdfPageInspection {
-                    page_number: *page_number,
+                    page_number,
                     width_pt: geometry.width_pt,
                     height_pt: geometry.height_pt,
                     rotation_deg: geometry.rotation_deg,

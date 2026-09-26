@@ -54,6 +54,13 @@ export interface RenderPageOptions {
    * intrinsic `/Rotate` is respected. Must be a multiple of 90.
    */
   rotation?: number;
+  /**
+   * Fit-to-box render target (CSS units). Mutually exclusive with `scale`:
+   * the render computes the largest scale that fits the rotated page
+   * inside the box from its scale-1 viewport. Lets one `getPage` serve
+   * both dimension and render needs (thumbnail fast path).
+   */
+  targetBox?: { width: number; height: number };
 }
 
 /** Useful geometry/result of one page render. Pixel output stays on the
@@ -70,6 +77,10 @@ export interface RenderedPage {
   width: number;
   /** Canvas bitmap height in device pixels. */
   height: number;
+  /** Viewport width at scale 1 with the effective rotation applied. */
+  sourceWidth: number;
+  /** Viewport height at scale 1 with the effective rotation applied. */
+  sourceHeight: number;
 }
 
 /** Browser-measured timing for one rendering call. Uses `performance.now()`;

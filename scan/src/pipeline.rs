@@ -1,5 +1,9 @@
-//! Scan pipeline: decode → detect (downscaled copy) → warp (full-res)
+//! Scan pipeline: decode → detect (downscaled, borrowed) → warp (full-res)
 //! → enhance (mode) → JPEG.
+//!
+//! `detect_only` requests stop after detection: corners/confidence return
+//! with no output bytes and no warp/encode work (live guidance every
+//! ~500 ms must never pay for a result it discards).
 //!
 //! Detection failure is never fatal: the original bytes return with
 //! `fallback: true` so the caller offers "Use original". Orientation
@@ -25,14 +29,19 @@ pub struct ScanRequest {
     pub bytes: Vec<u8>,
     /// Enhancement mode.
     pub mode: ScanMode,
+    /// Detection-only fast path (live guidance): run detection, skip the
+    /// warp + JPEG stages, and return EMPTY [`ScanOutput::bytes`].
+    pub detect_only: bool,
 }
 
 /// Scan result: processed JPEG plus provenance for the UI.
 #[derive(Debug, Clone)]
 pub struct ScanOutput {
-    /// Processed (or original, on fallback) JPEG bytes.
+    /// Processed (or original, on fallback) JPEG bytes. EMPTY for
+    /// `detect_only` requests — the fast path produces no image bytes.
     pub bytes: Vec<u8>,
-    /// Output dimensions (px).
+    /// Output dimensions (px); the INPUT dimensions for `detect_only`
+    /// (no warp runs, so there is no output size to report).
     pub width: u32,
     pub height: u32,
     /// Detected corners in input coordinates (None on fallback).
@@ -43,7 +52,7 @@ pub struct ScanOutput {
     pub fallback: bool,
 }
 
-/// Runs the full scan pipeline over owned image bytes.
+/// Runs the scan pipeline over owned image bytes.
 pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
     if request.bytes.is_empty() {
         return Err(ScanError::new(
@@ -58,7 +67,10 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
         )
         .with_details(err.to_string())
     })?;
-    let rgb8 = decoded.to_rgb8();
+    // Own the decoder's buffer: `into_rgb8` moves it when the decoder
+    // already produced RGB8 (JPEG always does), instead of cloning the
+    // full-resolution pixels through `to_rgb8`.
+    let rgb8 = decoded.into_rgb8();
     let (w, h) = (rgb8.width(), rgb8.height());
     if w == 0 || h == 0 {
         return Err(ScanError::new(
@@ -67,10 +79,17 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
         ));
     }
 
+    // Detection borrows the owned buffer; the warp below reuses it.
     let detection = detect_document(rgb8.as_raw(), w, h)?;
     let Some(d) = detection else {
         return Ok(ScanOutput {
-            bytes: request.bytes.clone(),
+            // Live guidance never receives bytes; the full path returns
+            // the original capture for the "Use original" option.
+            bytes: if request.detect_only {
+                Vec::new()
+            } else {
+                request.bytes.clone()
+            },
             width: w,
             height: h,
             corners: None,
@@ -78,11 +97,22 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
             fallback: true,
         });
     };
+    if request.detect_only {
+        return Ok(ScanOutput {
+            bytes: Vec::new(),
+            width: w,
+            height: h,
+            corners: Some(d.quad.corners()),
+            confidence: d.confidence,
+            fallback: false,
+        });
+    }
     let (mut bytes, out_w, out_h) =
         warp_to_jpeg(rgb8.as_raw(), w, h, &d.quad, MAX_OUTPUT_LONG_EDGE)?;
     if request.mode != ScanMode::Original {
         let warped = image::load_from_memory(&bytes).expect("just-encoded JPEG decodes");
-        let w2 = warped.to_rgb8();
+        // Move when already RGB8 — no full-resolution clone.
+        let w2 = warped.into_rgb8();
         let enhanced = apply_mode(w2.as_raw(), out_w, out_h, request.mode);
         bytes = encode_jpeg(&enhanced, out_w, out_h, SCAN_JPEG_QUALITY)?;
     }
@@ -140,12 +170,24 @@ mod tests {
         (jpeg_of(&rgb, w, h), w, h)
     }
 
+    /// Solid near-black JPEG (detection sees no document).
+    fn blank_jpeg() -> Vec<u8> {
+        let gray = image::GrayImage::from_pixel(320, 240, image::Luma([18u8]));
+        let mut bytes = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
+            .write_image(gray.as_raw(), 320, 240, image::ExtendedColorType::L8)
+            .expect("encodes");
+        bytes
+    }
+
     #[test]
     fn pipeline_scans_a_document_photo() {
         let (bytes, _, _) = doc_photo();
         let out = scan_document(&ScanRequest {
             bytes,
             mode: ScanMode::Original,
+            detect_only: false,
         })
         .expect("scans");
         assert!(!out.fallback, "should detect");
@@ -162,6 +204,7 @@ mod tests {
             let out = scan_document(&ScanRequest {
                 bytes: bytes.clone(),
                 mode,
+                detect_only: false,
             })
             .expect("scans");
             assert!(!out.fallback);
@@ -171,16 +214,53 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_detect_only_returns_corners_without_bytes() {
+        let (bytes, w, h) = doc_photo();
+        let full = scan_document(&ScanRequest {
+            bytes: bytes.clone(),
+            mode: ScanMode::Original,
+            detect_only: false,
+        })
+        .expect("scans");
+        let live = scan_document(&ScanRequest {
+            bytes,
+            mode: ScanMode::Original,
+            detect_only: true,
+        })
+        .expect("runs");
+        assert!(!live.fallback);
+        assert!(live.corners.is_some());
+        assert!(live.confidence >= 0.5, "{}", live.confidence);
+        assert!(live.bytes.is_empty(), "detect-only must not produce bytes");
+        // Live guidance reports INPUT dimensions (no warp ran).
+        assert_eq!((live.width, live.height), (w, h));
+        // Detection is identical with and without the warp stages.
+        assert_eq!(live.corners, full.corners);
+        assert_eq!(live.confidence, full.confidence);
+    }
+
+    #[test]
+    fn pipeline_detect_only_fallback_carries_no_bytes() {
+        let out = scan_document(&ScanRequest {
+            bytes: blank_jpeg(),
+            mode: ScanMode::Original,
+            detect_only: true,
+        })
+        .expect("runs");
+        assert!(out.fallback);
+        assert!(out.corners.is_none());
+        assert_eq!(out.confidence, 0.0);
+        assert!(out.bytes.is_empty(), "fallback must not clone bytes back");
+        assert_eq!((out.width, out.height), (320, 240));
+    }
+
+    #[test]
     fn pipeline_falls_back_on_blank_input() {
-        let gray = image::GrayImage::from_pixel(320, 240, image::Luma([18u8]));
-        let mut bytes = Vec::new();
-        use image::ImageEncoder;
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
-            .write_image(gray.as_raw(), 320, 240, image::ExtendedColorType::L8)
-            .expect("encodes");
+        let bytes = blank_jpeg();
         let out = scan_document(&ScanRequest {
             bytes: bytes.clone(),
             mode: ScanMode::Original,
+            detect_only: false,
         })
         .expect("runs");
         assert!(out.fallback);
@@ -194,11 +274,13 @@ mod tests {
         assert!(scan_document(&ScanRequest {
             bytes: vec![],
             mode: ScanMode::Original,
+            detect_only: false,
         })
         .is_err());
         assert!(scan_document(&ScanRequest {
             bytes: b"not an image".to_vec(),
             mode: ScanMode::Original,
+            detect_only: false,
         })
         .is_err());
     }

@@ -48,65 +48,101 @@ describe('planNormalization', () => {
 });
 
 describe('prepareImportFile', () => {
+  /** Renderer double that records decode/resize/close call ordering. */
+  function rendererWith(dims = { width: 1280, height: 960 }, bytes = [9, 9, 9]) {
+    const decoded = { width: dims.width, height: dims.height, bitmap: { tag: 'bitmap' } };
+    const decode = vi.fn(async () => decoded);
+    const resizeToJpeg = vi.fn(async () => new Uint8Array(bytes));
+    const close = vi.fn();
+    const renderer: ImportRenderer = { decode, resizeToJpeg, close };
+    return { renderer, decoded, decode, resizeToJpeg, close };
+  }
+
   it('converts within-budget PNGs to JPEG (engine has no DCT path for PNG)', async () => {
-    const decode = vi.fn(async () => ({ width: 1280, height: 960 }));
-    const resizeToJpeg = vi.fn(async () => new Uint8Array([9, 9, 9]));
+    const { renderer, decoded, decode, resizeToJpeg, close } = rendererWith();
     const png = new File([new ArrayBuffer(2048)], 'screenshot.PNG', { type: 'image/png' });
-    const out = await prepareImportFile(png, { decode, resizeToJpeg });
+    const out = await prepareImportFile(png, renderer);
     expect(out.retainedOriginal).toBe(false);
     expect(out.name).toBe('screenshot.jpg');
     expect(out.file.type).toBe('image/jpeg');
     expect(out.width).toBe(1280);
     expect(out.height).toBe(960);
+    // ONE decode serves both the dimension check and the resize.
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(decode).toHaveBeenCalledWith(png);
     expect(resizeToJpeg).toHaveBeenCalledTimes(1);
-    expect(resizeToJpeg).toHaveBeenCalledWith(
-      expect.anything(),
-      { width: 1280, height: 960 },
-      0.92,
-    );
+    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 1280, height: 960 }, 0.92);
+    // The decoded bitmap is released exactly once, by the caller.
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(decoded);
   });
 
   it('still retains within-budget JPEGs untouched', async () => {
-    const decode = vi.fn(async () => ({ width: 1280, height: 960 }));
-    const resizeToJpeg = vi.fn();
-    const renderer: ImportRenderer = { decode, resizeToJpeg };
+    const { renderer, decoded, decode, resizeToJpeg, close } = rendererWith();
     const original = file();
     const out = await prepareImportFile(original, renderer);
     expect(out.retainedOriginal).toBe(true);
     expect(out.file).toBe(original);
     expect(out.name).toBe('photo.jpg');
+    expect(decode).toHaveBeenCalledTimes(1);
     expect(resizeToJpeg).not.toHaveBeenCalled();
+    // Retained originals still release the decode.
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(decoded);
   });
 
-  it('normalizes oversized images to one JPEG re-encode', async () => {
-    const decode = vi.fn(async () => ({ width: 4000, height: 3000 }));
-    const resizeToJpeg = vi.fn(async () => new Uint8Array([1, 2, 3]));
-    const out = await prepareImportFile(file('big.JPG'), {
-      decode,
-      resizeToJpeg,
-    });
+  it('normalizes oversized images to one JPEG re-encode from one decode', async () => {
+    const { renderer, decoded, decode, resizeToJpeg, close } = rendererWith(
+      { width: 4000, height: 3000 },
+      [1, 2, 3],
+    );
+    const out = await prepareImportFile(file('big.JPG'), renderer);
     expect(out.retainedOriginal).toBe(false);
     expect(out.width).toBe(MAX_IMPORT_LONG_EDGE);
     expect(out.height).toBe(1875);
     expect(out.name).toBe('big.jpg');
     expect(out.file.type).toBe('image/jpeg');
+    expect(decode).toHaveBeenCalledTimes(1);
     expect(resizeToJpeg).toHaveBeenCalledTimes(1);
-    expect(resizeToJpeg).toHaveBeenCalledWith(
-      expect.anything(),
-      { width: 2500, height: 1875 },
-      0.92,
-    );
+    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 2500, height: 1875 }, 0.92);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(decoded);
   });
 
-  it('propagates decode failure with the file name', async () => {
+  it('propagates decode failure with the file name and never resizes', async () => {
+    const resizeToJpeg = vi.fn(async () => new Uint8Array());
+    const close = vi.fn();
     await expect(
       prepareImportFile(file('broken.jpg'), {
         decode: async () => {
           throw new Error('unsupported format');
         },
-        resizeToJpeg: async () => new Uint8Array(),
+        resizeToJpeg,
+        close,
       }),
     ).rejects.toThrow(/unsupported format/);
+    expect(resizeToJpeg).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('rejects degenerate dimensions with the documented message and closes the decode', async () => {
+    const { renderer, decoded, resizeToJpeg, close } = rendererWith({ width: 0, height: 960 });
+    await expect(prepareImportFile(file('empty.jpg'), renderer)).rejects.toThrow(
+      'could not read image dimensions for empty.jpg',
+    );
+    expect(resizeToJpeg).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(decoded);
+  });
+
+  it('closes the decode exactly once when re-encoding fails', async () => {
+    const { renderer, decoded, resizeToJpeg, close } = rendererWith({ width: 4000, height: 3000 });
+    resizeToJpeg.mockRejectedValueOnce(new Error('2D canvas unavailable'));
+    await expect(prepareImportFile(file('big.jpg'), renderer)).rejects.toThrow(
+      /2D canvas unavailable/,
+    );
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith(decoded);
   });
 });
 

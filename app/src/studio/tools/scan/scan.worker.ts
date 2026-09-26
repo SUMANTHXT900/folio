@@ -16,8 +16,11 @@
  *
  * Binary flow: input `ArrayBuffer`s arrive TRANSFERRED (neutered on the
  * sender side — the client must not touch them after posting). The glue
- * copies bytes into WASM linear memory (documented copy); output bytes
+ * takes ownership of the bytes with a single JS→WASM copy; output bytes
  * come back as fresh buffers, transferred to main. No base64 anywhere.
+ *
+ * Live guidance uses `detectOnly` process requests: detection only, no
+ * warp/JPEG output bytes on the wire.
  *
  * Cancellation follows Folio philosophy: the client terminates this
  * worker. A synchronous WASM call cannot observe cancellation mid-flight,
@@ -80,13 +83,13 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
     );
     return;
   }
-  const { jobId, buffer, mode } = msg;
+  const { jobId, buffer, mode, detectOnly } = msg;
   // Honest coarse status: one indeterminate phase. The core exposes no
   // stage spans in M2, so no percentages are synthesized (L-5).
   post({ protocol: SCAN_PROTOCOL_VERSION, kind: 'status', jobId, phase: 'processing' });
   try {
     const input = new Uint8Array(buffer);
-    const envelope = scan_process(input, mode) as {
+    const envelope = scan_process(input, mode, detectOnly) as {
       result_json: string;
       output: Uint8Array | null;
     };

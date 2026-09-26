@@ -5,7 +5,10 @@
  * (`getDocument`/`getPageDimensions`/`renderPage`/`closeDocument`) with
  * controllable page sizes, delays, and failures. Verifies ordering,
  * bounded concurrency, progress, cancellation, atomic failure, and the
- * small-scale render invariant (never full-size + shrink).
+ * small-scale render invariant (never full-size + shrink). Dimension and
+ * render needs are served by a single fitted `renderPage` call: the
+ * thumbnail engine never issues a separate `getPageDimensions` query
+ * (asserted via `dimsCalls` staying empty).
  */
 import { describe, expect, it } from 'vitest';
 import { DefaultPdfThumbnailEngine } from './DefaultPdfThumbnailEngine';
@@ -34,7 +37,12 @@ class FakeRenderEngine implements PdfRenderEngine {
   readonly pageCount: number;
   private readonly pages = new Map<number, FakePage>();
   private closed = false;
-  readonly renderCalls: Array<{ pageNumber: number; scale: number; rotation?: number }> = [];
+  readonly renderCalls: Array<{
+    pageNumber: number;
+    scale: number;
+    rotation?: number;
+    targetBox?: { width: number; height: number };
+  }> = [];
   readonly dimsCalls: Array<{ pageNumber: number; rotation?: number }> = [];
   activeRenders = 0;
   maxActiveRenders = 0;
@@ -66,11 +74,13 @@ class FakeRenderEngine implements PdfRenderEngine {
     return { id: this.id, pageCount: this.pageCount, name: 'fake.pdf', metadata: null };
   }
 
-  async getPageDimensions(
-    documentId: string,
-    pageNumber: number,
-    rotation?: number,
-  ): Promise<PageDimensions> {
+  /**
+   * Shared scale-1 geometry (rotation swaps dimensions like PDF.js
+   * viewports do). `getPageDimensions` counts external dimension queries;
+   * `renderPage` uses it directly, so `dimsCalls` proves the thumbnail
+   * engine no longer asks for dimensions before rendering.
+   */
+  private dimsFor(documentId: string, pageNumber: number, rotation?: number): PageDimensions {
     if (documentId !== this.id || this.closed) {
       throw new RenderError('RENDER_CLOSED', `document is not open: ${documentId}`, {
         documentId,
@@ -87,7 +97,6 @@ class FakeRenderEngine implements PdfRenderEngine {
     if (this.failDimsPages.has(pageNumber)) {
       throw new RenderError('RENDER_PAGE_FAILED', 'dims boom', { documentId, pageNumber });
     }
-    this.dimsCalls.push({ pageNumber, rotation });
     const page = this.pages.get(pageNumber) as FakePage;
     const intrinsic = ((page.rotation % 360) + 360) % 360;
     let effective = intrinsic;
@@ -108,20 +117,34 @@ class FakeRenderEngine implements PdfRenderEngine {
     };
   }
 
+  async getPageDimensions(
+    documentId: string,
+    pageNumber: number,
+    rotation?: number,
+  ): Promise<PageDimensions> {
+    const dims = this.dimsFor(documentId, pageNumber, rotation);
+    this.dimsCalls.push({ pageNumber, rotation });
+    return dims;
+  }
+
   renderPage(
     documentId: string,
     pageNumber: number,
     canvas: HTMLCanvasElement,
-    options?: { scale?: number; rotation?: number },
+    options?: {
+      scale?: number;
+      rotation?: number;
+      targetBox?: { width: number; height: number };
+    },
   ): CancellableRender<{
     page: RenderedPage;
     timing: { startedAt: string; completedAt: string; durationMs: number };
   }> {
-    const scale = options?.scale ?? 1;
     const rotationOpt = options?.rotation;
-    this.renderCalls.push({ pageNumber, scale, rotation: rotationOpt });
+    const targetBox = options?.targetBox;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelDelay: (() => void) | undefined;
     const delay = this.delayByPage[pageNumber] ?? this.delayMs;
     const promise = (async () => {
       if (documentId !== this.id || this.closed) {
@@ -139,13 +162,32 @@ class FakeRenderEngine implements PdfRenderEngine {
           pageNumber,
         });
       }
+      const dims = this.dimsFor(documentId, pageNumber, rotationOpt);
+      // Mirrors the real engine: a target box is fitted from the page's
+      // scale-1 geometry inside this same render call.
+      const scale =
+        options?.scale ??
+        (targetBox !== undefined
+          ? Math.min(targetBox.width / dims.width, targetBox.height / dims.height)
+          : 1);
+      this.renderCalls.push({ pageNumber, scale, rotation: rotationOpt, targetBox });
       this.activeRenders += 1;
       this.maxActiveRenders = Math.max(this.maxActiveRenders, this.activeRenders);
       try {
         if (delay > 0) {
           await new Promise<void>((resolve, reject) => {
             timer = setTimeout(() => resolve(), delay);
-            void reject;
+            cancelDelay = () => {
+              if (timer !== undefined) {
+                clearTimeout(timer);
+              }
+              reject(
+                new RenderError('RENDER_CANCELLED', 'page render was cancelled', {
+                  documentId,
+                  pageNumber,
+                }),
+              );
+            };
           });
         }
         if (cancelled || this.closed) {
@@ -154,7 +196,8 @@ class FakeRenderEngine implements PdfRenderEngine {
             pageNumber,
           });
         }
-        const dims = await this.getPageDimensions(documentId, pageNumber, rotationOpt);
+        // sourceWidth/sourceHeight are the scale-1 geometry the real engine
+        // returns alongside the render.
         const width = Math.max(1, Math.floor(dims.width * scale));
         const height = Math.max(1, Math.floor(dims.height * scale));
         // Fake raster: tag the canvas so tests can prove a render happened.
@@ -168,6 +211,8 @@ class FakeRenderEngine implements PdfRenderEngine {
             rotation: dims.rotation,
             width,
             height,
+            sourceWidth: dims.width,
+            sourceHeight: dims.height,
           },
           timing: {
             startedAt: new Date().toISOString(),
@@ -183,9 +228,7 @@ class FakeRenderEngine implements PdfRenderEngine {
       promise,
       cancel: () => {
         cancelled = true;
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
+        cancelDelay?.();
       },
     };
   }
@@ -223,6 +266,20 @@ describe('generateThumbnail (single)', () => {
     expect(fake.renderCalls).toHaveLength(1);
     expect(fake.renderCalls[0]?.scale).toBeCloseTo(200 / 842, 10);
     expect(result.timing.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('serves dimensions and render from one fitted render call', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 3 });
+    const result = await thumbs.generateThumbnail(fake.id, 1, { size: { width: 200, height: 200 } })
+      .promise;
+    // The returned scale-1 geometry drives the result metadata...
+    expect(result.sourcePageWidth).toBe(595);
+    expect(result.sourcePageHeight).toBe(842);
+    expect(result.scale).toBeCloseTo(200 / 842, 10);
+    // ...and no separate dimension query was made: one render, zero dims.
+    expect(fake.renderCalls).toHaveLength(1);
+    expect(fake.renderCalls[0]?.targetBox).toEqual({ width: 200, height: 200 });
+    expect(fake.dimsCalls).toHaveLength(0);
   });
 
   it('renders landscape pages wide, not tall', async () => {
@@ -345,6 +402,8 @@ describe('generateThumbnails (batch)', () => {
     expect(fake.maxActiveRenders).toBeLessThanOrEqual(2);
     expect(fake.maxActiveRenders).toBeGreaterThan(0);
     expect(fake.renderCalls).toHaveLength(8);
+    // Every page's dimensions came from its own render, not a second query.
+    expect(fake.dimsCalls).toHaveLength(0);
   });
 
   it('fails atomically with the bad page attributed', async () => {

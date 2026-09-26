@@ -4,9 +4,10 @@
  * Depends on `PdfRenderEngine`, never on PDF.js directly. For each page:
  *
  * ```text
- * source dims (scale 1, effective rotation) via getPageDimensions
- *   → uniform scale = min(targetW/srcW, targetH/srcH)
- *   → renderPage once at that small scale into a fresh canvas
+ * renderPage once, fitted to the target box (scale-1 source geometry comes
+ *   back in the same result — ONE getPage serves dimensions + render)
+ *   → uniform scale = min(targetW/srcW, targetH/srcH), recomputed from the
+ *     returned source geometry via calculateThumbnailGeometry
  *   → ThumbnailResult (caller owns the canvas)
  * ```
  *
@@ -82,29 +83,14 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
         }
         validateThumbnailPage(pageNumber, open.pageCount, documentId);
         failIfCancelled();
-        let dims;
-        try {
-          dims = await this.renders.getPageDimensions(documentId, pageNumber, rotation);
-        } catch (error) {
-          throw toThumbnailError(error, { documentId, pageNumber });
-        }
-        failIfCancelled();
-        let geometry;
-        try {
-          geometry = calculateThumbnailGeometry(dims.width, dims.height, size.width, size.height);
-        } catch (error) {
-          throw new ThumbnailError('THUMBNAIL_INVALID_INPUT', 'invalid thumbnail geometry', {
-            details: error instanceof Error ? error.message : String(error),
-            documentId,
-            pageNumber,
-            cause: error,
-          });
-        }
+        // One render serves both needs: `renderPage` fits the page to the
+        // target box from its own single getPage and returns the scale-1
+        // source geometry in the same result.
         const canvas = createCanvas();
         let rendered;
         try {
           const task = this.renders.renderPage(documentId, pageNumber, canvas, {
-            scale: geometry.scale,
+            targetBox: { width: size.width, height: size.height },
             rotation,
           });
           cancelActive = () => task.cancel();
@@ -115,14 +101,31 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           cancelActive = undefined;
         }
         failIfCancelled();
+        let geometry;
+        try {
+          geometry = calculateThumbnailGeometry(
+            rendered.page.sourceWidth,
+            rendered.page.sourceHeight,
+            size.width,
+            size.height,
+          );
+        } catch (error) {
+          throw new ThumbnailError('THUMBNAIL_INVALID_INPUT', 'invalid thumbnail geometry', {
+            details: error instanceof Error ? error.message : String(error),
+            documentId,
+            pageNumber,
+            cause: error,
+          });
+        }
+        failIfCancelled();
         return {
           documentId,
           pageNumber,
           canvas,
           width: rendered.page.width,
           height: rendered.page.height,
-          sourcePageWidth: dims.width,
-          sourcePageHeight: dims.height,
+          sourcePageWidth: rendered.page.sourceWidth,
+          sourcePageHeight: rendered.page.sourceHeight,
           scale: geometry.scale,
           rotation: rendered.page.rotation,
           timing: {
@@ -283,50 +286,40 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
                 },
               );
             }
-            const dims = await this.renders.getPageDimensions(documentId, pageNumber, rotation);
-            if (cancelled) {
-              throw new ThumbnailError(
-                'THUMBNAIL_CANCELLED',
-                'thumbnail generation was cancelled',
-                {
-                  documentId,
-                  pageNumber,
-                },
-              );
-            }
-            let geometry;
-            try {
-              geometry = calculateThumbnailGeometry(
-                dims.width,
-                dims.height,
-                size.width,
-                size.height,
-              );
-            } catch (error) {
-              throw new ThumbnailError('THUMBNAIL_INVALID_INPUT', 'invalid thumbnail geometry', {
-                details: error instanceof Error ? error.message : String(error),
-                documentId,
-                pageNumber,
-                cause: error,
-              });
-            }
             const canvas = createCanvas();
             try {
+              // Same single-getPage contract as generateThumbnail.
               const task = this.renders.renderPage(documentId, pageNumber, canvas, {
-                scale: geometry.scale,
+                targetBox: { width: size.width, height: size.height },
                 rotation,
               });
               cancelRender = () => task.cancel();
               activeCancellers.add(cancelRender);
               const rendered = await task.promise;
+              let geometry;
+              try {
+                geometry = calculateThumbnailGeometry(
+                  rendered.page.sourceWidth,
+                  rendered.page.sourceHeight,
+                  size.width,
+                  size.height,
+                );
+              } catch (error) {
+                throw new ThumbnailError('THUMBNAIL_INVALID_INPUT', 'invalid thumbnail geometry', {
+                  details: error instanceof Error ? error.message : String(error),
+                  documentId,
+                  pageNumber,
+                  cause: error,
+                });
+              }
               const result: ThumbnailResult = {
                 documentId,
                 pageNumber,
                 canvas,
                 width: rendered.page.width,
                 height: rendered.page.height,
-                sourcePageWidth: dims.width,
-                sourcePageHeight: dims.height,
+                sourcePageWidth: rendered.page.sourceWidth,
+                sourcePageHeight: rendered.page.sourceHeight,
                 scale: geometry.scale,
                 rotation: rendered.page.rotation,
                 timing: {

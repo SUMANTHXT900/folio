@@ -24,8 +24,9 @@
 
 ## Current work
 
+- Performance pass P0+P1 done (2026-09-26, delegated + integrated): WASM inputs owned (no double copy), page-map cache (kills O(N²) traversals), in-place rotate (no full deep copy), single-pass split/delete/reorder/inspect, progress coalescing, scan borrowed-view + detect-only live path (protocol v2), one-`getPage` thumbnails, single-decode imports. Also fixed F-17 (live detection never fired). See `docs/PERFORMANCE.md`; P2/P3/P4 remain planned.
 - Hardening milestone done (P0–P6, see WORKLOG): incremental Rust embed, staged-transfer ownership, single-Blob download, negotiated camera constraints. No version bump.
-- M3.x mobile import + scanner harden done (see WORKLOG 2026-09-25): memory-safe sequential import normalization (pixel budget, `MAX_IMPORT_LONG_EDGE = 2500`), immersive portaled scanner surface (fixed full-bleed on phones, centered panel on desktop), Import moved into the scanner bar, scan-mode selector removed. New import/UI tests; canonical E2E **42/42 + 4 SKIP**.
+- M3.x mobile import + scanner harden done (see WORKLOG 2026-09-25): memory-safe sequential import normalization (pixel budget, `MAX_IMPORT_LONG_EDGE = 2500`), immersive portaled scanner surface (fixed full-bleed on phones, centered panel on desktop), Import moved into the scanner bar, scan-mode selector removed. New import/UI tests; canonical E2E **46/46 + 4 SKIP**.
 - **Real-device Android validation is PENDING**: the 30-photo crash scenario must be re-tested on the affected phone before v2.0 release validation.
 
 ## Pending work
@@ -50,15 +51,15 @@ None. No blocked items.
 
 | Check                                                         | Result                                                                                                                                                          |
 | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust tests (`cargo test` in `engine/`)                        | 354 passing (unit + integration suites, incl. passthrough/byte-identity tests)                                                                                  |
-| Scan core tests (`cargo test` in `scan/`)                     | 26 passing (geometry, detect, warp, enhance, pipeline)                                                                                                          |
+| Rust tests (`cargo test` in `engine/`)                        | 357 passing (unit + integration suites, incl. passthrough/byte-identity, page-map cache, in-place rotate)                                                       |
+| Scan core tests (`cargo test` in `scan/`)                     | 35 passing (geometry, detect, warp, enhance, pipeline; borrowed-view + detect-only + prefilter)                                                                 |
 | Rust format (`cargo fmt --check`)                             | clean                                                                                                                                                           |
 | Rust lints (`cargo clippy --all-targets`)                     | clean                                                                                                                                                           |
 | WASM build (`npm run build:wasm` in `app/`)                   | passing (`wasm-pack`, `wasm/pkg/` reproduced)                                                                                                                   |
 | Frontend typecheck (`npm run typecheck`)                      | passing                                                                                                                                                         |
 | Frontend lint (`npm run lint`)                                | passing                                                                                                                                                         |
 | Frontend format (`npm run format:check`)                      | passing                                                                                                                                                         |
-| Frontend unit tests (`npm test`)                              | 229 passing (PNG→JPEG import, Rearrange-parity page list, reorder helper)                                                                                       |
+| Frontend unit tests (`npm test`)                              | 240 passing (PNG→JPEG import, Rearrange-parity page list, reorder helper, single-getPage thumbnails, scan detect-only)                                          |
 | Production build (`npm run build`, PWA SW with WASM precache) | passing, zero testbench strings in bundle                                                                                                                       |
 | Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 46/46 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                             |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus) |

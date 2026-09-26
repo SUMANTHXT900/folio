@@ -21,7 +21,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
-use crate::processing::pdf::core::copy::{copy_pages, find_invalid_page};
+use crate::processing::pdf::core::copy::{copy_pages_with_map, find_invalid_page};
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
 /// Input for [`SplitOperation`]: owned PDF bytes plus an optional label.
@@ -184,7 +184,9 @@ impl Operation for SplitOperation {
         validate_plan(&source, &options.parts)?;
 
         // Pages occupy the 10–95% band, counted globally across parts so
-        // progress is monotonic over the whole operation.
+        // progress is monotonic over the whole operation. The plan was
+        // validated against the cached page map, which each part's copy
+        // reuses instead of re-resolving the page tree.
         let total_pages: usize = options.parts.iter().map(|part| part.pages.len()).sum();
         let mut done_pages: usize = 0;
         let mut outputs = Vec::with_capacity(options.parts.len());
@@ -194,7 +196,7 @@ impl Operation for SplitOperation {
             let part_number = part_index + 1;
             let part_len = part.pages.len();
             let mut done_in_part: usize = 0;
-            let document = copy_pages(&source, &part.pages, |_, _| {
+            let document = copy_pages_with_map(&source, source.page_map(), &part.pages, |_, _| {
                 ctx.check_cancellation()?;
                 done_pages += 1;
                 done_in_part += 1;
