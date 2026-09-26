@@ -27,7 +27,7 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Symptoms.** Tapping a row preview on a tall list dimmed the whole page; "Page N" + "Close" sat at the screen's bottom edge and the image itself was invisible, centered somewhere in the middle of the tall overlay. Verified in the user's screen recording (frames showed the backdrop spanning all 23 rows) and reproduced locally (backdrop rect 356×1840 on an 844px viewport).
 - **Root cause.** The tool card above the modal carries `backdrop-filter` (glass style). Per spec, any non-`none` `backdrop-filter` (like `filter`) on an ancestor makes it the containing block for in-tree `position: fixed` descendants — so `fixed inset-0` resolved against the tall card, not the viewport. Proven by walking the dialog's ancestor chain (the card flagged `backdrop-filter`) while `position: fixed` itself computed correctly.
 - **Fix.** The modal renders via `createPortal(..., document.body)` (escapes every ancestor; immune to any future filter/transform above it), z-index raised above the sticky header (`z-[100]`), and viewport caps use `dvh` units (`92dvh` dialog, `78dvh` image) so the Android URL bar can't crop. New E2E assertion pins it: backdrop rect must equal the viewport and the dialog must sit inside it.
-- **Verification.** Tall-list (14 pages, phone viewport, scrolled to middle) probe: backdrop exactly 390×844 at scroll 873 (was 356×1840), dialog fully inside, header covered, image decodes and visible; E2E **50/50 + 4 SKIP** (new viewport-anchored check green).
+- **Verification.** Tall-list (14 pages, phone viewport, scrolled to middle) probe: backdrop exactly 390×844 at scroll 873 (was 356×1840), dialog fully inside, header covered, image decodes and visible; viewport-anchored E2E checks green for Images (50/50) and Split (57/57).
 
 ### F-18 — Images previews could silently fail ("light background, not the image")
 
@@ -36,6 +36,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Root cause.** Not confirmed in reproduction. Inspection found three real silent-failure mechanisms: (1) `loading="lazy"` gated blob-URL previews (pointless for local URLs; can starve in some mobile/in-app browsers); (2) a failed decode had no recovery — Android can reclaim blob-URL storage across tab restore, leaving dead URLs; (3) neither the row nor the modal rendered any fallback, so a broken image showed as blank space indistinguishable from "still loading".
 - **Fix.** Previews load eagerly; `onError` re-materializes the object URL from the retained File handle once; persistent failure renders an explicit "Preview unavailable" tile (row) / panel (modal). Modal is scroll-safe; row layout cleaned up for phones (larger thumbnails, truncated name/meta). Three E2E checks now assert previews actually decode (`naturalWidth > 0`) for uploads, the modal, and accepted scans.
 - **Verification.** E2E 47→49 with the decode checks (twice green). Nine visual/functional probes: dev + deployed builds, light + dark themes, small/large/PNG/JPEG uploads, downscale path, 12-photo list after scroll, scanner review, accepted scan row, modal — all loaded correctly. If the report recurs, it is device-state-specific and the new explicit fallback will show which page failed.
+
+### F-20 — Split pages had no preview; overlay would have inherited the F-19 bug class
+
+- **Status.** Resolved (opener wired + portaled overlay). **Area.** Split pick mode (`app/src/studio/tools/SplitTool.tsx`). **Severity.** Medium (users picked pages blind; the overlay also sat in-tree under glass ancestors).
+- **Symptoms.** `setPreview` existed but no UI ever opened it — `ThumbTile` only toggled keep/remove. The overlay itself used the same in-tree `fixed inset-0` pattern that F-19 proved capturable.
+- **Root cause.** Dead opener (single code path set preview, and it was the closer) plus the F-19-prone structure: verified uncaptured in Split's current tree by live probe and ancestor walk, but one refactor away from breaking.
+- **Fix.** Thumbnail click previews (bottom label pill keeps the keep/remove toggle — Rearrange separation parity); overlay portaled via `createPortal(..., document.body)` with `z-[100]` + `dvh` caps as defense-in-depth.
+- **Verification.** +4 E2E (open, decode `naturalWidth > 0`, viewport-anchored backdrop == viewport, close); suite **57/57 + 4 SKIP**.
 
 ### F-14 — Images → PDF output ~5× larger than the input photos (81 MB for 13 images)
 

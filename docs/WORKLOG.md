@@ -377,3 +377,8 @@ Chronological record of meaningful development events. Each entry records object
 - **Split preview.** Thumbnail click now previews (label pill keeps toggle); overlay portaled (F-19-immune) with dvh caps; +4 E2E (open/decode/viewport-anchored/close).
 - **Compress honesty.** Grid tagline + level hints qualified as future; About v1.0.0 corrected (four tools; Compress listed-but-reserved).
 - **Verification.** Typecheck/lint/format clean; unit 289; E2E **57/57 + 4 SKIP**.
+
+## 2026-09-27 — Docs gap closure (F-20 entry, F-19/cold-merge lines current)
+
+- **Added.** BUGS.md F-20 (Split preview opener + portaled overlay, +4 E2E).
+- **Fixed.** F-19 verification line (50/50 → Images 50/50 + Split 57/57); P0.2 open question → answered-by-analysis pointer; cold-merge 190x analysis recorded under PERFORMANCE.md Risks with hypotheses, exclusions, and the laptop experiment.
