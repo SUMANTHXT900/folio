@@ -673,6 +673,10 @@ function EntryCard({
       <p className="relative mt-3 text-center text-[11px] text-ink-400 dark:text-ink-300">
         100% on-device — files never leave your browser.
       </p>
+      {/* AGENT11 copy (literal, short): bulk-import pacing hint. */}
+      <p className="relative mt-1 text-center text-[11px] text-ink-400 dark:text-ink-300">
+        Photos decode one at a time — large batches take a moment.
+      </p>
     </motion.div>
   );
 }

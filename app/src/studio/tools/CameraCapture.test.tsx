@@ -636,6 +636,219 @@ describe('CameraCapture lifecycle hardening', () => {
   });
 });
 
+describe('CameraCapture tab-hidden pause (AGENT11)', () => {
+  function pausableTrack() {
+    return {
+      stop: stopTrack,
+      enabled: true,
+      kind: 'video',
+      getCapabilities: () => ({}),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+  }
+  function setHidden(value: boolean) {
+    Object.defineProperty(document, 'hidden', { value, configurable: true });
+  }
+  function restoreHidden() {
+    delete (document as unknown as Record<string, unknown>)['hidden'];
+  }
+
+  it('disables tracks on hide and re-enables on visible without re-requesting', async () => {
+    const track = pausableTrack();
+    const media = mockMedia({ getUserMedia: async () => streamWith(track) });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    expect(track.enabled).toBe(true);
+    try {
+      setHidden(true);
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(track.enabled).toBe(false);
+      setHidden(false);
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(track.enabled).toBe(true);
+      // Still live on the same stream: no failure, no second request.
+      expect(screen.getByLabelText('Capture page')).toBeTruthy();
+      expect(media.getUserMedia).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreHidden();
+    }
+  });
+
+  it('pauses on pagehide and resumes on pageshow', async () => {
+    const track = pausableTrack();
+    mockMedia({ getUserMedia: async () => streamWith(track) });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    window.dispatchEvent(new Event('pagehide'));
+    expect(track.enabled).toBe(false);
+    window.dispatchEvent(new Event('pageshow'));
+    expect(track.enabled).toBe(true);
+    expect(screen.getByLabelText('Capture page')).toBeTruthy();
+  });
+
+  it('never touches a released stream after unmount', async () => {
+    const track = pausableTrack();
+    mockMedia({ getUserMedia: async () => streamWith(track) });
+    const { unmount } = render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    unmount();
+    expect(stopTrack).toHaveBeenCalledTimes(1);
+    // Late visibility events reach no listener: no throw, no extra stop.
+    try {
+      setHidden(true);
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('pagehide'));
+    } finally {
+      restoreHidden();
+    }
+    expect(stopTrack).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CameraCapture secure-context branch (AGENT11)', () => {
+  it('shows the HTTPS/localhost message when mediaDevices is missing', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', { value: undefined, configurable: true });
+    try {
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={noop}
+          onRetake={noop}
+          onDone={noop}
+          sessionPages={[]}
+        />,
+      );
+      await screen.findByText(/needs HTTPS or localhost/);
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>)['mediaDevices'];
+    }
+  });
+
+  it('prefers the HTTPS message over the permission copy on insecure origins', async () => {
+    mockMedia({
+      getUserMedia: async () => {
+        throw new DOMException('denied', 'NotAllowedError');
+      },
+    });
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
+    try {
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={noop}
+          onRetake={noop}
+          onDone={noop}
+          sessionPages={[]}
+        />,
+      );
+      await screen.findByText(/needs HTTPS or localhost/);
+      expect(screen.queryByText(/access was denied/)).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    }
+  });
+
+  it('maps AbortError to an actionable retry line', async () => {
+    mockMedia({
+      getUserMedia: async () => {
+        throw new DOMException('aborted', 'AbortError');
+      },
+    });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByText(/request was interrupted/);
+  });
+});
+
+describe('CameraCapture landscape-compact layout (AGENT11)', () => {
+  it('compacts dock and strip in landscape via layout classes only', async () => {
+    mockMedia({ getUserMedia: async () => fakeStream });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    // Orientation-aware compaction: pure CSS, no behavior change.
+    expect(screen.getByLabelText('Camera controls').className).toContain('landscape:mt-1');
+    expect(screen.getByLabelText('Pages captured this session').className).toContain(
+      'landscape:gap-1',
+    );
+    // Behavior intact: shutter + strip still wired.
+    expect(screen.getByLabelText('Undo last capture')).toBeTruthy();
+    expect(screen.getByAltText('Captured page 1: scan-001.jpg')).toBeTruthy();
+  });
+});
+
+describe('CameraCapture facing-toggle device semantics (AGENT11)', () => {
+  it('clears the explicit device choice when toggling facing cameras', async () => {
+    const getUserMedia = vi.fn(async () => fakeStream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia,
+        enumerateDevices: async () => [
+          { kind: 'videoinput', deviceId: 'd1', label: 'Cam 1' },
+          { kind: 'videoinput', deviceId: 'd2', label: 'Cam 2' },
+        ],
+      },
+      configurable: true,
+    });
+    render(
+      <CameraCapture
+        onImportFiles={noopImport}
+        onScanAccept={noop}
+        onRetake={noop}
+        onDone={noop}
+        sessionPages={[]}
+      />,
+    );
+    await screen.findByLabelText('Capture page');
+    fireEvent.change(screen.getByLabelText('Choose camera'), { target: { value: 'd2' } });
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
+    expect((screen.getByLabelText('Choose camera') as HTMLSelectElement).value).toBe('d2');
+    // Facing toggle drops the explicit deviceId (no stale-device lock).
+    fireEvent.click(screen.getByLabelText('Switch camera'));
+    await waitFor(() =>
+      expect((screen.getByLabelText('Choose camera') as HTMLSelectElement).value).toBe(''),
+    );
+  });
+});
+
 describe('CameraCapture capture/scan budgets (5-4/5-6)', () => {
   it('captureTargetDims keeps small frames untouched (no upscale)', () => {
     expect(captureTargetDims(1920, 1080)).toEqual({ width: 1920, height: 1080 });

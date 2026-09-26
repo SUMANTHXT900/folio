@@ -74,10 +74,29 @@ function failureMessage(error: unknown): string {
       return 'No camera was found on this device. Use the file picker to add images instead.';
     case 'NotReadableError':
       return 'The camera is busy (another app or tab is using it). Close it there and try again — or use the file picker.';
+    case 'AbortError':
+      // AGENT11 copy (literal, short): interrupted request, actionable retry.
+      return 'The camera request was interrupted. Try again — or use the file picker.';
     default:
       return 'The camera could not be started on this browser. Use the file picker to add images instead.';
   }
 }
+
+/** True only when the page is provably NOT in a secure context. */
+function isInsecureContext(): boolean {
+  try {
+    return (
+      typeof window !== 'undefined' &&
+      (window as unknown as { isSecureContext?: unknown }).isSecureContext === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+// AGENT11 copy (literal, short): insecure-origin branch for missing/blocked camera.
+const INSECURE_CONTEXT_MESSAGE =
+  'Camera needs HTTPS or localhost. Open this page over HTTPS or localhost — or use the file picker to add images instead.';
 
 function stopStream(stream: MediaStream | null) {
   if (stream) {
@@ -264,6 +283,8 @@ export function CameraCapture({
   statusRef.current = status;
   const deviceIdRef = useRef(deviceId);
   deviceIdRef.current = deviceId;
+  const facingRef = useRef(facing);
+  facingRef.current = facing;
   // Detach for the current track-ended listener (B2).
   const endedCleanup = useRef<(() => void) | null>(null);
   const detachEnded = () => {
@@ -294,7 +315,9 @@ export function CameraCapture({
       genRef.current = gen;
       const isCurrent = () => genRef.current === gen;
       if (!navigator.mediaDevices?.getUserMedia) {
-        setFailure(failureMessage(new DOMException('unsupported', 'NotSupportedError')));
+        // `mediaDevices` missing almost always means an insecure origin
+        // (plain HTTP): say so explicitly instead of the generic failure.
+        setFailure(INSECURE_CONTEXT_MESSAGE);
         setStatus('failed');
         return;
       }
@@ -402,7 +425,10 @@ export function CameraCapture({
         stopStream(streamRef.current);
         streamRef.current = null;
         trackRef.current = null;
-        setFailure(failureMessage(error));
+        // Insecure origins fail inside getUserMedia too: prefer the
+        // explicit HTTPS/localhost message over the per-error mapping.
+        // Secure-context denials keep the existing permission mapping.
+        setFailure(isInsecureContext() ? INSECURE_CONTEXT_MESSAGE : failureMessage(error));
         setStatus('failed');
       }
     },
@@ -459,6 +485,67 @@ export function CameraCapture({
       md.removeEventListener?.('devicechange', onDeviceChange);
     };
   }, [markDisconnected]);
+
+  // Tab-hidden stream pause (mobile battery/privacy): while the tab is
+  // hidden the camera would hold hardware + the OS indicator for
+  // nothing. Tracks are DISABLED on hide (no renegotiation, generation
+  // untouched — the unmount/leave stop path still owns release) and
+  // re-enabled with a preview resume on visible. Failed/disconnected
+  // states never restart here.
+  useEffect(() => {
+    const pauseTracks = () => {
+      const stream = streamRef.current;
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          try {
+            track.enabled = false;
+          } catch {
+            // Best-effort: a track without `enabled` stays live.
+          }
+        }
+      }
+      try {
+        videoRef.current?.pause();
+      } catch {
+        // Best-effort: preview pause is not correctness-critical.
+      }
+    };
+    const resumeTracks = () => {
+      const stream = streamRef.current;
+      if (!stream) {
+        if (statusRef.current === 'live') void start(facingRef.current, deviceIdRef.current);
+        return;
+      }
+      for (const track of stream.getTracks()) {
+        try {
+          track.enabled = true;
+        } catch {
+          // Best-effort (see pauseTracks).
+        }
+      }
+      const video = videoRef.current;
+      if (video && statusRef.current === 'live') {
+        try {
+          const played = video.play();
+          if (played && typeof played.catch === 'function') played.catch(() => undefined);
+        } catch {
+          // A rejected resume keeps the retry path intact; never throws.
+        }
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) pauseTracks();
+      else resumeTracks();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', pauseTracks);
+    window.addEventListener('pageshow', resumeTracks);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', pauseTracks);
+      window.removeEventListener('pageshow', resumeTracks);
+    };
+  }, [start]);
 
   const syncAspect = useCallback(() => {
     const video = videoRef.current;
@@ -993,7 +1080,10 @@ export function CameraCapture({
           <div
             className={
               (status === 'starting' ? 'hidden ' : '') +
-              'relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2'
+              // Landscape-compact (AGENT11, layout only): short-height
+              // landscape phones give the viewfinder priority — tighter
+              // gaps/padding, no behavior change.
+              'relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2 landscape:gap-1 landscape:py-1'
             }
           >
             {/* Import note: floating pill over the viewport top, never an
@@ -1021,7 +1111,7 @@ export function CameraCapture({
               pushing content off-screen when the strip/review appear. */}
             <div
               ref={viewport.ref}
-              className="flex min-h-[12rem] flex-1 items-center justify-center"
+              className="flex min-h-[12rem] flex-1 items-center justify-center landscape:min-h-[8rem]"
             >
               <div
                 className="relative overflow-hidden rounded-xl bg-ink-950"
@@ -1182,7 +1272,7 @@ export function CameraCapture({
             <div
               role="group"
               aria-label="Camera controls"
-              className="mt-3 grid grid-cols-3 items-center gap-2 sm:flex sm:justify-center sm:gap-5"
+              className="mt-3 grid grid-cols-3 items-center gap-2 landscape:mt-1 landscape:gap-1 sm:flex sm:justify-center sm:gap-5"
             >
               <div className="flex justify-start sm:order-1">
                 {caps.torch && !torchDead && (
@@ -1255,7 +1345,7 @@ export function CameraCapture({
               carries it) keep the viewport stable once pages exist. */}
             {sessionPages.length > 0 && (
               <div
-                className="flex gap-1.5 overflow-x-auto"
+                className="flex gap-1.5 overflow-x-auto landscape:gap-1"
                 aria-label="Pages captured this session"
               >
                 {sessionPages.map((thumb, i) => (
