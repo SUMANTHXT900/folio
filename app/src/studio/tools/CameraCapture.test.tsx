@@ -8,7 +8,7 @@
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CameraCapture } from './CameraCapture';
+import { CameraCapture, canSkipNormalization, captureTargetDims } from './CameraCapture';
 
 const stopTrack = vi.fn();
 function videoTrack(caps?: unknown, applyImpl?: (c: unknown) => Promise<void>) {
@@ -633,5 +633,32 @@ describe('CameraCapture lifecycle hardening', () => {
     await screen.findByText(/no longer available/);
     unmount();
     expect(removeSpy).toHaveBeenCalledWith('devicechange', expect.any(Function));
+  });
+});
+
+describe('CameraCapture capture/scan budgets (5-4/5-6)', () => {
+  it('captureTargetDims keeps small frames untouched (no upscale)', () => {
+    expect(captureTargetDims(1920, 1080)).toEqual({ width: 1920, height: 1080 });
+    expect(captureTargetDims(2500, 1406)).toEqual({ width: 2500, height: 1406 });
+  });
+
+  it('captureTargetDims clamps 12MP-class frames to the 2500px budget', () => {
+    expect(captureTargetDims(4000, 3000)).toEqual({ width: 2500, height: 1875 });
+    expect(captureTargetDims(3000, 4000)).toEqual({ width: 1875, height: 2500 });
+  });
+
+  it('canSkipNormalization skips within-budget JPEGs with zero decodes', () => {
+    const jpeg = new File(['x'], 'scan-001.jpg', { type: 'image/jpeg' });
+    expect(canSkipNormalization({ width: 1920, height: 1080 }, jpeg)).toBe(true);
+    expect(canSkipNormalization({ width: 2500, height: 1875 }, jpeg)).toBe(true);
+  });
+
+  it('canSkipNormalization keeps PNGs and oversized frames on the full path', () => {
+    const png = new File(['x'], 'shot.png', { type: 'image/png' });
+    const extPng = new File(['x'], 'shot.PNG', { type: '' });
+    const jpeg = new File(['x'], 'big.jpg', { type: 'image/jpeg' });
+    expect(canSkipNormalization({ width: 1280, height: 960 }, png)).toBe(false);
+    expect(canSkipNormalization({ width: 1280, height: 960 }, extPng)).toBe(false);
+    expect(canSkipNormalization({ width: 4000, height: 3000 }, jpeg)).toBe(false);
   });
 });

@@ -35,24 +35,29 @@ impl ScanMode {
     }
 }
 
-/// Applies the mode to RGB pixels, returning RGB pixels (same dims).
-/// B&W output is 0/255 triples — valid input for the PDF engine, which
-/// already handles grayscale/RGB uniformly.
+/// Applies the mode to owned RGB pixels, reusing the allocation (R2):
+/// grayscale writes luma triples back in place and B&W reuses the same
+/// buffer for its binary output, so enhancement never holds two
+/// full-resolution RGB buffers at once. B&W output is 0/255 triples —
+/// valid input for the PDF engine, which already handles
+/// grayscale/RGB uniformly.
 #[must_use]
-pub fn apply_mode(rgb: &[u8], w: u32, h: u32, mode: ScanMode) -> Vec<u8> {
+pub fn apply_mode(mut rgb: Vec<u8>, w: u32, h: u32, mode: ScanMode) -> Vec<u8> {
     match mode {
-        ScanMode::Original => rgb.to_vec(),
-        ScanMode::Grayscale => rgb
-            .chunks_exact(3)
-            .flat_map(|px| {
+        ScanMode::Original => rgb,
+        ScanMode::Grayscale => {
+            for px in rgb.chunks_exact_mut(3) {
                 let luma = (0.299f64.mul_add(
                     f64::from(px[0]),
                     0.587f64.mul_add(f64::from(px[1]), 0.114 * f64::from(px[2])),
                 ))
                 .round() as u8;
-                [luma, luma, luma]
-            })
-            .collect(),
+                px[0] = luma;
+                px[1] = luma;
+                px[2] = luma;
+            }
+            rgb
+        }
         ScanMode::BlackWhite => {
             let gray: Vec<u8> = rgb
                 .chunks_exact(3)
@@ -65,12 +70,13 @@ pub fn apply_mode(rgb: &[u8], w: u32, h: u32, mode: ScanMode) -> Vec<u8> {
                 })
                 .collect();
             let mask = adaptive_threshold(&gray, w, h);
-            mask.iter()
-                .flat_map(|v| {
-                    let b = if *v > 0 { 255u8 } else { 0u8 };
-                    [b, b, b]
-                })
-                .collect()
+            for (px, v) in rgb.chunks_exact_mut(3).zip(mask.iter()) {
+                let b = if *v > 0 { 255u8 } else { 0u8 };
+                px[0] = b;
+                px[1] = b;
+                px[2] = b;
+            }
+            rgb
         }
     }
 }
@@ -116,7 +122,7 @@ mod tests {
     #[test]
     fn grayscale_equalizes_channels() {
         let rgb = vec![200u8, 100, 50, 10, 20, 30];
-        let out = apply_mode(&rgb, 2, 1, ScanMode::Grayscale);
+        let out = apply_mode(rgb, 2, 1, ScanMode::Grayscale);
         assert_eq!(out.len(), 6);
         assert_eq!(out[0], out[1]);
         assert_eq!(out[1], out[2]);
@@ -142,7 +148,7 @@ mod tests {
                 rgb.extend_from_slice(&[v, v, v]);
             }
         }
-        let out = apply_mode(&rgb, w, h, ScanMode::BlackWhite);
+        let out = apply_mode(rgb, w, h, ScanMode::BlackWhite);
         assert!(out
             .chunks_exact(3)
             .all(|px| px == [0, 0, 0] || px == [255, 255, 255]));
@@ -156,7 +162,25 @@ mod tests {
     #[test]
     fn original_is_identity() {
         let rgb = vec![1u8, 2, 3, 4, 5, 6];
-        assert_eq!(apply_mode(&rgb, 2, 1, ScanMode::Original), rgb);
+        assert_eq!(apply_mode(rgb.clone(), 2, 1, ScanMode::Original), rgb);
+    }
+
+    #[test]
+    fn grayscale_matches_reference_luma() {
+        // In-place luma must equal the Rec. 601 reference per pixel.
+        let out = apply_mode(
+            vec![200u8, 100, 50, 10, 20, 30, 0, 0, 0, 255, 255, 255],
+            4,
+            1,
+            ScanMode::Grayscale,
+        );
+        let luma = |r: u8, g: u8, b: u8| {
+            (0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)).round() as u8
+        };
+        assert_eq!(&out[0..3], &[luma(200, 100, 50); 3]);
+        assert_eq!(&out[3..6], &[luma(10, 20, 30); 3]);
+        assert_eq!(&out[6..9], &[0, 0, 0]);
+        assert_eq!(&out[9..12], &[255, 255, 255]);
     }
 
     #[test]

@@ -37,6 +37,9 @@ import {
   encodeBitmapToJpeg,
   EncodeWorkerUnavailableError,
   IMPORT_JPEG_QUALITY,
+  isPngFile,
+  MAX_IMPORT_LONG_EDGE,
+  planNormalization,
   prepareImportFile,
 } from './imageImport';
 import { useContainBox } from './scanViewport';
@@ -79,6 +82,51 @@ function stopStream(stream: MediaStream | null) {
   if (stream) {
     for (const track of stream.getTracks()) track.stop();
   }
+}
+
+/**
+ * Capture target dimensions (5-6): the frame is clamped to the shared
+ * 2500px import/scan pixel budget ON the capture canvas, before any
+ * scan bytes exist. Detection is unaffected (the worker downscales to
+ * 800px either way — confidence is identical at both scales in the
+ * `scan_bench` comparison). The tradeoff is deliberate and measured
+ * (release, synthetic 12MP framing, min of 5):
+ *
+ * ```text
+ * full 12MP input  → out 2435×2322 (5.65 MP), conf 0.82
+ * pre-scaled input → out 1522×1451 (2.20 MP), conf 0.81–0.82
+ * ```
+ *
+ * Warp output size follows input quad pixels until the 2500px cap
+ * binds, so pre-scaling yields ~2.5× fewer output pixels — still ~10″
+ * wide at 150 DPI, inside the project's documented budgets. Wall time
+ * is detection-dominated on desktop CPU (color path ≈ unchanged;
+ * enhance paths −30%, e.g. 12MP b/w 286ms → 194ms); the reliable wins
+ * are memory (one 12MP RGB frame = 36 MB resident → 14 MB), worker
+ * transfer bytes, and output JPEG size (157 KB → 65 KB). Absolute
+ * browser/WASM wall time needs the device matrix (no E2E here).
+ */
+export function captureTargetDims(
+  videoWidth: number,
+  videoHeight: number,
+): { width: number; height: number } {
+  const target = planNormalization(
+    { width: videoWidth, height: videoHeight },
+    MAX_IMPORT_LONG_EDGE,
+  );
+  return target ?? { width: videoWidth, height: videoHeight };
+}
+
+/**
+ * Fallback auto-accept fast path (5-4): the scan worker already
+ * reported the capture's input dimensions (`result.width/height` on
+ * `original` results), so the budget decision runs BEFORE any decode.
+ * Within-budget JPEGs skip `prepareImportFile` entirely (zero decodes,
+ * zero re-encodes — previously one decode + a possible re-encode);
+ * PNGs and oversized frames still normalize through the full path.
+ */
+export function canSkipNormalization(dims: { width: number; height: number }, file: File): boolean {
+  return planNormalization(dims, MAX_IMPORT_LONG_EDGE) === null && !isPngFile(file);
 }
 
 /**
@@ -218,6 +266,11 @@ export function CameraCapture({
     endedCleanup.current?.();
     endedCleanup.current = null;
   };
+  // Stable scan callbacks, extracted BEFORE `start` (its deps array
+  // evaluates at definition — a later declaration would TDZ-crash).
+  // A camera switch also resets scan state (fresh worker, no stale jobs).
+  const resetScan = scan.reset;
+  const warmScan = scan.warm;
 
   /** Installs the disconnected state: hardware released, caps cleared. */
   const markDisconnected = useCallback((message: string) => {
@@ -333,6 +386,12 @@ export function CameraCapture({
         if (!isCurrent()) return;
         setDevices(all.filter((d) => d.kind === 'videoinput'));
         setStatus('live');
+        // Scan worker warmup (5-5): WASM init now overlaps viewfinder
+        // time instead of the first live tick / shutter press. Best
+        // effort and generation-guarded inside the hook; every start
+        // path (mount, retry, camera switch) reaches this line, and the
+        // hook makes repeat calls within a session no-ops.
+        warmScan();
       } catch (error) {
         if (!isCurrent()) return;
         detachEnded();
@@ -343,13 +402,12 @@ export function CameraCapture({
         setStatus('failed');
       }
     },
-    [markDisconnected],
+    [markDisconnected, warmScan],
   );
 
   // Open on mount / facing change; stop + invalidate on unmount.
-  // A camera switch also resets scan state (fresh worker, no stale jobs).
-  // scan.reset is a stable callback; start is the documented trigger.
-  const resetScan = scan.reset;
+  // `start` is the documented trigger for both callbacks above.
+  // (Declarations live above `start`, q.v.)
   useEffect(() => {
     resetScan();
     void start(facing, deviceId);
@@ -492,7 +550,8 @@ export function CameraCapture({
   };
 
   /**
-   * Shutter: captures the full-res frame, then either hands it straight
+   * Shutter: captures the frame ALREADY clamped to the 2500px budget
+   * (5-6, see `captureTargetDims`), then either hands it straight
    * to the collection (Original mode — v1.9 path, no worker) or sends it
    * to the scan worker for processing + review.
    *
@@ -502,14 +561,16 @@ export function CameraCapture({
    * worker failure falls back to the original main-thread canvas path
    * below — the live video element still holds the frame, so the retry
    * re-reads it with identical pixels, quality (q0.92), and mirroring.
+   * Both paths encode the BUDGET-CLAMPED size, never full sensor
+   * resolution: a 12MP sensor frame becomes a ≤2500px JPEG either way.
    */
   const captureFrame = async (): Promise<File | null> => {
     const video = videoRef.current;
     if (!video || video.videoWidth === 0 || capturing) return null;
     setCapturing(true);
     try {
-      const width = video.videoWidth;
-      const height = video.videoHeight;
+      const target = captureTargetDims(video.videoWidth, video.videoHeight);
+      const { width, height } = target;
       // Front camera: un-mirror so text reads correctly.
       const flipHorizontal = facing === 'user';
       const workerBytes = await encodeShutterViaWorker(video, width, height, flipHorizontal);
@@ -524,7 +585,7 @@ export function CameraCapture({
           ctx.translate(canvas.width, 0);
           ctx.scale(-1, 1);
         }
-        ctx.drawImage(video, 0, 0);
+        ctx.drawImage(video, 0, 0, width, height);
         const blob = await new Promise<Blob | null>((resolve) =>
           canvas.toBlob(resolve, 'image/jpeg', IMPORT_JPEG_QUALITY),
         );
@@ -560,10 +621,14 @@ export function CameraCapture({
    * Fallback auto-accept: when detection finds no reliable boundary, the
    * photo the user just framed IS the page — interrupting every capture
    * with a "Use original / Discard" decision is pure nagging (real-device
-   * feedback: most captures fall back). The file is normalized through
-   * the same pixel-budget path as imports, committed to the collection,
-   * and announced non-blockingly. Undo/session removal still applies.
-   * Processed and error reviews keep their explicit panels.
+   * feedback: most captures fall back). The file is committed to the
+   * collection and announced non-blockingly. Undo/session removal still
+   * applies. Processed and error reviews keep their explicit panels.
+   *
+   * Normalization is usually SKIPPED, not repeated (5-4): captures are
+   * already budget-clamped JPEGs (5-6), and the scan result carries the
+   * input dimensions — so the budget decision reuses those dims with
+   * zero decodes. Only PNGs / oversized frames pay for `prepareImportFile`.
    */
   const autoAcceptGen = useRef(0);
   useEffect(() => {
@@ -573,12 +638,17 @@ export function CameraCapture({
     void (async () => {
       let file = pending.original;
       let name = pending.original.name;
-      try {
-        const prepared = await prepareImportFile(pending.original);
-        file = prepared.file as File;
-        name = prepared.name;
-      } catch {
-        // Normalization is best-effort: true original on failure.
+      const known = { width: pending.result.width, height: pending.result.height };
+      const skip =
+        known.width > 0 && known.height > 0 && canSkipNormalization(known, pending.original);
+      if (!skip) {
+        try {
+          const prepared = await prepareImportFile(pending.original);
+          file = prepared.file as File;
+          name = prepared.name;
+        } catch {
+          // Normalization is best-effort: true original on failure.
+        }
       }
       if (autoAcceptGen.current !== gen) return; // Superseded/discarded.
       onScanAccept({ file, original: null, name });
@@ -591,7 +661,18 @@ export function CameraCapture({
    * Low-res live tick (~160px, best-effort): guidance only. Skipped
    * while a capture scan or review is active (latest-frame semantics
    * live in the hook); live corners are NEVER reused for the final scan.
+   *
+   * One canvas is reused for every tick (5-5): the old code allocated +
+   * released a canvas per 500ms tick, churning GC while the viewfinder
+   * runs. The reused canvas stays at tick size (~160px, ~100 KB —
+   * negligible to retain). A `busy` flag skips ticks while the previous
+   * `toBlob` is still in flight instead of racing it (a re-sized canvas
+   * mid-encode would blank the pending blob) — skipped ticks are pure
+   * guidance loss, never correctness loss. All pre-existing guards
+   * (processing / pending / hidden-tab) are unchanged.
    */
+  const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const liveBusyRef = useRef(false);
   useEffect(() => {
     if (status !== 'live') return;
     const id = window.setInterval(() => {
@@ -605,17 +686,28 @@ export function CameraCapture({
       ) {
         return;
       }
+      if (liveBusyRef.current) return; // Previous tick still encoding.
       const scale = 160 / Math.max(video.videoWidth, video.videoHeight);
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const tickWidth = Math.max(1, Math.round(video.videoWidth * scale));
+      const tickHeight = Math.max(1, Math.round(video.videoHeight * scale));
+      let canvas = liveCanvasRef.current;
+      if (canvas === null) {
+        canvas = document.createElement('canvas');
+        liveCanvasRef.current = canvas;
+      }
+      // Re-sizing clears the bitmap — intended: a fresh frame is drawn
+      // immediately below. Unchanged sizes skip the realloc.
+      if (canvas.width !== tickWidth || canvas.height !== tickHeight) {
+        canvas.width = tickWidth;
+        canvas.height = tickHeight;
+      }
       const ctx = canvas.getContext('2d');
       if (ctx === null) return;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      liveBusyRef.current = true;
       canvas.toBlob(
         (blob) => {
-          canvas.width = 0;
-          canvas.height = 0;
+          liveBusyRef.current = false;
           if (blob !== null) scan.requestLive(blob);
         },
         'image/jpeg',

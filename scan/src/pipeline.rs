@@ -11,12 +11,22 @@
 //! EXIF-free canvas JPEGs — the v2.0 M3 wiring; uploads with EXIF
 //! orientation are out of scope for the scan path, documented here
 //! rather than silently mishandled).
+//!
+//! Memory discipline (R2): the full-resolution RGB buffer is the
+//! pipeline's peak cost (~3 B/px — 36 MB at 12 MP). Decoding reuses the
+//! decoder's own allocation wherever the `image` crate allows (JPEG
+//! decodes straight to RGB8: zero-copy move; RGBA strips alpha in place
+//! in the same allocation instead of holding RGBA+RGB simultaneously).
+//! Enhancement modes encode ONCE (5-1): warp → mode → JPEG over the
+//! warped pixels, with no intermediate JPEG encode/decode round-trip
+//! (the old path re-encoded the warp and decoded it back before
+//! enhancing — slower AND lossier).
 
 use crate::detect::detect_document;
 use crate::enhance::{apply_mode, ScanMode};
 use crate::error::{ScanError, ScanErrorKind};
 use crate::geometry::Point;
-use crate::warp::{encode_jpeg, warp_to_jpeg, SCAN_JPEG_QUALITY};
+use crate::warp::{encode_jpeg, output_dims, warp_quad, warp_to_jpeg, SCAN_JPEG_QUALITY};
 
 /// Output long-edge cap (px). BENCHMARK CONSTRAINT for M1 (correction 5):
 /// tune after measuring real quality/memory, do not hard-code forever.
@@ -60,17 +70,7 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
             "scan input bytes must not be empty",
         ));
     }
-    let decoded = image::load_from_memory(&request.bytes).map_err(|err| {
-        ScanError::new(
-            ScanErrorKind::InvalidInput,
-            "scan input is not a readable JPEG/PNG image",
-        )
-        .with_details(err.to_string())
-    })?;
-    // Own the decoder's buffer: `into_rgb8` moves it when the decoder
-    // already produced RGB8 (JPEG always does), instead of cloning the
-    // full-resolution pixels through `to_rgb8`.
-    let rgb8 = decoded.into_rgb8();
+    let rgb8 = decode_to_rgb8(&request.bytes)?;
     let (w, h) = (rgb8.width(), rgb8.height());
     if w == 0 || h == 0 {
         return Err(ScanError::new(
@@ -107,15 +107,27 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
             fallback: false,
         });
     }
-    let (mut bytes, out_w, out_h) =
-        warp_to_jpeg(rgb8.as_raw(), w, h, &d.quad, MAX_OUTPUT_LONG_EDGE)?;
-    if request.mode != ScanMode::Original {
-        let warped = image::load_from_memory(&bytes).expect("just-encoded JPEG decodes");
-        // Move when already RGB8 — no full-resolution clone.
-        let w2 = warped.into_rgb8();
-        let enhanced = apply_mode(w2.as_raw(), out_w, out_h, request.mode);
-        bytes = encode_jpeg(&enhanced, out_w, out_h, SCAN_JPEG_QUALITY)?;
+    if request.mode == ScanMode::Original {
+        let (bytes, out_w, out_h) =
+            warp_to_jpeg(rgb8.as_raw(), w, h, &d.quad, MAX_OUTPUT_LONG_EDGE)?;
+        return Ok(ScanOutput {
+            bytes,
+            width: out_w,
+            height: out_h,
+            corners: Some(d.quad.corners()),
+            confidence: d.confidence,
+            fallback: false,
+        });
     }
+    // Single encode (5-1): warp to pixels, enhance in place, encode once.
+    // The old path ran warp→JPEG→decode→enhance→JPEG: a full extra
+    // encode/decode of the warped image that cost CPU and added a second
+    // generation of JPEG loss on top of the final encode.
+    let (out_w, out_h) = output_dims(&d.quad, MAX_OUTPUT_LONG_EDGE);
+    let warped = warp_quad(rgb8.as_raw(), w, h, &d.quad, out_w, out_h)?;
+    drop(rgb8);
+    let enhanced = apply_mode(warped, out_w, out_h, request.mode);
+    let bytes = encode_jpeg(&enhanced, out_w, out_h, SCAN_JPEG_QUALITY)?;
     Ok(ScanOutput {
         bytes,
         width: out_w,
@@ -124,6 +136,49 @@ pub fn scan_document(request: &ScanRequest) -> Result<ScanOutput, ScanError> {
         confidence: d.confidence,
         fallback: false,
     })
+}
+
+/// Decodes JPEG/PNG bytes to an owned RGB8 buffer with minimal peak
+/// memory (R2). JPEG decoders emit RGB8 directly, so that path is a
+/// zero-copy move (`into_rgb8` returns the buffer as-is). RGBA inputs
+/// (screenshots, PNGs with alpha) strip the alpha channel IN PLACE in
+/// the decoder's own allocation: pixel-identical to `into_rgb8` (the
+/// `image` crate's Rgba→Rgb conversion drops alpha without compositing
+/// — verified against `color.rs` `FromColor<Rgba<S>> for Rgb<T>`), while
+/// peak drops from RGBA+RGB simultaneously (7 B/px) to the one buffer
+/// (4 B/px, truncated to 3 B/px). All other color types keep the
+/// crate's conversion unchanged (rare inputs: Luma PNGs, 16-bit).
+fn decode_to_rgb8(bytes: &[u8]) -> Result<image::RgbImage, ScanError> {
+    let decoded = image::load_from_memory(bytes).map_err(|err| {
+        ScanError::new(
+            ScanErrorKind::InvalidInput,
+            "scan input is not a readable JPEG/PNG image",
+        )
+        .with_details(err.to_string())
+    })?;
+    match decoded {
+        image::DynamicImage::ImageRgb8(buf) => Ok(buf),
+        image::DynamicImage::ImageRgba8(buf) => {
+            let (w, h) = (buf.width(), buf.height());
+            let mut raw = buf.into_raw();
+            let pixels = raw.len() / 4;
+            // Forward compaction is safe: write index (3i) never passes
+            // read index (4i), so no unread byte is ever clobbered.
+            for i in 0..pixels {
+                raw[i * 3] = raw[i * 4];
+                raw[i * 3 + 1] = raw[i * 4 + 1];
+                raw[i * 3 + 2] = raw[i * 4 + 2];
+            }
+            raw.truncate(pixels * 3);
+            image::RgbImage::from_raw(w, h, raw).ok_or_else(|| {
+                ScanError::new(
+                    ScanErrorKind::InvalidInput,
+                    "RGBA alpha-strip produced a short buffer",
+                )
+            })
+        }
+        other => Ok(other.into_rgb8()),
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +266,120 @@ mod tests {
             let back = image::load_from_memory(&out.bytes).expect("decodes");
             assert_eq!((back.width(), back.height()), (out.width, out.height));
         }
+    }
+
+    #[test]
+    fn single_encode_keeps_detection_and_mode_semantics() {
+        // 5-1: warp→mode→encode once must not move detection (same input,
+        // same corners/confidence as the color path) and the mode must
+        // survive the single JPEG generation.
+        let (bytes, _, _) = doc_photo();
+        let color = scan_document(&ScanRequest {
+            bytes: bytes.clone(),
+            mode: ScanMode::Original,
+            detect_only: false,
+        })
+        .expect("scans");
+        assert!(!color.fallback);
+        let gray = scan_document(&ScanRequest {
+            bytes: bytes.clone(),
+            mode: ScanMode::Grayscale,
+            detect_only: false,
+        })
+        .expect("scans");
+        assert!(!gray.fallback);
+        assert_eq!(gray.corners, color.corners);
+        assert_eq!(gray.confidence, color.confidence);
+        assert_eq!((gray.width, gray.height), (color.width, color.height));
+        // Grayscale survives its JPEG: mean inter-channel spread stays
+        // tiny (chroma-subsampling noise averages out over the page).
+        let back = image::load_from_memory(&gray.bytes)
+            .expect("decodes")
+            .into_rgb8();
+        let (mut spread, mut n) = (0u64, 0u64);
+        for px in back.pixels() {
+            let (r, g, b) = (u64::from(px[0]), u64::from(px[1]), u64::from(px[2]));
+            spread += r.max(g).max(b) - r.min(g).min(b);
+            n += 1;
+        }
+        assert!(
+            spread as f64 / n as f64 <= 6.0,
+            "mean channel spread {}",
+            spread as f64 / n as f64
+        );
+        // B&W survives its JPEG: nearly every pixel stays near-binary
+        // (JPEG ringing only fringes the ink edges).
+        let bw = scan_document(&ScanRequest {
+            bytes,
+            mode: ScanMode::BlackWhite,
+            detect_only: false,
+        })
+        .expect("scans");
+        assert!(!bw.fallback);
+        let back = image::load_from_memory(&bw.bytes)
+            .expect("decodes")
+            .into_rgb8();
+        let total = (back.width() * back.height()) as usize;
+        let binary = back
+            .pixels()
+            .filter(|px| {
+                (px[0] < 48 && px[1] < 48 && px[2] < 48)
+                    || (px[0] > 207 && px[1] > 207 && px[2] > 207)
+            })
+            .count();
+        assert!(
+            binary as f64 / total as f64 > 0.95,
+            "binary fraction {}",
+            binary as f64 / total as f64
+        );
+    }
+
+    #[test]
+    fn rgba_alpha_strip_is_pixel_identical_to_crate_conversion() {
+        // R2: the in-place RGBA→RGB strip must produce EXACTLY the bytes
+        // `into_rgb8` would (which drops alpha without compositing), so
+        // detection/warp see bit-identical pixels with a lower peak.
+        let (w, h) = (64u32, 48u32);
+        let mut rgba = image::RgbaImage::new(w, h);
+        for (x, y, px) in rgba.enumerate_pixels_mut() {
+            let n = ((x * 7919 + y * 104729) % 256) as u8;
+            // Varied alpha (incl. fully transparent) exercises the strip.
+            *px = image::Rgba([n, 255 - n, (x + y) as u8, ((x * y) % 256) as u8]);
+        }
+        let mut png = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .expect("encodes");
+        let stripped = super::decode_to_rgb8(&png).expect("decodes");
+        let reference = image::load_from_memory(&png).expect("decodes").into_rgb8();
+        assert_eq!(stripped.as_raw(), reference.as_raw());
+    }
+
+    #[test]
+    fn rgba_input_scans_like_its_rgb_twin() {
+        // End to end: an opaque-alpha RGBA PNG detects the same document
+        // as the equivalent RGB JPEG (strip changes no pixel).
+        let (w, h) = (640u32, 800u32);
+        let mut rgba = image::RgbaImage::new(w, h);
+        for (x, y, px) in rgba.enumerate_pixels_mut() {
+            let inside = (100..540).contains(&x) && (120..680).contains(&y);
+            let v = if inside { 242u8 } else { 18u8 };
+            *px = image::Rgba([v, v, v, 255]);
+        }
+        let mut png = Vec::new();
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .expect("encodes");
+        let out = scan_document(&ScanRequest {
+            bytes: png,
+            mode: ScanMode::Original,
+            detect_only: false,
+        })
+        .expect("scans");
+        assert!(!out.fallback, "opaque RGBA must detect");
+        assert!(out.confidence >= 0.5, "{}", out.confidence);
     }
 
     #[test]

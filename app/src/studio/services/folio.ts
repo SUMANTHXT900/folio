@@ -473,8 +473,55 @@ const thumbUrls = new Map<string, Map<number, string>>();
 const thumbOrder: string[] = [];
 const MAX_THUMB_DOCS = 6;
 
+/**
+ * Per-document thumbnail page cap: a very large document must not grow
+ * an unbounded page→URL map. Oldest-cached pages evict first (Map
+ * insertion order); evicted URLs are revoked and listeners notified so
+ * hooks never serve them again.
+ */
+export const MAX_THUMB_PAGES_PER_DOC = 400;
+
+/** Generation bumped every time an eviction drops URLs for `docId`. */
+const thumbGenerations = new Map<string, number>();
+type ThumbEvictListener = (docId: string) => void;
+const thumbEvictListeners = new Set<ThumbEvictListener>();
+
+/**
+ * Subscribes to thumbnail evictions (LRU doc evict, per-doc page-cap
+ * evict, close). Hooks invalidate their URL arrays on notification so a
+ * revoked URL is never rendered. Returns an unsubscribe closure.
+ */
+export function subscribeThumbEvictions(listener: ThumbEvictListener): () => void {
+  thumbEvictListeners.add(listener);
+  return () => {
+    thumbEvictListeners.delete(listener);
+  };
+}
+
+/** Eviction generation for `docId` (0 when never evicted). */
+export function getThumbGeneration(docId: string): number {
+  return thumbGenerations.get(docId) ?? 0;
+}
+
+function noteThumbEvict(docId: string): void {
+  thumbGenerations.set(docId, getThumbGeneration(docId) + 1);
+  for (const listener of [...thumbEvictListeners]) {
+    try {
+      listener(docId);
+    } catch {
+      // Best effort — a hook must never break eviction.
+    }
+  }
+}
+
+/** True while `url` is still the live cached thumbnail for (docId, page). */
+export function isThumbUrlLive(docId: string, pageNumber: number, url: string): boolean {
+  return thumbUrls.get(docId)?.get(pageNumber) === url;
+}
+
 function revokeDocUrls(docId: string): void {
   const pages = thumbUrls.get(docId);
+  const had = pages !== undefined && pages.size > 0;
   if (pages !== undefined) {
     for (const url of pages.values()) {
       URL.revokeObjectURL(url);
@@ -484,6 +531,9 @@ function revokeDocUrls(docId: string): void {
   const index = thumbOrder.indexOf(docId);
   if (index >= 0) {
     thumbOrder.splice(index, 1);
+  }
+  if (had) {
+    noteThumbEvict(docId);
   }
 }
 
@@ -506,6 +556,91 @@ function touchDoc(docId: string): Map<number, string> {
   }
   return pages as Map<number, string>;
 }
+
+/**
+ * Caches one thumbnail URL under the per-document page cap. Evicted
+ * pages are revoked immediately and listeners notified (same contract
+ * as document eviction). The just-written page is never the victim.
+ */
+function thumbCacheSet(
+  cache: Map<number, string>,
+  docId: string,
+  pageNumber: number,
+  url: string,
+): void {
+  cache.set(pageNumber, url);
+  while (cache.size > MAX_THUMB_PAGES_PER_DOC) {
+    let oldest: number | undefined;
+    for (const key of cache.keys()) {
+      if (key !== pageNumber) {
+        oldest = key;
+        break;
+      }
+    }
+    if (oldest === undefined) {
+      break;
+    }
+    const evicted = cache.get(oldest);
+    cache.delete(oldest);
+    if (evicted !== undefined) {
+      try {
+        URL.revokeObjectURL(evicted);
+      } catch {
+        // Best effort.
+      }
+    }
+    noteThumbEvict(docId);
+  }
+}
+
+/**
+ * Revalidates the thumbnail cache after an await: returns the live map,
+ * or null when the document closed mid-flight (never resurrect entries
+ * for a closed document). An evicted-but-open document re-touches as
+ * MRU so fresh URLs always land in the live map.
+ */
+function liveThumbCache(docId: string): Map<number, string> | null {
+  if (renderDocIds.get(docId) === undefined) {
+    return null;
+  }
+  return thumbUrls.get(docId) ?? touchDoc(docId);
+}
+
+/** Test-only access to the thumbnail cache (eviction + validity). */
+export const __thumbCacheForTests = {
+  maxDocs: MAX_THUMB_DOCS,
+  maxPagesPerDoc: MAX_THUMB_PAGES_PER_DOC,
+  touch: touchDoc,
+  set: thumbCacheSet,
+  revokeDoc: revokeDocUrls,
+  live: isThumbUrlLive,
+  generation: getThumbGeneration,
+  subscribe: subscribeThumbEvictions,
+  size(docId: string): number {
+    return thumbUrls.get(docId)?.size ?? 0;
+  },
+  has(docId: string): boolean {
+    return thumbUrls.has(docId);
+  },
+  clearForTests(): void {
+    for (const docId of [...thumbUrls.keys()]) {
+      const pages = thumbUrls.get(docId);
+      thumbUrls.delete(docId);
+      if (pages !== undefined) {
+        for (const url of pages.values()) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            // Best effort.
+          }
+        }
+      }
+    }
+    thumbOrder.length = 0;
+    thumbGenerations.clear();
+    thumbEvictListeners.clear();
+  },
+};
 
 function canvasToUrl(canvas: HTMLCanvasElement): Promise<string> {
   // MIME fallback chain: some environments lack a webp encoder (or fail
@@ -563,15 +698,21 @@ export async function encodeThumbCanvases(
   items: ReadonlyArray<{ canvas: HTMLCanvasElement; pageNumber: number }>,
   concurrency: number,
   encodeOne: (canvas: HTMLCanvasElement) => Promise<string> = canvasToUrl,
+  shouldCancel?: () => boolean,
 ): Promise<string[]> {
   const urls = new Array<string>(items.length);
   let next = 0;
   let firstError: unknown;
   let failed = false;
+  let aborted = false;
   async function lane(): Promise<void> {
     // Single-threaded cooperative scheduling: the check-and-claim below
     // runs without an intervening await, so no two lanes claim one slot.
     while (next < items.length) {
+      if (shouldCancel?.() === true) {
+        aborted = true;
+        break;
+      }
       const index = next;
       next += 1;
       const item = items[index];
@@ -586,10 +727,40 @@ export async function encodeThumbCanvases(
         item.canvas.width = 0;
         item.canvas.height = 0;
       }
+      if (shouldCancel?.() === true) {
+        aborted = true;
+        break;
+      }
     }
   }
   const lanes = Math.max(1, Math.min(concurrency, items.length));
   await Promise.all(Array.from({ length: lanes }, () => lane()));
+  if (aborted) {
+    // Cancel-during-encode: release canvases no lane claimed and revoke
+    // URLs minted before the abort, so a cancelled job leaves neither a
+    // bitmap nor an orphaned object URL behind. Cache writes never happen.
+    for (let index = next; index < items.length; index += 1) {
+      const item = items[index];
+      if (item !== undefined) {
+        item.canvas.width = 0;
+        item.canvas.height = 0;
+      }
+    }
+    for (let index = 0; index < urls.length; index += 1) {
+      const url = urls[index];
+      if (url !== undefined) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // Best effort.
+        }
+      }
+    }
+    throw toStudioError(
+      { code: 'CANCELLED', message: 'thumbnail job was cancelled' },
+      'pdf.inspect',
+    );
+  }
   if (failed) {
     throw firstError;
   }
@@ -626,7 +797,21 @@ export async function studioThumb(docId: string, pageNumber: number): Promise<st
     // Release the canvas bitmap now that the encoded URL exists.
     result.canvas.width = 0;
     result.canvas.height = 0;
-    pages.set(pageNumber, url);
+    // The document may have closed or been evicted mid-flight: never
+    // resurrect a dropped entry or serve a URL for a closed document.
+    const live = liveThumbCache(docId);
+    if (live === null) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // Best effort.
+      }
+      throw toStudioError(
+        { code: 'INVALID_INPUT', message: 'document is no longer open' },
+        'pdf.inspect',
+      );
+    }
+    thumbCacheSet(live, docId, pageNumber, url);
     return url;
   } finally {
     untrackThumbJob(docId, cancel);
@@ -686,15 +871,65 @@ export function studioThumbWindow(
       } finally {
         endRender();
       }
+      if (cancelled) {
+        // Cancel-during-render: release every bitmap, write nothing.
+        for (const item of results) {
+          item.canvas.width = 0;
+          item.canvas.height = 0;
+        }
+        throw toStudioError(
+          { code: 'CANCELLED', message: 'thumbnail job was cancelled' },
+          'pdf.inspect',
+        );
+      }
       // P2 finding 13: bounded-concurrency encodes (render is already
       // concurrency-2; the old sequential for-await loop is gone). Order is
       // restored through the input page list below, not completion order.
+      // The encode lanes also observe `cancelled` and abort (revoking
+      // URLs minted before the abort, releasing unclaimed bitmaps).
       const endEncode = beginPerfSpan('studio:thumb-window:encode');
       let urls: string[];
       try {
-        urls = await encodeThumbCanvases(results, THUMB_ENCODE_CONCURRENCY);
+        urls = await encodeThumbCanvases(
+          results,
+          THUMB_ENCODE_CONCURRENCY,
+          canvasToUrl,
+          () => cancelled,
+        );
       } finally {
         endEncode();
+      }
+      if (cancelled) {
+        // Cancel-during-encode: revoke the fresh URLs (nobody owns them
+        // yet) and never write the cache.
+        for (const url of urls) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            // Best effort.
+          }
+        }
+        throw toStudioError(
+          { code: 'CANCELLED', message: 'thumbnail job was cancelled' },
+          'pdf.inspect',
+        );
+      }
+      // Never resurrect a dropped entry: a close/evict mid-flight means
+      // the `cache` handle is stale. Closed documents fail; evicted-but-
+      // open documents re-touch as MRU so fresh URLs land in the live map.
+      const live = liveThumbCache(docId);
+      if (live === null) {
+        for (const url of urls) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            // Best effort.
+          }
+        }
+        throw toStudioError(
+          { code: 'INVALID_INPUT', message: 'document is no longer open' },
+          'pdf.inspect',
+        );
       }
       const byPage = new Map<number, string>();
       for (let index = 0; index < results.length; index += 1) {
@@ -703,7 +938,7 @@ export function studioThumbWindow(
       for (const page of missing) {
         const url = byPage.get(page);
         if (url !== undefined) {
-          cache.set(page, url);
+          thumbCacheSet(live, docId, page, url);
           out.set(page, url);
         }
       }
@@ -730,12 +965,13 @@ export function studioThumbWindow(
 // the scale-2 render + encode. Render ids are `renderdoc-N` (no colons), so
 // `renderId:page` keys are unambiguous.
 //
-// Ownership: the caller still owns revocation of the returned URL (contract
-// unchanged). The service additionally revokes a cached entry when it is
-// evicted and when its document closes, so the cache itself never leaks.
-// Tools never re-request within a mount (per-mount map) and a document close
-// purges its entries, so a revoked URL is never re-served through the
-// tool paths.
+// Ownership (single-owner rule): the SERVICE owns every cached preview URL
+// — it alone revokes entries, on LRU evict and on document close. Callers
+// borrow the returned string and MUST NOT revoke it; a borrowed URL stays
+// valid until the service evicts it or its document closes. Callers that
+// hold a URL across awaits re-request through `studioPreview` (a live hit
+// returns the same URL) or verify with `isPreviewUrlLive` — a dropped key
+// is never re-served, the page simply re-renders on the next request.
 const previewUrls = new Map<string, string>();
 const previewOrder: string[] = [];
 const MAX_PREVIEW_URLS = 8;
@@ -784,6 +1020,37 @@ function previewCacheHit(key: string): string | undefined {
   return hit;
 }
 
+/**
+ * Validity check for a borrowed preview URL: true while `url` is still
+ * the live cached entry for (renderId, page). Evicted/purged keys fail,
+ * so a revoked URL is never mistaken for a live one.
+ */
+export function isPreviewUrlLive(renderId: string, pageNumber: number, url: string): boolean {
+  return previewUrls.get(previewCacheKey(renderId, pageNumber)) === url;
+}
+
+/** Test-only access to the preview cache (eviction + validity). */
+export const __previewCacheForTests = {
+  max: MAX_PREVIEW_URLS,
+  key: previewCacheKey,
+  touch: previewCacheTouch,
+  hit: previewCacheHit,
+  live: isPreviewUrlLive,
+  size(): number {
+    return previewUrls.size;
+  },
+  has(renderId: string, pageNumber: number): boolean {
+    return previewUrls.has(previewCacheKey(renderId, pageNumber));
+  },
+  clearForTests(): void {
+    for (const url of previewUrls.values()) {
+      revokePreviewUrl(url);
+    }
+    previewUrls.clear();
+    previewOrder.length = 0;
+  },
+};
+
 /** Revokes and drops every cached preview rendered from `renderId`. */
 function purgePreviewsForRender(renderId: string): void {
   const prefix = `${renderId}:`;
@@ -802,7 +1069,10 @@ function purgePreviewsForRender(renderId: string): void {
   }
 }
 
-/** Full-resolution preview as an object URL (caller owns revocation). */
+/**
+ * Full-resolution preview as an object URL (service-owned, borrowed by
+ * the caller — see the ownership rule above; never revoke the result).
+ */
 export async function studioPreview(docId: string, pageNumber: number): Promise<string> {
   const { renders } = await engines();
   const renderId = renderDocIds.get(docId);
@@ -879,7 +1149,10 @@ export async function studioShare(
   // Same sanitize-as-the-last-mile policy as `studioDownload`: the share
   // sheet must never receive a raw caller-provided filename.
   const safeName = sanitizeFileName(name);
-  const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
+  const blob =
+    bytes instanceof Blob
+      ? bytes
+      : new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
   const file = new File([blob], safeName, { type: 'application/pdf' });
   if (!nav.canShare({ files: [file] })) {
     return 'unavailable';

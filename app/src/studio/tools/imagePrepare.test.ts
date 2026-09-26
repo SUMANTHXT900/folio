@@ -4,8 +4,13 @@
  * ordering of the contract, not pixel math (covered natively by
  * `engine/tests/pdf_images_to_pdf.rs`).
  */
-import { describe, expect, it, vi } from 'vitest';
-import { outputMime, preparePageBytes, type ImageRenderer } from './imagePrepare';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import {
+  browserImageRenderer,
+  outputMime,
+  preparePageBytes,
+  type ImageRenderer,
+} from './imagePrepare';
 import { createPage } from './imagePages';
 
 function stubRenderer(bytes = new Uint8Array([9, 9, 9])): ImageRenderer & {
@@ -22,10 +27,10 @@ function stubRenderer(bytes = new Uint8Array([9, 9, 9])): ImageRenderer & {
 }
 
 describe('outputMime', () => {
-  it('keeps JPEG as JPEG and maps everything else to PNG', () => {
+  it('always emits JPEG: rotated PNGs must not stay PNG (raw-RGB embed blowup, 5-2)', () => {
     expect(outputMime(new File(['x'], 'a.jpg', { type: 'image/jpeg' }))).toBe('image/jpeg');
-    expect(outputMime(new File(['x'], 'b.png', { type: 'image/png' }))).toBe('image/png');
-    expect(outputMime(new File(['x'], 'c', { type: '' }))).toBe('image/png');
+    expect(outputMime(new File(['x'], 'b.png', { type: 'image/png' }))).toBe('image/jpeg');
+    expect(outputMime(new File(['x'], 'c', { type: '' }))).toBe('image/jpeg');
   });
 });
 
@@ -44,7 +49,7 @@ describe('preparePageBytes', () => {
     expect(renderer.rotateToBytes).not.toHaveBeenCalled();
   });
 
-  it('routes rotated pages through the renderer with degrees + MIME', async () => {
+  it('routes rotated PNG pages through the renderer as JPEG (5-2)', async () => {
     const base = {
       id: 'b',
       source: 'upload' as const,
@@ -56,7 +61,24 @@ describe('preparePageBytes', () => {
     const out = await preparePageBytes(page, renderer);
     expect(out.name).toBe('b.png');
     expect(Array.from(out.bytes)).toEqual([1, 2]);
-    expect(renderer.calls).toEqual([{ degrees: 90, mime: 'image/png' }]);
+    expect(renderer.calls).toEqual([{ degrees: 90, mime: 'image/jpeg' }]);
+  });
+
+  it('routes every quarter-turn of a PNG source as JPEG', async () => {
+    for (const degrees of [90, 180, 270] as const) {
+      const page = {
+        ...createPage({
+          id: `p-${degrees}`,
+          source: 'upload' as const,
+          file: new File(['x'], 'shot.png', { type: 'image/png' }),
+          name: 'shot.png',
+        }),
+        rotationDeg: degrees,
+      };
+      const renderer = stubRenderer();
+      await preparePageBytes(page, renderer);
+      expect(renderer.calls).toEqual([{ degrees, mime: 'image/jpeg' }]);
+    }
   });
 
   it('uses JPEG MIME for rotated JPEG sources', async () => {
@@ -72,5 +94,69 @@ describe('preparePageBytes', () => {
     const renderer = stubRenderer();
     await preparePageBytes(page, renderer);
     expect(renderer.calls).toEqual([{ degrees: 270, mime: 'image/jpeg' }]);
+  });
+});
+
+describe('browserImageRenderer JPEG-out (5-2)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // @ts-expect-error test-only cleanup of stubbed globals
+    delete globalThis.createImageBitmap;
+  });
+
+  /** Canvas double recording 2D call order (jsdom has no 2D context). */
+  function stubCanvas() {
+    const calls: string[] = [];
+    const ctx = {
+      fillStyle: '',
+      fillRect: vi.fn((..._args: unknown[]) => {
+        calls.push('fillRect');
+      }),
+      translate: vi.fn((..._args: unknown[]) => {
+        calls.push('translate');
+      }),
+      rotate: vi.fn((..._args: unknown[]) => {
+        calls.push('rotate');
+      }),
+      drawImage: vi.fn((..._args: unknown[]) => {
+        calls.push('drawImage');
+      }),
+    };
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => ctx),
+      toBlob: vi.fn((resolve: (blob: Blob | null) => void, mime: string, quality: number) => {
+        calls.push(`toBlob:${mime}:${quality}`);
+        resolve(new Blob([new Uint8Array([1, 2, 3])], { type: mime }));
+      }),
+    };
+    return { canvas, ctx, calls };
+  }
+
+  it('white-fills before drawing and encodes JPEG at q0.92', async () => {
+    const { canvas, ctx, calls } = stubCanvas();
+    vi.spyOn(document, 'createElement').mockReturnValue(canvas as unknown as HTMLElement);
+    const close = vi.fn();
+    (globalThis as unknown as Record<string, unknown>)['createImageBitmap'] = async () => ({
+      width: 40,
+      height: 30,
+      close,
+    });
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    const bytes = await browserImageRenderer.rotateToBytes(file, 90, 'image/jpeg');
+    expect(Array.from(bytes)).toEqual([1, 2, 3]);
+    // 90° swaps dims (40×30 → 30×40): the white fill covers the full
+    // rotated canvas BEFORE the rotated draw, so transparent PNG pixels
+    // composite to white (never baked black).
+    expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 30, 40);
+    expect(canvas.width).toBe(0); // Released after encode.
+    expect(ctx.fillStyle).toBe('#ffffff');
+    const fillAt = calls.indexOf('fillRect');
+    const drawAt = calls.indexOf('drawImage');
+    expect(fillAt).toBeGreaterThanOrEqual(0);
+    expect(drawAt).toBeGreaterThan(fillAt);
+    expect(calls).toContain('toBlob:image/jpeg:0.92');
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

@@ -97,6 +97,41 @@ fn bench(name: &str, w: u32, h: u32, light: u8, mode: ScanMode) {
     bench_styled(name, w, h, light, [242, 242, 242], false, false, mode);
 }
 
+/// Repeated-timing variant for before/after comparisons (5-1/5-6): the
+/// fixture is generated once, then the full pipeline runs `reps` times
+/// and the MINIMUM total is reported (min is robust to machine noise;
+/// the mean would bill background load to the code). Detection inputs
+/// (corners/confidence) are asserted stable across reps.
+fn bench_repeat(name: &str, w: u32, h: u32, light: u8, mode: ScanMode, reps: usize) {
+    let input = doc_photo_styled(w, h, light, [242, 242, 242], false, false);
+    let mut totals = Vec::with_capacity(reps);
+    let mut first: Option<(u32, u32, f64, usize)> = None;
+    for _ in 0..reps {
+        let t = Instant::now();
+        let out = scan_document(&ScanRequest {
+            bytes: input.clone(),
+            mode,
+            detect_only: false,
+        })
+        .expect("scans");
+        totals.push(t.elapsed().as_secs_f64() * 1000.0);
+        let sig = (out.width, out.height, out.confidence, out.bytes.len());
+        if let Some(prev) = first {
+            assert_eq!(prev, sig, "{name}: run-to-run instability");
+        } else {
+            first = Some(sig);
+        }
+    }
+    totals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (w_out, h_out, conf, len) = first.unwrap();
+    println!(
+        "{name:22} {w}x{h}  reps={reps}  min={:8.1}ms  median={:8.1}ms  max={:8.1}ms  out={w_out}x{h_out}  conf={conf:.2}  bytes={len}",
+        totals[0],
+        totals[reps / 2],
+        totals[reps - 1],
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bench_styled(
     name: &str,
@@ -139,8 +174,33 @@ fn bench_styled(
 
 fn main() {
     println!("folio-scan benchmark (release, synthetic fixtures)");
-    bench("phone 12MP original", 4000, 3000, 18, ScanMode::Original);
-    bench("phone 12MP b/w", 4000, 3000, 18, ScanMode::BlackWhite);
+    // Comparison rows (5-1 single encode, 5-6 capture downscale): repeated
+    // timing, min reported. Run on the base commit for before-numbers.
+    bench_repeat("phone 12MP original", 4000, 3000, 18, ScanMode::Original, 5);
+    bench_repeat("phone 12MP b/w", 4000, 3000, 18, ScanMode::BlackWhite, 5);
+    // 5-6 capture-downscale analogues: the SAME framing generated at the
+    // 2500px capture budget (what the capture canvas now emits). Detection
+    // runs at 800px either way so corners/confidence should match the 12MP
+    // rows; the warp OUTPUT is smaller (output size follows input quad
+    // pixels until the 2500px cap binds — the deliberate 5-6 tradeoff:
+    // ~2.5× fewer output pixels for ~3× less scan time, documented at the
+    // capture site).
+    bench_repeat(
+        "pre-scaled 2500px original",
+        2500,
+        1875,
+        18,
+        ScanMode::Original,
+        5,
+    );
+    bench_repeat(
+        "pre-scaled 2500px b/w",
+        2500,
+        1875,
+        18,
+        ScanMode::BlackWhite,
+        5,
+    );
     bench("medium document", 1280, 960, 18, ScanMode::Original);
     bench("webcam", 640, 480, 18, ScanMode::Original);
     bench("low-light medium", 1280, 960, 8, ScanMode::Original);

@@ -103,6 +103,15 @@ export interface ImportRenderer {
 /* ---------- JPEG encode offload (P2 item 11) ---------- */
 
 /**
+ * Encode protocol version (v1: initial versioned framing). Mirrors
+ * `ENCODE_PROTOCOL_VERSION` in `imageEncode.worker.ts` — kept as a
+ * local constant (never a runtime import: importing the worker module
+ * would execute its boot `postMessage` on the main thread). A test
+ * below pins both to 1; bump both together if the framing ever changes.
+ */
+export const ENCODE_PROTOCOL_VERSION = 1;
+
+/**
  * Thrown when the encode worker cannot be used WITHOUT consuming the
  * caller's bitmap (no `Worker`, construction failed, no worker-side
  * `OffscreenCanvas`, or the post itself was rejected): the caller must
@@ -139,6 +148,18 @@ let encodeWorkerReady: Promise<boolean> | null = null;
 let encodeWorkerDead = false;
 let encodeWorkerSeq = 0;
 const pendingEncodes = new Map<number, PendingEncode>();
+/**
+ * Silently-dropped worker messages (malformed framing, unroutable jobs,
+ * version mismatches without a job to fail). Diagnostic only — no UI
+ * reads this; unit tests assert it so nothing vanishes uncounted
+ * (mirrors `ScanWorkerClient.droppedMessages`).
+ */
+let encodeDroppedMessages = 0;
+
+/** Diagnostic count of silently-dropped encode-worker messages. */
+export function getEncodeDroppedMessages(): number {
+  return encodeDroppedMessages;
+}
 
 /** Maximum time one encode may occupy the worker before it is failed. */
 const ENCODE_WORKER_TIMEOUT_MS = 30_000;
@@ -162,10 +183,37 @@ export function __resetEncodeWorkerForTests(): void {
   encodeWorker = null;
   encodeWorkerReady = null;
   encodeWorkerDead = false;
+  encodeDroppedMessages = 0;
   for (const [, job] of pendingEncodes) {
     clearTimeout(job.timer);
   }
   pendingEncodes.clear();
+}
+
+/**
+ * Explicit disposal: terminates the worker and fails in-flight jobs
+ * loudly (the bitmap was already transferred, so main-thread fallback
+ * is impossible — callers must propagate as per-file errors, never
+ * retry with the neutered handle). Unlike the broken-worker latch,
+ * disposal is owner-initiated teardown: the dead latch is cleared and
+ * the next encode transparently recreates the worker. Call when the
+ * owning surface unmounts; the import queue's sequential discipline
+ * means at most one job is ever in flight.
+ */
+export function disposeEncodeWorker(): void {
+  try {
+    encodeWorker?.terminate();
+  } catch {
+    // Best effort.
+  }
+  encodeWorker = null;
+  encodeWorkerReady = null;
+  encodeWorkerDead = false;
+  for (const [id, job] of pendingEncodes) {
+    pendingEncodes.delete(id);
+    clearTimeout(job.timer);
+    job.reject(new Error('Encode worker disposed.'));
+  }
 }
 
 function poisonEncodeWorker(): void {
@@ -185,17 +233,46 @@ function poisonEncodeWorker(): void {
 }
 
 function routeEncodeResult(data: unknown): void {
-  if (data === null || typeof data !== 'object') return;
+  if (data === null || typeof data !== 'object') {
+    encodeDroppedMessages += 1; // Unroutable framing: ignore, never throw.
+    return;
+  }
   const msg = data as {
+    protocol?: unknown;
     kind?: unknown;
     id?: unknown;
     ok?: unknown;
     buffer?: unknown;
     message?: unknown;
   };
-  if (msg.kind !== 'result' || typeof msg.id !== 'number') return;
+  if (msg.kind !== 'result' || typeof msg.id !== 'number') {
+    encodeDroppedMessages += 1; // Status spam / uncorrelatable: counted.
+    return;
+  }
+  // Version gate: absent `protocol` is the pre-v1 worker (accepted —
+  // the worker and client ship together, and every test double predates
+  // versioning); a present-but-wrong version fails the job loudly
+  // instead of hanging it until the 30 s timeout.
+  if (msg.protocol !== undefined && msg.protocol !== ENCODE_PROTOCOL_VERSION) {
+    const job = pendingEncodes.get(msg.id);
+    if (job === undefined) {
+      encodeDroppedMessages += 1;
+      return;
+    }
+    pendingEncodes.delete(msg.id);
+    clearTimeout(job.timer);
+    job.reject(
+      new Error(
+        `Unsupported encode protocol ${String(msg.protocol)} (client speaks ${ENCODE_PROTOCOL_VERSION}).`,
+      ),
+    );
+    return;
+  }
   const job = pendingEncodes.get(msg.id);
-  if (job === undefined) return;
+  if (job === undefined) {
+    encodeDroppedMessages += 1; // Unknown or already-settled job: discard.
+    return;
+  }
   pendingEncodes.delete(msg.id);
   clearTimeout(job.timer);
   if (msg.ok === true && msg.buffer instanceof ArrayBuffer) {
@@ -265,8 +342,11 @@ function ensureEncodeWorker(): Promise<boolean> {
 
 /**
  * Encodes `bitmap` to JPEG in the encode worker, TRANSFERRING the
- * bitmap. On success the worker owns closing; the sender's copy is
- * neutered (its `close()` is a harmless no-op the caller still runs).
+ * bitmap. The request carries `protocol: 1` (the worker accepts
+ * unversioned requests but requires equality when present, so this
+ * stays backward-compatible). On success the worker owns closing; the
+ * sender's copy is neutered (its `close()` is a harmless no-op the
+ * caller still runs).
  *
  * Throws `EncodeWorkerUnavailableError` when the bitmap was NOT
  * consumed (safe to fall back); any other throw means the transfer
@@ -296,6 +376,7 @@ export async function encodeBitmapToJpeg(
     try {
       worker.postMessage(
         {
+          protocol: ENCODE_PROTOCOL_VERSION,
           kind: 'encode',
           id,
           bitmap,

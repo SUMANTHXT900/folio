@@ -73,6 +73,19 @@ export const MANY_CORE_THRESHOLD = 8;
  */
 export const MAX_SHARD_IN_FLIGHT_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Decode-cost bound for the sharded path (5-3): total pixels allowed
+ * across the batch before sharding is capped to K=1. Bytes understate
+ * decode cost ~18× for JPEG (a 2 MB phone photo decodes to ~36 MB of
+ * RGB), so large-but-compact batches must not fan out across K
+ * concurrent WASM decodes. Calibrated against the normalization caps:
+ * import/scan outputs are clamped to a 2500px long edge (~4.7 MP each),
+ * so an 8-page normalized batch peaks at ~37 MP and still shards;
+ * batches with full-resolution pages (e.g. rotated originals, which
+ * bypass import normalization) trip this gate and stay single-worker.
+ */
+export const MAX_SHARD_PIXELS = 48_000_000;
+
 /** Share of overall progress attributed to the shard phase (rest: merge). */
 export const SHARD_PHASE_WEIGHT = 0.9;
 
@@ -81,6 +94,20 @@ export interface ShardedImagesInput {
   stagedIds: string[];
   /** Staged byte lengths, same order (memory gate + progress weights). */
   stagedSizes: number[];
+  /**
+   * Decode cost per staged image (w×h, known at prepare time), same
+   * order (5-3 pixel gate). Optional: batches without it keep the
+   * historical byte-only gate byte-for-byte.
+   */
+  stagedPixels?: number[];
+  /**
+   * Retained scan originals still resident with the collection (5-3):
+   * pre-scan captures kept for Use-original provenance occupy tab
+   * memory alongside the build, so they join the pixel estimate.
+   * Caller-supplied (the store lives with the page collection);
+   * absent entries simply do not count.
+   */
+  retainedPixels?: number[];
   pageSize: 'fit' | 'standard';
   /**
    * Test/SSR override for `navigator.hardwareConcurrency`. Defaults to
@@ -114,13 +141,26 @@ function readHardwareConcurrency(): number | undefined {
 /**
  * Pure policy: how many `images_to_pdf` shard jobs for this batch.
  * Returns 1 for the single-worker path. Exported for unit tests.
+ *
+ * Gate order is deliberate (M5): the page-count check runs first so
+ * small batches keep the single-worker path byte-for-byte, then the
+ * pre-stage byte cap, then the decode-cost pixel cap (5-3). Callers
+ * SHOULD evaluate this policy on pre-stage sums (Σ `file.size` +
+ * Σ known w×h, retained originals included) BEFORE the prepare loop
+ * materializes staged bytes: an early single-path decision skips
+ * staging K-way fan-out inputs that the gate would reject afterwards
+ * anyway. Evaluating it again post-stage on staged sizes is harmless
+ * (same answer, same small-batch behavior).
  */
 export function resolveShardCount(
   pageCount: number,
-  options?: { hardwareConcurrency?: number; totalBytes?: number },
+  options?: { hardwareConcurrency?: number; totalBytes?: number; totalPixels?: number },
 ): number {
   if (pageCount < SHARD_THRESHOLD_PAGES) return 1;
   if (options?.totalBytes !== undefined && options.totalBytes > MAX_SHARD_IN_FLIGHT_BYTES) {
+    return 1;
+  }
+  if (options?.totalPixels !== undefined && options.totalPixels > MAX_SHARD_PIXELS) {
     return 1;
   }
   const concurrency = options?.hardwareConcurrency ?? readHardwareConcurrency();
@@ -153,6 +193,23 @@ export function planShards(pageCount: number, shardCount: number): number[][] {
 /** Sum of staged bytes currently in flight (memory-gate input). */
 export function estimateInFlightBytes(stagedSizes: readonly number[]): number {
   return stagedSizes.reduce((sum, size) => sum + Math.max(0, size), 0);
+}
+
+/**
+ * Sum of decode cost (pixels) across staged images plus retained scan
+ * originals (5-3 pixel-gate input). Retained originals are compressed
+ * handles, not decoded bitmaps, so they stand in for latent tab memory
+ * held alongside the build — deliberately conservative. Missing pixel
+ * entries (batches prepared before dims were plumbed) count as zero:
+ * the byte gate below still bounds those batches exactly as before.
+ */
+export function estimatePixelCost(
+  stagedPixels: readonly number[] | undefined,
+  retainedPixels: readonly number[] | undefined,
+): number {
+  const sum = (sizes: readonly number[] | undefined): number =>
+    sizes === undefined ? 0 : sizes.reduce((total, pixels) => total + Math.max(0, pixels), 0);
+  return sum(stagedPixels) + sum(retainedPixels);
 }
 
 function cancelledError(): Error & { code: string } {
@@ -188,6 +245,7 @@ export function buildImagesPdf(
     const shardCount = resolveShardCount(pageCount, {
       hardwareConcurrency: input.hardwareConcurrency,
       totalBytes: estimateInFlightBytes(input.stagedSizes),
+      totalPixels: estimatePixelCost(input.stagedPixels, input.retainedPixels),
     });
 
     if (shardCount <= 1) {

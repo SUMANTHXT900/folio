@@ -7,8 +7,11 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   __setEncodeWorkerFactoryForTests,
   browserImportRenderer,
+  disposeEncodeWorker,
+  ENCODE_PROTOCOL_VERSION,
   EncodeWorkerUnavailableError,
   encodeBitmapToJpeg,
+  getEncodeDroppedMessages,
   MAX_IMPORT_LONG_EDGE,
   prepareImportFile,
   planNormalization,
@@ -258,7 +261,7 @@ describe('encode worker offload (P2 item 11)', () => {
   }
 
   /** FakeWorker-pattern double speaking the encode protocol. */
-  function fakeEncodeWorker(offscreen: boolean, replyBytes: number[]) {
+  function fakeEncodeWorker(offscreen: boolean, replyBytes: number[], replyProtocol?: number) {
     return class {
       onmessage: ((ev: MessageEvent) => void) | null = null;
       onerror: ((ev: Event) => void) | null = null;
@@ -279,7 +282,10 @@ describe('encode worker offload (P2 item 11)', () => {
           const buffer = new Uint8Array(replyBytes).buffer;
           queueMicrotask(() => {
             this.onmessage?.({
-              data: { kind: 'result', id, ok: true, buffer },
+              data:
+                replyProtocol === undefined
+                  ? { kind: 'result', id, ok: true, buffer }
+                  : { protocol: replyProtocol, kind: 'result', id, ok: true, buffer },
             } as unknown as MessageEvent);
           });
         }
@@ -380,5 +386,104 @@ describe('encode worker offload (P2 item 11)', () => {
     expect(instances[0]?.posted).toHaveLength(0);
     expect(bytes).toEqual(new Uint8Array([5, 6, 7]));
     expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 20, 15);
+  });
+
+  it('pins the client protocol version and emits it on every encode', async () => {
+    expect(ENCODE_PROTOCOL_VERSION).toBe(1);
+    const FakeWorker = fakeEncodeWorker(true, [7, 7, 7]);
+    const instances: Array<InstanceType<typeof FakeWorker>> = [];
+    __setEncodeWorkerFactoryForTests(() => {
+      const worker = new FakeWorker();
+      instances.push(worker);
+      return worker as unknown as Worker;
+    });
+    const bytes = await encodeBitmapToJpeg(fakeBitmap(), { width: 40, height: 30 }, 0.92);
+    expect(bytes).toEqual(new Uint8Array([7, 7, 7]));
+    // The worker accepts unversioned requests but requires equality when
+    // present: the client always versions (backward-compatible).
+    expect(instances[0]?.posted[0]).toMatchObject({ protocol: 1, kind: 'encode' });
+  });
+
+  it('still accepts unversioned results (pre-v1 worker doubles)', async () => {
+    // The default fake replies with NO protocol: the client must resolve,
+    // not hang until its 30 s timeout.
+    const FakeWorker = fakeEncodeWorker(true, [1, 2]);
+    __setEncodeWorkerFactoryForTests(() => new FakeWorker() as unknown as Worker);
+    await expect(encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92)).resolves.toEqual(
+      new Uint8Array([1, 2]),
+    );
+    expect(getEncodeDroppedMessages()).toBe(0);
+  });
+
+  it('fails version-mismatched jobs loudly instead of timing out', async () => {
+    const FakeWorker = fakeEncodeWorker(true, [1, 2], 999);
+    __setEncodeWorkerFactoryForTests(() => new FakeWorker() as unknown as Worker);
+    await expect(encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92)).rejects.toThrow(
+      /Unsupported encode protocol 999/,
+    );
+  });
+
+  it('counts unroutable worker messages as dropped (never throws)', async () => {
+    const FakeWorker = fakeEncodeWorker(true, [7]);
+    const instances: Array<InstanceType<typeof FakeWorker>> = [];
+    __setEncodeWorkerFactoryForTests(() => {
+      const worker = new FakeWorker();
+      instances.push(worker);
+      return worker as unknown as Worker;
+    });
+    await encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92);
+    const deliver = (data: unknown) =>
+      instances[0]?.onmessage?.({ data } as unknown as MessageEvent);
+    deliver(null);
+    deliver({ kind: 'bogus' });
+    deliver({ kind: 'result' }); // No numeric id: uncorrelatable.
+    deliver({ kind: 'result', id: 424242, ok: true }); // Unknown job.
+    expect(getEncodeDroppedMessages()).toBe(4);
+  });
+
+  it('dispose terminates the worker, fails in-flight jobs, and recreates on next use', async () => {
+    // Hanging double: accepts work, never answers.
+    class HangingWorker {
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      terminated = false;
+      constructor() {
+        queueMicrotask(() => {
+          this.onmessage?.({ data: { kind: 'ready', offscreen: true } } as MessageEvent);
+        });
+      }
+      postMessage(): void {
+        // Silence: the job stays pending until disposed.
+      }
+      terminate(): void {
+        this.terminated = true;
+      }
+    }
+    const instances: HangingWorker[] = [];
+    // A replying double for the post-dispose recreation check.
+    const ReplyingWorker = fakeEncodeWorker(true, [9, 9]);
+    let replying: InstanceType<typeof ReplyingWorker> | null = null;
+    let useReplying = false;
+    __setEncodeWorkerFactoryForTests(() => {
+      if (useReplying) {
+        replying = new ReplyingWorker();
+        return replying as unknown as Worker;
+      }
+      const worker = new HangingWorker();
+      instances.push(worker);
+      return worker as unknown as Worker;
+    });
+    const pending = encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92);
+    pending.catch(() => undefined); // Settle path asserted below.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    disposeEncodeWorker();
+    await expect(pending).rejects.toThrow('Encode worker disposed.');
+    expect(instances[0]?.terminated).toBe(true);
+    // Disposal clears the latch: the next encode recreates and succeeds.
+    useReplying = true;
+    await expect(encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92)).resolves.toEqual(
+      new Uint8Array([9, 9]),
+    );
+    expect(replying).not.toBeNull();
   });
 });

@@ -4,7 +4,9 @@
  *
  * Owns NO pixels in React state — only handles, URLs, and result
  * metadata. One `ScanWorkerClient` per hook instance (lazy WASM load on
- * first processing request, terminated on reset/unmount).
+ * first processing request — or earlier via `warm()` at camera start,
+ * so init overlaps viewfinder startup instead of the first live tick —
+ * terminated on reset/unmount).
  *
  * Generation safety: every async continuation checks the session
  * generation. `reset()` (Done / unmount / camera switch) bumps it and
@@ -29,6 +31,22 @@ import { ScanWorkerClient, type ScanResult, type ScanWorkerFactory } from './sca
  */
 const CORE_MODE = 'original' as const;
 
+/**
+ * Warmup payload (5-5): the canonical 1×1 transparent PNG. It decodes
+ * and detects (exercising the real worker path) with negligible pixel
+ * cost; the point is WASM init + worker boot, whose latency then
+ * overlaps camera startup instead of the first live tick / shutter.
+ * A corrupt payload would still warm identically (init precedes
+ * process) — the result is discarded either way.
+ */
+const WARMUP_PNG = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+  0x89, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0x00, 0x02, 0x00,
+  0x00, 0x05, 0x00, 0x01, 0xe9, 0xfa, 0xdc, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+  0xae, 0x42, 0x60, 0x82,
+]);
+
 export interface PendingReview {
   /** Original full-res capture (retained for Use original / retry). */
   original: File;
@@ -48,6 +66,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const clientRef = useRef<ScanWorkerClient | null>(null);
   const genRef = useRef(0);
   const livePendingRef = useRef(false);
+  const warmedGenRef = useRef(-1);
   const [processing, setProcessing] = useState(false);
   const [pending, setPending] = useState<PendingReview | null>(null);
   const [liveDetected, setLiveDetected] = useState(false);
@@ -70,6 +89,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const reset = useCallback(() => {
     genRef.current += 1;
     livePendingRef.current = false;
+    warmedGenRef.current = -1;
     revokePending(pendingRef.current);
     setPending(null);
     setProcessing(false);
@@ -196,6 +216,33 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     })();
   }, []);
 
+  /**
+   * Warms the scan worker at camera start (5-5): boots the worker + WASM
+   * with a 1×1 detect-only job so init overlaps viewfinder startup
+   * instead of the first live tick / shutter press. Generation-guarded
+   * like every other continuation (a reset before completion drops the
+   * result), errors swallowed (warmup never surfaces UI state), and one
+   * shot per session generation (repeat calls are no-ops). Touches no
+   * review state: `processing` stays false, `pending` stays null.
+   */
+  const warm = useCallback(() => {
+    const gen = genRef.current;
+    if (warmedGenRef.current === gen) return;
+    warmedGenRef.current = gen;
+    void (async () => {
+      try {
+        // Fresh exact-range copy: process() transfers (neuters) its
+        // input, and the module-level payload must stay intact for the
+        // next session's warmup.
+        const result = await client().process(WARMUP_PNG.slice(), CORE_MODE, true);
+        if (genRef.current !== gen) return; // Stale: drop silently.
+        void result;
+      } catch {
+        // Warmup is best-effort: the first real job retries init.
+      }
+    })();
+  }, []);
+
   return {
     processing,
     pending,
@@ -205,5 +252,6 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     discard,
     requestLive,
     reset,
+    warm,
   };
 }

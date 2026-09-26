@@ -87,23 +87,26 @@ export function DownloadCard({
   /** Card heading. */
   title?: string;
 }) {
-  const [mode, setMode] = useState<'smart' | 'custom'>('smart');
-  const [text, setText] = useState(suggestedName);
-  const [downloaded, setDownloaded] = useState(false);
-  const [shared, setShared] = useState(false);
+  const [card, setCard] = useState({
+    mode: 'smart' as 'smart' | 'custom',
+    text: suggestedName,
+    downloaded: false,
+    shared: false,
+  });
   const url = useObjectUrl(blob);
 
-  // A new completion (new blob/suggestion) resets the card.
+  // A new completion (new blob/suggestion) resets the card in ONE state
+  // update — a single render, never four staggered setter passes.
   useEffect(() => {
-    setMode('smart');
-    setText(suggestedName);
-    setDownloaded(false);
-    setShared(false);
+    setCard({ mode: 'smart', text: suggestedName, downloaded: false, shared: false });
   }, [blob, suggestedName]);
 
-  const finalName = sanitizeFileName(text.trim() === '' ? suggestedName : text, suggestedName);
+  const finalName = sanitizeFileName(
+    card.text.trim() === '' ? suggestedName : card.text,
+    suggestedName,
+  );
 
-  if (downloaded) {
+  if (card.downloaded) {
     return <DoneBanner name={finalName} blob={blob} shareable={shareable} />;
   }
 
@@ -112,24 +115,27 @@ export function DownloadCard({
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-semibold text-ink-700 dark:text-paper-100">{title}</p>
         <ModeToggle
-          mode={mode}
+          mode={card.mode}
           onChange={(next) => {
-            setMode(next);
-            setText(next === 'smart' ? suggestedName : '');
+            setCard((prev) => ({
+              ...prev,
+              mode: next,
+              text: next === 'smart' ? suggestedName : '',
+            }));
           }}
         />
       </div>
       <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
-        {mode === 'smart'
+        {card.mode === 'smart'
           ? 'Based on your file names — tweak it or switch to Custom.'
           : 'Your own name — “.pdf” is added automatically.'}
       </p>
       <input
         type="text"
         aria-label="File name"
-        value={text}
-        placeholder={mode === 'custom' ? CUSTOM_PLACEHOLDER : suggestedName}
-        onChange={(e) => setText(e.target.value)}
+        value={card.text}
+        placeholder={card.mode === 'custom' ? CUSTOM_PLACEHOLDER : suggestedName}
+        onChange={(e) => setCard((prev) => ({ ...prev, text: e.target.value }))}
         maxLength={120}
         autoComplete="off"
         spellCheck={false}
@@ -144,7 +150,7 @@ export function DownloadCard({
             href={url}
             download={finalName}
             aria-label="Download PDF"
-            onClick={() => setDownloaded(true)}
+            onClick={() => setCard((prev) => ({ ...prev, downloaded: true }))}
             className="inline-flex items-center gap-2 rounded-lg bg-forest-600 hover:bg-forest-500 text-white px-4 py-2.5 text-sm font-semibold shadow-sm transition-colors min-h-[44px]"
           >
             <svg
@@ -170,11 +176,11 @@ export function DownloadCard({
             type="button"
             onClick={async () => {
               const r = await studioShare(blob, finalName);
-              if (r === 'shared') setShared(true);
+              if (r === 'shared') setCard((prev) => ({ ...prev, shared: true }));
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-forest-500/40 text-forest-600 dark:text-forest-300 px-4 py-2.5 text-sm font-medium hover:bg-forest-500/[0.08] transition-colors min-h-[44px]"
           >
-            {shared ? 'Shared ✓' : 'Share…'}
+            {card.shared ? 'Shared ✓' : 'Share…'}
           </button>
         )}
       </div>

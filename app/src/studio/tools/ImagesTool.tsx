@@ -22,7 +22,8 @@ import { buildImagesPdf } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
 import { CameraCapture } from './CameraCapture';
-import { browserImageRenderer, preparePageBytes } from './imagePrepare';
+import { browserImageRenderer, preparePageBytes, type ImageRenderer } from './imagePrepare';
+import type { ImagePage } from './imagePages';
 import { clearScans, releaseScan, retainOriginal } from './scan/scanStore';
 
 const ICON = (
@@ -43,6 +44,32 @@ const ICON = (
 );
 
 const ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
+
+/**
+ * Build-loop staging: prepares pages SEQUENTIALLY in collection order
+ * (ordering/sharding semantics unchanged — the staged array that feeds
+ * `buildImagesPdf` is identical, only the loop reports progress).
+ * Mirrors the import-queue pattern (`imageImport.runImportQueue`): one
+ * page at a time, `onStagingProgress(completed, total)` after each page,
+ * and a `setTimeout(0)` yield between pages so the staging progress can
+ * paint instead of blocking the main thread through a large batch.
+ * Exported for unit tests; the tool wires it to `stage`/`fraction`.
+ */
+export async function stageImagePages(
+  pages: readonly ImagePage[],
+  renderer: ImageRenderer,
+  onStagingProgress?: (completed: number, total: number) => void,
+): Promise<Array<{ name: string; bytes: Uint8Array }>> {
+  const staged: Array<{ name: string; bytes: Uint8Array }> = [];
+  for (let i = 0; i < pages.length; i += 1) {
+    const prepared = await preparePageBytes(pages[i], renderer);
+    staged.push(prepared);
+    onStagingProgress?.(i + 1, pages.length);
+    // Yield: keeps React paint + input responsive between files.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return staged;
+}
 
 /**
  * Images → PDF page assembly: uploads + camera captures join one ordered
@@ -190,10 +217,13 @@ export default function ImagesTool() {
     const staged: string[] = [];
     const stagedSizes: number[] = [];
     try {
-      for (const page of pages) {
-        const prepared = await preparePageBytes(page, browserImageRenderer);
-        stagedSizes.push(prepared.bytes.length);
-        staged.push(stageStudioBytes(prepared.name, prepared.bytes));
+      const prepared = await stageImagePages(pages, browserImageRenderer, (completed, total) => {
+        setStage(`Preparing images… ${completed} of ${total}`);
+        setFraction(completed / total);
+      });
+      for (const item of prepared) {
+        stagedSizes.push(item.bytes.length);
+        staged.push(stageStudioBytes(item.name, item.bytes));
       }
       // P3 item 13: large batches shard across parallel shard jobs +
       // ordered merge (imageSharding); small batches keep the historical

@@ -13,8 +13,10 @@ import type { OperationId } from '../../types/engine';
 import type { StudioJob, StudioResult } from '../services/folio';
 import {
   MAX_SHARD_IN_FLIGHT_BYTES,
+  MAX_SHARD_PIXELS,
   buildImagesPdf,
   estimateInFlightBytes,
+  estimatePixelCost,
   planShards,
   resolveShardCount,
   type ShardDeps,
@@ -177,6 +179,44 @@ describe('resolveShardCount', () => {
       }),
     ).toBe(1);
   });
+
+  it('caps K=1 above the pixel budget even when bytes look small (5-3)', () => {
+    // Compact-but-costly: 8 full-res 12MP pages are ~16 MB staged yet
+    // ~96 MP of decode cost — the byte gate alone would shard them.
+    expect(
+      resolveShardCount(9, {
+        hardwareConcurrency: 16,
+        totalBytes: 16 * 1024 * 1024,
+        totalPixels: 8 * 12_000_000,
+      }),
+    ).toBe(1);
+  });
+
+  it('still shards normalized batches under the pixel budget', () => {
+    // 8 import-normalized pages (~4.7 MP each) peak under the cap.
+    expect(
+      resolveShardCount(9, {
+        hardwareConcurrency: 16,
+        totalBytes: 10 * 1024 * 1024,
+        totalPixels: 8 * 4_700_000,
+      }),
+    ).toBe(3);
+  });
+
+  it('keeps small batches single-worker regardless of pixel cost (M5)', () => {
+    expect(
+      resolveShardCount(7, {
+        hardwareConcurrency: 16,
+        totalBytes: 1,
+        totalPixels: MAX_SHARD_PIXELS + 1,
+      }),
+    ).toBe(1);
+  });
+
+  it('treats absent pixel estimates as zero (byte-only batches unchanged)', () => {
+    expect(resolveShardCount(9, { hardwareConcurrency: 16 })).toBe(3);
+    expect(resolveShardCount(9, { hardwareConcurrency: 16, totalPixels: 0 })).toBe(3);
+  });
 });
 
 describe('planShards', () => {
@@ -215,6 +255,19 @@ describe('estimateInFlightBytes', () => {
   });
 });
 
+describe('estimatePixelCost (5-3)', () => {
+  it('sums staged pixels plus retained scan originals', () => {
+    expect(estimatePixelCost([4_000_000, 4_000_000], [12_000_000])).toBe(20_000_000);
+    expect(estimatePixelCost([], [])).toBe(0);
+  });
+
+  it('treats missing estimates and negatives as zero (byte gate still bounds)', () => {
+    expect(estimatePixelCost(undefined, undefined)).toBe(0);
+    expect(estimatePixelCost(undefined, [5_000_000])).toBe(5_000_000);
+    expect(estimatePixelCost([-3, 7], undefined)).toBe(7);
+  });
+});
+
 describe('buildImagesPdf single path', () => {
   it('makes exactly the historical engine call for <8 pages', async () => {
     const run = makeFakeRun();
@@ -236,6 +289,26 @@ describe('buildImagesPdf single path', () => {
     });
     expect(temps.opened).toEqual([]);
     expect(temps.closed).toEqual([]);
+  });
+
+  it('stays single-worker when pixels (staged + retained) exceed the budget', async () => {
+    const run = makeFakeRun();
+    const temps = makeFakeTemps();
+    const job = buildImagesPdf(
+      {
+        ...input(9),
+        stagedPixels: new Array<number>(9).fill(12_000_000),
+        retainedPixels: [12_000_000, 12_000_000],
+      },
+      { runOperation: run.runOperation, openBytes: temps.openBytes, closeDoc: temps.closeDoc },
+    );
+    await job.done;
+    // One historical call, no merge, no temp docs — same shape as the
+    // small-batch path.
+    expect(run.calls).toHaveLength(1);
+    expect(run.calls[0].operation).toBe('pdf.images_to_pdf');
+    expect(run.calls[0].ids).toEqual(input(9).stagedIds);
+    expect(temps.opened).toEqual([]);
   });
 });
 

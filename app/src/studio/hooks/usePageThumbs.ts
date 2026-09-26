@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { studioPreview, studioThumbWindow } from '../services/folio';
+import { studioPreview, studioThumbWindow, subscribeThumbEvictions } from '../services/folio';
 
 /** Pages rendered in the blocking first phase — matches grid PAGE_LIMIT. */
 export const THUMB_INITIAL = 24;
@@ -14,13 +14,20 @@ const WAVE = 24;
  * with page numbers (`''` = not yet rendered), `load` resolves the
  * first wave fast while the rest streams in paced background waves,
  * `fillAll` resumes holes, `cancel` aborts everything, `renderPreview`
- * fetches one full-resolution URL (caller owns revocation).
+ * fetches one full-resolution URL (service-owned, borrowed — never
+ * revoke the result).
  *
  * Engine mapping: each wave is one bounded-concurrency
  * `generateThumbnails` call (concurrency 2) — never N concurrent
  * renders, never whole-document canvas arrays. Canvases are released
  * as their object URLs are encoded; URL storage is LRU-bounded
  * (6 documents) inside the service.
+ *
+ * Publishing is dirty-index only: every wave patches just its pages
+ * into state and advances an incremental done counter — no full-array
+ * filter scan per wave. On service eviction of the current document
+ * the array is invalidated (blanked) so a revoked URL is never served;
+ * holes re-render through the normal fill paths.
  */
 export function usePageThumbs() {
   const [thumbs, setThumbs] = useState<string[]>([]);
@@ -32,6 +39,8 @@ export function usePageThumbs() {
   const arrRef = useRef<string[]>([]);
   const docRef = useRef<string | null>(null);
   const totalRef = useRef(0);
+  /** Incrementally published page count — never recomputed by scanning. */
+  const doneRef = useRef(0);
 
   const memoizedThumbs = useMemo(() => thumbs, [thumbs]);
 
@@ -48,12 +57,45 @@ export function usePageThumbs() {
 
   useEffect(() => () => stop(), [stop]);
 
-  const paint = useCallback((total: number) => {
-    const arr = arrRef.current;
+  /**
+   * Publishes ONLY dirty pages: patches them onto the previous state
+   * and advances the incremental counter. `dirty` holds 1-based page
+   * numbers already written into `arrRef`.
+   */
+  const publishDirty = useCallback((dirty: number[], total: number) => {
     if (abortRef.current?.signal.aborted) return;
-    setThumbs([...arr]);
-    setProgress({ done: arr.filter(Boolean).length, total });
+    if (dirty.length === 0) return;
+    doneRef.current += dirty.length;
+    const done = doneRef.current;
+    setThumbs((prev) => {
+      const next = prev.length === total ? prev.slice() : arrRef.current.slice();
+      for (const page of dirty) {
+        const url = arrRef.current[page - 1];
+        if (url !== undefined && url !== '') {
+          next[page - 1] = url;
+        }
+      }
+      return next;
+    });
+    setProgress({ done, total });
   }, []);
+
+  // Eviction invalidation: the service revokes thumbnail URLs on LRU
+  // evict / per-doc cap evict / close and notifies here. Blank the array
+  // for the evicted document so revoked URLs are never rendered; the
+  // fill paths below re-request the holes on demand.
+  useEffect(
+    () =>
+      subscribeThumbEvictions((evictedDocId) => {
+        if (evictedDocId !== docRef.current) return;
+        arrRef.current = new Array<string>(totalRef.current).fill('');
+        doneRef.current = 0;
+        const total = totalRef.current;
+        setThumbs(new Array<string>(total).fill(''));
+        setProgress({ done: 0, total });
+      }),
+    [],
+  );
 
   /** Detached idle-paced background fill. Never awaited by tools. */
   const backgroundFill = useCallback(
@@ -75,19 +117,26 @@ export function usePageThumbs() {
             const job = studioThumbWindow(docId, pages);
             jobRef.current = job;
             const map = await job.done;
-            for (const [p2, url] of map) arrRef.current[p2 - 1] = url;
-            paint(total);
+            if (ac.signal.aborted) return;
+            const dirty: number[] = [];
+            for (const [p2, url] of map) {
+              if (!arrRef.current[p2 - 1]) {
+                arrRef.current[p2 - 1] = url;
+                dirty.push(p2);
+              }
+            }
+            publishDirty(dirty, total);
           }
           start = end + 1;
         }
-        if (!ac.signal.aborted && arrRef.current.every(Boolean)) setProgress(null);
+        if (!ac.signal.aborted && doneRef.current >= total) setProgress(null);
       } catch {
         // aborted or closed — tools treat empty holes as pending
       } finally {
         if (jobRef.current !== null && ac.signal.aborted) jobRef.current = null;
       }
     },
-    [paint],
+    [publishDirty],
   );
 
   /**
@@ -106,6 +155,7 @@ export function usePageThumbs() {
       docRef.current = docId;
       totalRef.current = total;
       arrRef.current = new Array(total).fill('');
+      doneRef.current = 0;
 
       setLoading(true);
       setProgress({ done: 0, total });
@@ -118,12 +168,13 @@ export function usePageThumbs() {
         const map = await job.done;
         if (ac.signal.aborted) return [];
         for (const [p2, url] of map) arrRef.current[p2 - 1] = url;
+        doneRef.current += map.size;
         setThumbs([...arrRef.current]);
         setLoading(false);
         jobRef.current = null;
 
         if (first < total && !ac.signal.aborted) {
-          setProgress({ done: map.size, total });
+          setProgress({ done: doneRef.current, total });
           void backgroundFill(ac, first + 1);
         } else {
           setProgress(null);
@@ -152,14 +203,21 @@ export function usePageThumbs() {
         const job = studioThumbWindow(docId, holes.slice(s, s + WAVE));
         jobRef.current = job;
         const map = await job.done;
-        for (const [p2, url] of map) arrRef.current[p2 - 1] = url;
-        paint(total);
+        if (ac.signal.aborted) return;
+        const dirty: number[] = [];
+        for (const [p2, url] of map) {
+          if (!arrRef.current[p2 - 1]) {
+            arrRef.current[p2 - 1] = url;
+            dirty.push(p2);
+          }
+        }
+        publishDirty(dirty, total);
       } catch {
         return;
       }
     }
-    if (!ac.signal.aborted && arrRef.current.every(Boolean)) setProgress(null);
-  }, [paint]);
+    if (!ac.signal.aborted && doneRef.current >= total) setProgress(null);
+  }, [publishDirty]);
 
   const cancel = useCallback(() => {
     stop();
@@ -167,7 +225,7 @@ export function usePageThumbs() {
     setProgress(null);
   }, [stop]);
 
-  /** Full-res preview URL via the render engine. Caller owns revocation. */
+  /** Full-res preview URL via the render engine. Borrowed — never revoke. */
   const renderPreview = useCallback(async (docId: string, pageNum: number): Promise<string> => {
     return studioPreview(docId, pageNum);
   }, []);

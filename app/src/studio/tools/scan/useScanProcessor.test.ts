@@ -277,4 +277,72 @@ describe('useScanProcessor', () => {
     });
     await waitFor(() => expect(result.current.liveDetected).toBe(true));
   });
+
+  it('warm boots the worker with a detect-only job and never touches review state', async () => {
+    const worker = new FakeWorker();
+    const { result } = renderHook(() => useScanProcessor(() => worker as unknown as Worker));
+    act(() => {
+      result.current.warm();
+      result.current.warm(); // Second call in the same session: no-op.
+    });
+    await act(async () => undefined);
+    act(() => {
+      worker.deliver({ protocol: 2, kind: 'ready' });
+    });
+    await waitFor(() => {
+      const jobs = worker.posted.filter(
+        (p) => typeof p === 'object' && p !== null && (p as { kind?: string }).kind === 'process',
+      );
+      expect(jobs).toHaveLength(1);
+    });
+    // Warmup is guidance-shaped: detect-only, never a shutter job.
+    const warmJob = worker.processJob();
+    expect(warmJob.mode).toBe('original');
+    expect(warmJob.detectOnly).toBe(true);
+    expect(result.current.processing).toBe(false);
+    // The warmup result is discarded: no review, no detection pill.
+    act(() => {
+      worker.deliver({
+        protocol: 2,
+        kind: 'result',
+        jobId: warmJob.jobId,
+        resultJson: detectedJson(0.9),
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.pending).toBeNull();
+    expect(result.current.liveDetected).toBe(false);
+    expect(result.current.processing).toBe(false);
+  });
+
+  it('warm after reset starts a new session warmup and old results stay dropped', async () => {
+    const worker = new FakeWorker();
+    const { result } = renderHook(() => useScanProcessor(() => worker as unknown as Worker));
+    act(() => {
+      result.current.warm();
+    });
+    await act(async () => undefined);
+    act(() => {
+      worker.deliver({ protocol: 2, kind: 'ready' });
+    });
+    await waitFor(() => {
+      expect(
+        worker.posted.filter(
+          (p) => typeof p === 'object' && p !== null && (p as { kind?: string }).kind === 'process',
+        ),
+      ).toHaveLength(1);
+    });
+    act(() => {
+      result.current.reset();
+    });
+    expect(worker.terminated).toBe(true);
+    // A new session warms again (one shot per generation).
+    act(() => {
+      result.current.warm();
+    });
+    expect(result.current.pending).toBeNull();
+  });
 });
