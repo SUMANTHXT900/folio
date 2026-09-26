@@ -46,7 +46,7 @@ export function DropZone({
   multiple,
   onFiles,
   title = 'Drop your PDF here',
-  hint = 'or pick a file — it opens instantly, right here',
+  hint = 'or pick a file. It never leaves your device.',
   cta = 'Select file',
 }: {
   accept?: string;

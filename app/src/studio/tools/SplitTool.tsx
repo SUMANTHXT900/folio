@@ -349,7 +349,7 @@ export default function SplitTool() {
                 <Card>
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                      Tap the thumbnail to preview, tap the label to remove it
+                      Tap the thumbnail to preview, tap the label to keep or remove.
                     </p>
                     <span className="text-xs font-mono tabular-nums rounded-full bg-paper-200/70 dark:bg-ink-900/60 px-2.5 py-1 text-ink-500 dark:text-ink-300">
                       {keepCount}/{count} kept

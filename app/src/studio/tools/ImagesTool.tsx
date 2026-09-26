@@ -619,7 +619,7 @@ function EntryCard({
               Scan with camera
             </span>
             <span className="mt-1 block text-xs text-ink-500 dark:text-ink-300">
-              Auto-crop + enhance on device
+              Scan pages on device
             </span>
           </span>
         </motion.button>
@@ -675,7 +675,7 @@ function EntryCard({
       </p>
       {/* AGENT11 copy (literal, short): bulk-import pacing hint. */}
       <p className="relative mt-1 text-center text-[11px] text-ink-400 dark:text-ink-300">
-        Photos decode one at a time — large batches take a moment.
+        Photos decode one at a time, so large batches take a moment.
       </p>
     </motion.div>
   );

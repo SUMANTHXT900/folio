@@ -76,7 +76,7 @@ function failureMessage(error: unknown): string {
       return 'The camera is busy (another app or tab is using it). Close it there and try again — or use the file picker.';
     case 'AbortError':
       // AGENT11 copy (literal, short): interrupted request, actionable retry.
-      return 'The camera request was interrupted. Try again — or use the file picker.';
+      return 'The camera request was interrupted. Try again, or use the file picker.';
     default:
       return 'The camera could not be started on this browser. Use the file picker to add images instead.';
   }
@@ -96,7 +96,7 @@ function isInsecureContext(): boolean {
 
 // AGENT11 copy (literal, short): insecure-origin branch for missing/blocked camera.
 const INSECURE_CONTEXT_MESSAGE =
-  'Camera needs HTTPS or localhost. Open this page over HTTPS or localhost — or use the file picker to add images instead.';
+  'Camera needs HTTPS or localhost. Use the file picker, or open this page over HTTPS or localhost.';
 
 function stopStream(stream: MediaStream | null) {
   if (stream) {

@@ -3,11 +3,11 @@ import { ToolHeading, DropZone, FileChip, Button, Card } from '../components/ui'
 import { usePdfFiles } from '../hooks/usePdfFiles';
 
 const LEVELS = [
-  { label: 'Best quality', hint: 'Minimal size reduction, crisp output — when compression lands' },
-  { label: 'Balanced', hint: 'Good balance of size and clarity — when compression lands' },
+  { label: 'Best quality', hint: 'Not available yet.' },
+  { label: 'Balanced', hint: 'Not available yet.' },
   {
     label: 'Maximum compression',
-    hint: 'Smallest file, lower fidelity — when compression lands',
+    hint: 'Not available yet.',
   },
 ] as const;
 
@@ -30,7 +30,7 @@ export default function CompressTool() {
       <ToolHeading
         icon={<CompressIcon />}
         name="Compress"
-        desc="Reserved for a future update — compression isn't available yet."
+        desc="Reserved for a future update — not available yet."
       />
 
       {!file && (
@@ -93,8 +93,7 @@ export default function CompressTool() {
           </Button>
           <Card>
             <p className="text-sm text-ink-500 dark:text-ink-300">
-              Compression is coming in a future update — the engine does not implement it yet, so
-              this action stays disabled rather than pretending to work.
+              Not available yet. This action stays disabled rather than pretending to work.
             </p>
           </Card>
         </div>

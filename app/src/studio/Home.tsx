@@ -129,10 +129,10 @@ const BENTO: Record<string, string> = {
 };
 
 const TAGLINES: Record<string, string> = {
-  merge: 'Combine any number of PDFs into one clean document — reorder before you merge.',
-  split: 'Pull out the pages you need, or carve a PDF by page ranges.',
-  rearrange: 'Drag pages into the order that makes sense.',
-  rotate: 'Turn pages upright again.',
+  merge: 'Combine two or more PDFs into one document. Set the order first.',
+  split: 'Keep the pages you pick, or extract exact page ranges.',
+  rearrange: 'Reorder pages with drag or arrows, then save.',
+  rotate: 'Rotate single pages or the whole file in 90 degree steps.',
   compress: 'Reserved for a future update — not available yet.',
   metadata: 'Read and edit titles, authors, and dates.',
   images: 'Turn JPEG and PNG images into a PDF.',

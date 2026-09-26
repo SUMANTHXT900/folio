@@ -450,7 +450,11 @@ export const TOOL_LIST: { id: ToolId; name: string; tagline: string }[] = [
   { id: 'split', name: 'Split', tagline: 'Extract pages or break apart' },
   { id: 'rearrange', name: 'Rearrange', tagline: 'Reorder pages' },
   { id: 'rotate', name: 'Rotate', tagline: 'Fix page orientation' },
-  { id: 'compress', name: 'Compress', tagline: 'Reserved — coming in a future update' },
+  {
+    id: 'compress',
+    name: 'Compress',
+    tagline: 'Reserved for a future update — not available yet.',
+  },
   { id: 'metadata', name: 'Metadata', tagline: 'Read & edit properties' },
   { id: 'images', name: 'Images', tagline: 'Build a PDF from images' },
 ];

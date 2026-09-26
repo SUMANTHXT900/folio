@@ -350,7 +350,8 @@ export default function RotateTool() {
 
           {allRot !== 0 && (
             <p className="text-xs text-brass-500 mb-3">
-              ＋{allRot * 90}° to every page — press “Apply all” to preview, or Download.
+              +{allRot * 90}° to every page. Press “Apply all” to preview, or “Download rotated
+              PDF”.
             </p>
           )}
 

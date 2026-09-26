@@ -46,7 +46,7 @@ const ENTRIES: Entry[] = [
     changes: [
       'Every tool now runs on the on-device Folio engine (Rust/WebAssembly) — no more in-page PDF patching.',
       'New: Metadata properties and Images → PDF join the tool grid.',
-      'Bounded thumbnails, real progress, real cancellation, structured errors.',
+      'Fast previews with live progress, cancellation, and clear errors.',
       'Compress stays reserved for a future update.',
     ],
   },
@@ -167,7 +167,7 @@ export default function About() {
               What is Folio?
             </h2>
             <p className="text-sm text-ink-500 dark:text-ink-300 mt-3 leading-relaxed">
-              Seven tools that do one thing well. Every operation — merging, splitting, rotating,
+              Six tools that do one thing well. Every operation — merging, splitting, rotating,
               document properties — runs inside your browser on a local Rust engine (WebAssembly)
               with PDF.js rendering. There is no server to upload to, because there is no upload at
               all.
@@ -259,7 +259,7 @@ export default function About() {
                   Open source
                 </h3>
                 <p className="text-xs text-ink-500 dark:text-ink-300 mt-1 leading-relaxed">
-                  Read the code that touches your files — every line of it.
+                  Read the code that handles your files.
                 </p>
               </div>
               <span className="w-9 h-9 rounded-full border border-paper-200 dark:border-ink-700 flex items-center justify-center text-ink-400 group-hover:text-brass-500 group-hover:border-brass-400/40 transition-colors shrink-0">
