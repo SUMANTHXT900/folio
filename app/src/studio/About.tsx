@@ -20,7 +20,7 @@ const ENTRIES: Entry[] = [
     title: 'Foundation',
     status: 'shipped',
     changes: [
-      'First public release — five local PDF tools: Merge, Split, Rearrange, Rotate & Compress.',
+      'First public release — four local PDF tools: Merge, Split, Rearrange & Rotate (Compress was listed but reserved).',
       '100% in-browser with a local Rust/WASM engine + PDF.js rendering — no uploads, no servers.',
       'Editorial design system (paper / ink / brass / forest, Fraunces + Inter).',
       'Offline-ready PWA scaffold.',

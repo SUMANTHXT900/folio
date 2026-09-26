@@ -370,3 +370,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Held.** LOCAL COMMIT ONLY — no GitHub push, no Cloudflare deploy. Ship on user go-ahead.
 
 - **Deploy.** UX batch (usage ordering, copy truth-pass, update honesty) + P0.2 shelve docs shipped: GitHub `dev` + Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). Staging instrument was reverted before shipping — it never reached any remote.
+
+## 2026-09-27 — 3-agent round: cold-merge analysis, Split preview, compress honesty (LOCAL ONLY unpushed)
+
+- **Cold-merge 190x analysis (read-only).** No corpus locally; synthetic bench shows no cold effect (excludes per-page algorithmic causes). Timing boundaries verified: `duration_ms` is pure `MergeOperation::execute` (parse/transfer/serialize/module-init all outside). Ranked: H1 first-touch WASM memory growth most likely; H2 wall-clock contention possible amplifier; order-dependence excluded. Discriminating experiment for the laptop: same-order rerun series from fresh reload with durationMs + wait-span.
+- **Split preview.** Thumbnail click now previews (label pill keeps toggle); overlay portaled (F-19-immune) with dvh caps; +4 E2E (open/decode/viewport-anchored/close).
+- **Compress honesty.** Grid tagline + level hints qualified as future; About v1.0.0 corrected (four tools; Compress listed-but-reserved).
+- **Verification.** Typecheck/lint/format clean; unit 289; E2E **57/57 + 4 SKIP**.

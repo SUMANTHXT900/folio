@@ -319,6 +319,72 @@ async function main() {
     const imgs = await page.evaluate(() => document.querySelectorAll('img').length);
     check('split renders thumbnail grid', imgs >= 10, `${imgs} imgs`);
     await page.screenshot({ path: `${__dirname}/after/split-grid.png` });
+    // Split preview modal (images-check parity): thumbnail opens a
+    // viewport-anchored dialog with a decoding image; Close dismisses it
+    // and the kept count is undisturbed before the toggle below.
+    await page.evaluate(() => {
+      document.querySelector('button[aria-label="Preview Page 1"]')?.click();
+    });
+    let splitPreviewShown = false;
+    try {
+      await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, {
+        timeout: 10000,
+      });
+      splitPreviewShown = true;
+    } catch {
+      splitPreviewShown = false;
+    }
+    check('split preview opens a dialog for the page', splitPreviewShown);
+    const splitModalPreview = await page.evaluate(() => {
+      const img = document.querySelector('[role="dialog"] img');
+      return img === null ? null : { naturalWidth: img.naturalWidth };
+    });
+    check(
+      'split preview dialog image decodes (naturalWidth > 0)',
+      splitModalPreview !== null && splitModalPreview.naturalWidth > 0,
+      JSON.stringify(splitModalPreview),
+    );
+    // F-19 regression (mirrors the images check): the backdrop must cover
+    // the real viewport (the overlay is portaled to document.body so no
+    // `backdrop-filter` ancestor can capture its `fixed` positioning).
+    const splitModalGeometry = await page.evaluate(() => {
+      const dlg = document.querySelector('[role="dialog"]');
+      const backdrop = dlg?.parentElement ?? null;
+      const b = backdrop?.getBoundingClientRect();
+      const d = dlg?.getBoundingClientRect();
+      return {
+        viewport: { w: window.innerWidth, h: window.innerHeight },
+        backdrop: b
+          ? { y: Math.round(b.y), h: Math.round(b.height), w: Math.round(b.width) }
+          : null,
+        dialog: d ? { y: Math.round(d.y), h: Math.round(d.height) } : null,
+      };
+    });
+    check(
+      'split preview dialog is viewport-anchored (backdrop covers viewport, dialog inside it)',
+      splitModalGeometry.backdrop !== null &&
+        splitModalGeometry.dialog !== null &&
+        Math.abs(splitModalGeometry.backdrop.y) <= 1 &&
+        Math.abs(splitModalGeometry.backdrop.h - splitModalGeometry.viewport.h) <= 1 &&
+        Math.abs(splitModalGeometry.backdrop.w - splitModalGeometry.viewport.w) <= 1 &&
+        (splitModalGeometry.dialog?.y ?? -1) >= 0 &&
+        (splitModalGeometry.dialog?.y ?? 9999) + (splitModalGeometry.dialog?.h ?? 9999) <=
+          splitModalGeometry.viewport.h + 1,
+      JSON.stringify(splitModalGeometry),
+    );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Close')?.click();
+    });
+    let splitPreviewClosed = false;
+    try {
+      await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null, {
+        timeout: 10000,
+      });
+      splitPreviewClosed = true;
+    } catch {
+      splitPreviewClosed = false;
+    }
+    check('split preview dialog closes', splitPreviewClosed);
     // Toggle page 1 off, then create.
     await page.evaluate(() => {
       document.querySelectorAll('button').forEach(() => {});

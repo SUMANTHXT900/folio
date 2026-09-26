@@ -3,9 +3,12 @@ import { ToolHeading, DropZone, FileChip, Button, Card } from '../components/ui'
 import { usePdfFiles } from '../hooks/usePdfFiles';
 
 const LEVELS = [
-  { label: 'Best quality', hint: 'Minimal size reduction, crisp output' },
-  { label: 'Balanced', hint: 'Good balance of size and clarity' },
-  { label: 'Maximum compression', hint: 'Smallest file, lower fidelity' },
+  { label: 'Best quality', hint: 'Minimal size reduction, crisp output — when compression lands' },
+  { label: 'Balanced', hint: 'Good balance of size and clarity — when compression lands' },
+  {
+    label: 'Maximum compression',
+    hint: 'Smallest file, lower fidelity — when compression lands',
+  },
 ] as const;
 
 /**

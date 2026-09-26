@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo, memo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ToolHeading,
   DropZone,
@@ -29,35 +30,49 @@ const ThumbTile = memo(function ThumbTile({
   index,
   kept,
   onToggle,
+  onPreview,
 }: {
   src: string;
   index: number;
   kept: boolean;
   onToggle: (i: number) => void;
+  onPreview: (i: number) => void;
 }) {
+  // Gesture split (RearrangeTool parity): the thumbnail opens the large
+  // page preview; only the explicit keep/remove pill toggles selection.
+  // This keeps preview clicks from ever disturbing the kept count.
   return (
-    <button
-      onClick={() => onToggle(index)}
+    <div
       className={
         'relative rounded-lg overflow-hidden border-2 transition-all ' +
-        (kept ? 'border-transparent hover:border-brass-400' : 'border-red-400/70 opacity-40')
+        (kept ? 'border-transparent' : 'border-red-400/70 opacity-40')
       }
     >
-      {src ? (
-        <img
-          src={src}
-          alt={`Page ${index + 1}`}
-          loading="lazy"
-          decoding="async"
-          className="w-full aspect-[3/4] object-cover bg-white"
-        />
-      ) : (
-        <div className="w-full aspect-[3/4] bg-paper-200 dark:bg-ink-700 animate-pulse" />
-      )}
-      <span className="absolute bottom-0 left-0 right-0 bg-black/60 text-paper-100 text-[11px] py-0.5 text-center">
+      <button
+        onClick={() => onPreview(index)}
+        aria-label={`Preview Page ${index + 1}`}
+        className="block w-full cursor-zoom-in"
+      >
+        {src ? (
+          <img
+            src={src}
+            alt={`Page ${index + 1}`}
+            loading="lazy"
+            decoding="async"
+            className="w-full aspect-[3/4] object-cover bg-white hover:opacity-90 transition-opacity"
+          />
+        ) : (
+          <div className="w-full aspect-[3/4] bg-paper-200 dark:bg-ink-700 animate-pulse" />
+        )}
+      </button>
+      <button
+        onClick={() => onToggle(index)}
+        aria-label={`${kept ? 'Remove' : 'Keep'} Page ${index + 1}`}
+        className="absolute bottom-0 left-0 right-0 bg-black/60 text-paper-100 text-[11px] py-0.5 text-center hover:bg-black/75 transition-colors"
+      >
         {kept ? `Page ${index + 1}` : 'removed'}
-      </span>
-    </button>
+      </button>
+    </div>
   );
 });
 
@@ -331,7 +346,7 @@ export default function SplitTool() {
                 <Card>
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                      Tap a page to remove it
+                      Tap the thumbnail to preview, tap the label to remove it
                     </p>
                     <span className="text-xs font-mono tabular-nums rounded-full bg-paper-200/70 dark:bg-ink-900/60 px-2.5 py-1 text-ink-500 dark:text-ink-300">
                       {keepCount}/{count} kept
@@ -339,7 +354,14 @@ export default function SplitTool() {
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
                     {visibleThumbs.map((src, i) => (
-                      <ThumbTile key={i} src={src} index={i} kept={keep[i]} onToggle={toggle} />
+                      <ThumbTile
+                        key={i}
+                        src={src}
+                        index={i}
+                        kept={keep[i]}
+                        onToggle={toggle}
+                        onPreview={setPreview}
+                      />
                     ))}
                     {hiddenCount > 0 && (
                       <button
@@ -437,19 +459,44 @@ export default function SplitTool() {
       {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
       {opError !== null && <ErrorBlock error={opError} />}
 
-      {preview !== null && thumbs[preview] && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-          onClick={() => setPreview(null)}
-        >
-          <img
-            src={thumbs[preview]}
-            alt={`Page ${preview + 1}`}
-            className="max-w-3xl w-full rounded-xl shadow-2xl bg-white"
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      )}
+      {preview !== null &&
+        thumbs[preview] &&
+        // Portaled to document.body: the Card above carries no
+        // `backdrop-filter` today, so in-tree `fixed` would work — but a
+        // future refactor could nest this inside one (glass), which per
+        // spec becomes the containing block for `fixed` descendants and
+        // centers the dialog off-screen (F-19, cf. PageGrid). The portal
+        // escapes every ancestor, so `fixed inset-0` is always the real
+        // viewport. `dvh` caps keep the mobile URL bar from cropping.
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
+            onClick={() => setPreview(null)}
+          >
+            <div
+              className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label={`Preview Page ${preview + 1}`}
+            >
+              <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
+                <span className="font-display text-lg">Page {preview + 1}</span>
+                <button
+                  onClick={() => setPreview(null)}
+                  className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                >
+                  Close
+                </button>
+              </div>
+              <img
+                src={thumbs[preview]}
+                alt={`Page ${preview + 1} full preview`}
+                className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
+              />
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
