@@ -30,6 +30,7 @@ docs/DETOURS.md
 docs/LESSONS.md
 docs/DEVELOPMENT.md
 docs/OPERATIONS.md
+docs/PERFORMANCE.md
 docs/CHANGELOG.md
 docs/WORKLOG.md
 docs/GLOSSARY.md
@@ -39,13 +40,13 @@ Then inspect source code where required to verify implementation claims.
 
 ### Task-category mapping
 
-| Task category | Read first |
-|---|---|
-| Architecture task | `PROJECT.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `LESSONS.md`, `STATUS.md` |
-| Bug task | `STATUS.md`, `BUGS.md`, `ARCHITECTURE.md`, `LESSONS.md`, `DECISIONS.md` |
-| Feature task | `PROJECT.md`, `STATUS.md`, `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `OPERATIONS.md`, `BUGS.md` |
-| Development / build task | `DEVELOPMENT.md`, `STATUS.md`, `ARCHITECTURE.md` |
-| PDF operation task | `ARCHITECTURE.md`, `OPERATIONS.md`, `STATUS.md`, `BUGS.md`, `DECISIONS.md`, `LESSONS.md` |
+| Task category            | Read first                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Architecture task        | `PROJECT.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `LESSONS.md`, `STATUS.md`                             |
+| Bug task                 | `STATUS.md`, `BUGS.md`, `ARCHITECTURE.md`, `LESSONS.md`, `DECISIONS.md`                                |
+| Feature task             | `PROJECT.md`, `STATUS.md`, `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `OPERATIONS.md`, `BUGS.md` |
+| Development / build task | `DEVELOPMENT.md`, `STATUS.md`, `ARCHITECTURE.md`                                                       |
+| PDF operation task       | `ARCHITECTURE.md`, `OPERATIONS.md`, `STATUS.md`, `BUGS.md`, `DECISIONS.md`, `LESSONS.md`               |
 
 ### Terminology
 
@@ -56,7 +57,7 @@ Then inspect source code where required to verify implementation claims.
 ```text
 folio/
 ├── AGENTS.md          This file — agent entry point.
-├── docs/              Persistent project memory (13 documents).
+├── docs/              Persistent project memory (14 documents).
 ├── engine/            Folio Rust PDF engine — independent of UI concerns.
 │   ├── src/           Engine source (core, execution, observability, processing, testing).
 │   ├── tests/         Rust integration tests (one file per operation + lifecycle).
@@ -92,16 +93,16 @@ see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
 
 Every meaningful engineering task must update the relevant documentation before the task is considered complete. Do not log trivial actions (files opened, lines changed). Record meaningful project knowledge: decisions, bugs, lessons, detours, state changes, releases.
 
-| Task outcome | Update |
-|---|---|
-| Feature implemented | `STATUS.md`, `ROADMAP.md`, `CHANGELOG.md`, `OPERATIONS.md`, `ARCHITECTURE.md`, `DECISIONS.md` (as applicable) |
-| Bug discovered | `BUGS.md`, plus `LESSONS.md` if there is a reusable lesson |
-| Bug fixed | `BUGS.md`, `STATUS.md` |
-| Architecture changed | `ARCHITECTURE.md`, `DECISIONS.md`, `STATUS.md` |
-| Approach abandoned | `DETOURS.md` |
-| Development discovery | `LESSONS.md` |
-| Release | `CHANGELOG.md`, `STATUS.md` |
-| Meaningful dev session | `WORKLOG.md` |
+| Task outcome           | Update                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Feature implemented    | `STATUS.md`, `ROADMAP.md`, `CHANGELOG.md`, `OPERATIONS.md`, `ARCHITECTURE.md`, `DECISIONS.md` (as applicable) |
+| Bug discovered         | `BUGS.md`, plus `LESSONS.md` if there is a reusable lesson                                                    |
+| Bug fixed              | `BUGS.md`, `STATUS.md`                                                                                        |
+| Architecture changed   | `ARCHITECTURE.md`, `DECISIONS.md`, `STATUS.md`                                                                |
+| Approach abandoned     | `DETOURS.md`                                                                                                  |
+| Development discovery  | `LESSONS.md`                                                                                                  |
+| Release                | `CHANGELOG.md`, `STATUS.md`                                                                                   |
+| Meaningful dev session | `WORKLOG.md`                                                                                                  |
 
 Rules that keep the memory accurate:
 

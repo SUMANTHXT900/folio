@@ -55,3 +55,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** The incorrect `866761f` integration was fixed by exact revert (`390194a`, empty diff vs `ffa87c8`) plus a correct commit on top — no reset, no force-push. The mistake and its correction are both visible.
 - **Why it matters.** Future agents need to see what was tried and why it failed (see `docs/DETOURS.md` T-5); rewritten history destroys that evidence and risks force-push damage to shared branches.
 - **Rule.** Prefer revert-on-top for pushed mistakes. Never `--force` push, never touch `main` from feature work.
+
+## L-10 — Cancel observation lags the token by one decode checkpoint
+
+- **Observation.** The audit benchmark flips the cancel token 50 ms into a heavy `images_to_pdf` run, but the engine observes it ~190–270 ms later (benchmark report): cancellation checkpoints sit between per-image decodes, so one in-flight single-image decode bounds the latency.
+- **Why it matters.** UI cancel budgets must absorb the worst case, not the token-flip time — a 50 ms UI promise is broken by design on photo-scale images.
+- **Rule.** Place cancellation checkpoints at every lane boundary, document the residual bound (one decode), and never promise sub-decode cancel latency. Evidence: `engine/examples/audit_bench_matrix.rs` (`bench_cancel_at_50ms`) + `engine/tests/audit_cancel_midrun.rs`.

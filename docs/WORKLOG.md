@@ -88,7 +88,6 @@ Chronological record of meaningful development events. Each entry records object
 - **Decisions.** D14 (unified collection, camera-as-input, app-side rotation, buttons-guaranteed/drag-enhancement). Camera hardware tests excluded from CI (manual checklist only).
 - **Verification.** Full suite green: Rust 345, `fmt`/`clippy` clean, WASM build passing, typecheck/lint/format clean, 134 unit tests, production build (PWA SW, 34 precache entries, zero testbench strings), canonical E2E 25/25 + 4 SKIP (no corpus), optional suites exit 0 SKIP. Deployed `app/dist/` (v1.8.0 build) to Cloudflare Pages `folio-pdf` branch `dev` via wrangler (`https://dev.folio-pdf.pages.dev`). `main` untouched.
 - **Remaining.** `main`/production promotion decision (unscheduled); mobile-device camera field check (manual).
-- **Remaining.** `main`/production promotion decision (unscheduled); nothing else pending.
 
 ## 2026-09-23 — v1.9 Phase 1: dnd-kit page-grid drag/drop
 

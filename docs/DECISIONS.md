@@ -8,7 +8,7 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Reason.** One verified implementation shared by native tests, CLI examples, and the browser build; precise control over copies for large documents; `lopdf` is pure-Rust with no OS dependencies.
 - **Alternatives considered.** `pdf-lib` in TypeScript (used by the pre-engine app; removed — see `docs/DETOURS.md`).
 - **Consequences.** A WASM build step is mandatory for frontend work (`npm run build:wasm`); engine changes require Rust + TypeScript contract updates together.
-- **Status.** Decided, implemented, verified (345 Rust tests + E2E).
+- **Status.** Decided, implemented, verified (357 Rust tests + E2E).
 
 ## D2 — PDF.js is rendering-only
 
@@ -101,7 +101,7 @@ Each entry records the decision, its reason, alternatives considered where known
 ## D13 — Large external PDFs are optional benchmark inputs, not canonical fixtures
 
 - **Decision.** Large real-world PDFs (e.g. the ~514 MB / 2585-page file used during engine development) are developer-owned, optional benchmark/stress-test inputs. They live only in the gitignored local `test pdfs/` directory, are never committed, and are never required for canonical validation. The canonical E2E suite (`app/e2e/studio.e2e.mjs`) passes from a fresh clone without them (deterministic synthetic small fixtures via `app/e2e/corpus.mjs`; large-file sections SKIP explicitly with exit-0 semantics). `e2e/large-files.e2e.mjs`, `e2e/thumbnail.e2e.mjs`, and `e2e/metadata.e2e.mjs` are optional suites that run only when the corpus is present and SKIP cleanly otherwise.
-- **Reason.** Large binaries destroy repository portability (hundreds of megabytes per clone), cannot be provenance-cleaned or licensed casually, and make fresh-clone reproducibility depend on a private collection. Correctness coverage belongs to deterministic in-repo fixtures (345 Rust tests, 134 frontend tests, synthetic E2E PDFs); scale/stress evidence belongs to opt-in local runs.
+- **Reason.** Large binaries destroy repository portability (hundreds of megabytes per clone), cannot be provenance-cleaned or licensed casually, and make fresh-clone reproducibility depend on a private collection. Correctness coverage belongs to deterministic in-repo fixtures (357 Rust tests, 134 frontend tests, synthetic E2E PDFs); scale/stress evidence belongs to opt-in local runs.
 - **Alternatives considered.** Committing small representative PDFs as fixtures (rejected for now: the synthetic writer covers the canonical shapes with zero bytes in git; revisitable if a real-world byte pattern ever proves necessary). Restoring the old corpus to satisfy the previous Phase 3 prompt (rejected: that corpus was early performance/stress data, never intended as a mandatory fixture).
 - **Consequences.** Fresh-clone validation, CI, production builds, and normal development never touch `test pdfs/`; historical large-file results stay recorded as benchmark evidence (`docs/WORKLOG.md`, root `ARCHITECTURE.md` log) rather than live suite requirements; E2E output distinguishes PASS / SKIP (optional corpus unavailable) / FAIL and never merges them into one number.
 - **Status.** Decided, implemented and verified in Phase 3 (canonical suite green without the corpus; optional suites SKIP with exit 0).
@@ -146,29 +146,13 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Consequences.** Upload fixture names change (`red-wide.png` → `red-wide.jpg`) — E2E updated; E2E drag coverage moves from dnd-kit keyboard to handle pointer-drag; unit count changes (pageDrag suite gone, reorder/PNG suites added).
 - **Status.** Decided, implemented, verified (unit 229, E2E 45/45 + 4 SKIP twice).
 
-## D23 — Usage-based Home ordering (local counts, hero follows the user)
+## D19 — Performance pass P0+P1: owned inputs, cached page map, in-place rotate, detect-only live, single-getPage thumbnails
 
-- **Decision.** Home records tool opens (counts + recency, `localStorage`, private-mode safe) and promotes the most-used tool to the hero card with the "Most used" badge; zero data → merge. Counts only, no PII, no network. Compress can never be hero (disabled). Card-tap recording only in v1 (direct-URL visits don't count — documented in code).
-- **Reason.** The "Most used" badge was hardcoded to Merge for every user — a static claim presenting as measurement.
-- **Alternatives considered.** Recording in the router (rejected: touches StudioApp routing for v1; card taps cover the measured claim).
-- **Consequences.** Grid order is now per-device state; E2E unaffected (asserts names, not order).
-- **Status.** Decided, implemented, verified (12 new tests, full suite green).
-
-## D22 — P3 image-build sharding: parallel shards + ordered merge, small batches untouched
-
-- **Decision.** Batches ≥8 pages shard across K device-aware engine jobs (`2–3` by `hardwareConcurrency`, 256 MiB in-flight cap, one shard per page max), each a plain `pdf.images_to_pdf` call through unchanged orchestration, merged in order via temp studio docs (closed in `finally`); below 8 pages the historical single call runs byte-for-byte. Progress is aggregated honestly, cancellation reaches every in-flight job, failures fail honestly with no silent retry. `ExecutionStrategy::Parallel` stays documented-but-unselected (comment-only) so the frozen `OperationCapabilities` contract is untouched — the illusion is resolved by construction, not deletion.
-- **Reason.** PERFORMANCE.md P3: sharding is the highest-value parallelism on the stable toolchain (no nightly, no COOP/COEP); transfer+merge overhead wins small, so the threshold keeps small builds identical.
-- **Alternatives considered.** Silent single-worker fallback on shard failure (rejected: doubles worst-case time and hides errors). Removing the `Parallel` variant (rejected: frozen-contract churn for zero behavioral gain).
-- **Consequences.** Large image builds fan out K WASM jobs (memory ×K while sharded — hence the cap); small builds provably unchanged.
-- **Status.** Decided, implemented, verified (engine 357, frontend 272, sharded 8-page E2E in order; builds clean).
-
-## D21 — Naming-first downloads: smart defaults + custom names (all tools)
-
-- **Decision.** Every tool completion renders a naming card instead of auto-downloading with an inline-invented filename: `downloadNaming.ts` (pure policy — per-kind smart defaults from input names, `sanitizeFileName` guaranteeing a safe `.pdf`), `DownloadCard` (Smart prefilled toggle / Custom blank slate, live `download` anchor carrying the exact final name, share with the same name, `DoneBanner` with the final name after first save), `MultiDownloadCard` for split multi-part (per-part editable rows + Download-all). Smart rules: merge `a-b-merged.pdf` / `first-plus<N-1>-merged.pdf`; rearrange/rotate/metadata `<base>-<op>.pdf`; split parts keep `-p<a>-<b>`; images `<page>.pdf` / `<first>-plus<N-1>-pages.pdf`. The `images.pdf` hardcode and all auto-download calls are gone; the card anchor is the single download trigger.
-- **Reason.** Real-user report: outputs were literally named `featurename.pdf`; no smart naming existed and no naming UI at all.
-- **Alternatives considered.** Keeping auto-download with smarter defaults only (rejected: the user explicitly asked for Smart-or-Custom choice before download). Wrapping `DoneBanner` with a rename prop (rejected: the pre-download naming step needs its own card; `DoneBanner` stays as the post-save re-save/share surface, unchanged).
-- **Consequences.** Completion flows gain one tap (naming → Download); E2E drives the card (in-page capture asserts exact names). No engine/protocol/service changes; no new dependencies.
-- **Status.** Decided, implemented, verified (frontend 257, E2E 52/52 + 4 SKIP; builds clean).
+- **Decision.** Six optimizations, all behavior-preserving: (1) WASM glue takes ownership of input blobs (`mem::take`) instead of cloning per dispatch (D2 keeps the single JS→WASM copy); (2) `PdfDocument` caches its resolved page map with explicit invalidation, and all internal page loops use it; (3) `pdf.rotate` mutates its private parse in place instead of deep-copying every page (unselected pages now keep inherited ancestor `/Rotate` — more correct than the old flatten, pinned by the pre-existing inheritance tests; `page_geometry`'s documented accumulation quirk is unchanged); (4) `copy_pages_with_map` removes duplicate per-part validation in split/delete/reorder; (5) the scan live path is detection-only (protocol v2 `detected`, no warp/encode/bytes), detection borrows the RGB view instead of copying, and the glue accepts owned bytes; (6) `renderPage` fits to a `targetBox` and returns scale-1 geometry so a thumbnail needs one `getPage`, with a render-seeded dimensions cache.
+- **Reason.** The PERFORMANCE.md audit ranked these as the highest-cost, lowest-risk items: avoidable full-file copies (main thread + WASM), O(N²) page-tree traversals, a per-page event storm, and per-thumbnail double `getPage` round-trips.
+- **Alternatives considered.** Threaded WASM and the main-thread `slice()` removal were deliberately deferred (D-track decision: measurements first; both trade reproducibility or memory for latency). Re-adding the rotate deep copy to preserve the old ancestor-rotation drop was rejected: that behavior silently changed unselected pages.
+- **Consequences.** Scan worker protocol bumped v1→v2 (`detectOnly`, `detected`); `RenderPageOptions.targetBox` + `RenderedPage.sourceWidth/sourceHeight` join the rendering contract; F-17 (live detection never fired) fixed as a byproduct.
+- **Status.** Decided, implemented, verified (engine 357, scan 35, glue 5 new, frontend 240, E2E 46/46 + 4 SKIP; builds clean).
 
 ## D20 — Performance pass P2+P4: encode worker, bounded thumbnail encode, preview LRU, bench CLI
 
@@ -178,10 +162,50 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Consequences.** New worker bundles with the app (no new dependencies); `EncodeWorkerUnavailableError` is an internal control signal, never user-visible; E2E flows unchanged.
 - **Status.** Decided, implemented, verified (engine 357, frontend 247, E2E 49/49 + 4 SKIP; builds clean).
 
-## D19 — Performance pass P0+P1: owned inputs, cached page map, in-place rotate, detect-only live, single-getPage thumbnails
+## D21 — Naming-first downloads: smart defaults + custom names (all tools)
 
-- **Decision.** Six optimizations, all behavior-preserving: (1) WASM glue takes ownership of input blobs (`mem::take`) instead of cloning per dispatch (D2 keeps the single JS→WASM copy); (2) `PdfDocument` caches its resolved page map with explicit invalidation, and all internal page loops use it; (3) `pdf.rotate` mutates its private parse in place instead of deep-copying every page (unselected pages now keep inherited ancestor `/Rotate` — more correct than the old flatten, pinned by the pre-existing inheritance tests; `page_geometry`'s documented accumulation quirk is unchanged); (4) `copy_pages_with_map` removes duplicate per-part validation in split/delete/reorder; (5) the scan live path is detection-only (protocol v2 `detected`, no warp/encode/bytes), detection borrows the RGB view instead of copying, and the glue accepts owned bytes; (6) `renderPage` fits to a `targetBox` and returns scale-1 geometry so a thumbnail needs one `getPage`, with a render-seeded dimensions cache.
-- **Reason.** The PERFORMANCE.md audit ranked these as the highest-cost, lowest-risk items: avoidable full-file copies (main thread + WASM), O(N²) page-tree traversals, a per-page event storm, and per-thumbnail double `getPage` round-trips.
-- **Alternatives considered.** Threaded WASM and the main-thread `slice()` removal were deliberately deferred (D-track decision: measurements first; both trade reproducibility or memory for latency). Re-adding the rotate deep copy to preserve the old ancestor-rotation drop was rejected: that behavior silently changed unselected pages.
-- **Consequences.** Scan worker protocol bumped v1→v2 (`detectOnly`, `detected`); `RenderPageOptions.targetBox` + `RenderedPage.sourceWidth/sourceHeight` join the rendering contract; F-17 (live detection never fired) fixed as a byproduct.
-- **Status.** Decided, implemented, verified (engine 357, scan 35, glue 5 new, frontend 240, E2E 46/46 + 4 SKIP; builds clean).
+- **Decision.** Every tool completion renders a naming card instead of auto-downloading with an inline-invented filename: `downloadNaming.ts` (pure policy — per-kind smart defaults from input names, `sanitizeFileName` guaranteeing a safe `.pdf`), `DownloadCard` (Smart prefilled toggle / Custom blank slate, live `download` anchor carrying the exact final name, share with the same name, `DoneBanner` with the final name after first save), `MultiDownloadCard` for split multi-part (per-part editable rows + Download-all). Smart rules: merge `a-b-merged.pdf` / `first-plus<N-1>-merged.pdf`; rearrange/rotate/metadata `<base>-<op>.pdf`; split parts keep `-p<a>-<b>`; images `<page>.pdf` / `<first>-plus<N-1>-pages.pdf`. The `images.pdf` hardcode and all auto-download calls are gone; the card anchor is the single download trigger.
+- **Reason.** Real-user report: outputs were literally named `featurename.pdf`; no smart naming existed and no naming UI at all.
+- **Alternatives considered.** Keeping auto-download with smarter defaults only (rejected: the user explicitly asked for Smart-or-Custom choice before download). Wrapping `DoneBanner` with a rename prop (rejected: the pre-download naming step needs its own card; `DoneBanner` stays as the post-save re-save/share surface, unchanged).
+- **Consequences.** Completion flows gain one tap (naming → Download); E2E drives the card (in-page capture asserts exact names). No engine/protocol/service changes; no new dependencies.
+- **Status.** Decided, implemented, verified (frontend 257, E2E 52/52 + 4 SKIP; builds clean).
+
+## D22 — P3 image-build sharding: parallel shards + ordered merge, small batches untouched
+
+- **Decision.** Batches ≥8 pages shard across K device-aware engine jobs (`2–3` by `hardwareConcurrency`, 256 MiB in-flight cap, one shard per page max), each a plain `pdf.images_to_pdf` call through unchanged orchestration, merged in order via temp studio docs (closed in `finally`); below 8 pages the historical single call runs byte-for-byte. Progress is aggregated honestly, cancellation reaches every in-flight job, failures fail honestly with no silent retry. `ExecutionStrategy::Parallel` stays documented-but-unselected (comment-only) so the frozen `OperationCapabilities` contract is untouched — the illusion is resolved by construction, not deletion.
+- **Reason.** PERFORMANCE.md P3: sharding is the highest-value parallelism on the stable toolchain (no nightly, no COOP/COEP); transfer+merge overhead wins small, so the threshold keeps small builds identical.
+- **Alternatives considered.** Silent single-worker fallback on shard failure (rejected: doubles worst-case time and hides errors). Removing the `Parallel` variant (rejected: frozen-contract churn for zero behavioral gain).
+- **Consequences.** Large image builds fan out K WASM jobs (memory ×K while sharded — hence the cap); small builds provably unchanged.
+- **Status.** Decided, implemented, verified (engine 357, frontend 272, sharded 8-page E2E in order; builds clean).
+
+## D23 — Usage-based Home ordering (local counts, hero follows the user)
+
+- **Decision.** Home records tool opens (counts + recency, `localStorage`, private-mode safe) and promotes the most-used tool to the hero card with the "Most used" badge; zero data → merge. Counts only, no PII, no network. Compress can never be hero (disabled). Card-tap recording only in v1 (direct-URL visits don't count — documented in code).
+- **Reason.** The "Most used" badge was hardcoded to Merge for every user — a static claim presenting as measurement.
+- **Alternatives considered.** Recording in the router (rejected: touches StudioApp routing for v1; card taps cover the measured claim).
+- **Consequences.** Grid order is now per-device state; E2E unaffected (asserts names, not order).
+- **Status.** Decided, implemented, verified (12 new tests, full suite green).
+
+## D24 — Rotation reads the nearest /Rotate holder (K1)
+
+- **Decision.** `page_geometry` takes `/Rotate` from the nearest holder on the page → ancestors chain (spec inheritance), matching `effective_rotation`; rotate materializes the resolved value on the page so re-reads stay stable (verified in `engine/src/processing/pdf/core/document.rs`).
+- **Reason.** The old accumulation summed chained holders, disagreeing with the effective rotation whenever two holders existed (page 180 + ancestor 90 read 270).
+- **Status.** Decided, implemented in wave1 (`ad592f9`); canonical re-verification pending (STATUS gate 2).
+
+## D25 — Sharded Images duration is max-shard + merge wall (K8)
+
+- **Decision.** The sharded build reports `maxShardDurationMs + merged.durationMs` with per-shard perfMarks namespaced (`shard:<i>:<name>`), instead of summing concurrent shard durations (verified in `app/src/studio/tools/imageSharding.ts`).
+- **Reason.** Shards run concurrently, so wall time is the slowest shard — never the sum; per-engine-run durations stay authoritative (D4).
+- **Status.** Decided, implemented in wave1 (`ad592f9`); canonical re-verification pending (STATUS gate 2).
+
+## D26 — Cached preview URLs have a single owner (the service)
+
+- **Decision.** The `folio.ts` service owns every cached preview URL (revokes on eviction/close); callers hold but never revoke the result (verified in `app/src/studio/services/folio.ts`).
+- **Reason.** Shared revocation rights cause use-after-revoke across tools; one owner makes the lifetime auditable.
+- **Status.** Decided, implemented in wave3 (`5c6de64`); canonical re-verification pending (STATUS gate 2).
+
+## D27 — Thumbnail encode lanes observe cancellation mid-flight
+
+- **Decision.** Cancel-during-render and cancel-during-encode checkpoints release bitmaps, revoke fresh URLs nobody owns, and surface `CANCELLED` instead of completing (verified in `app/src/studio/services/folio.ts` + `usePageThumbs.ts`).
+- **Reason.** A synchronous encode cannot be preempted, but every lane boundary can still abort — so a cancelled job leaves neither leaked canvases nor orphaned URLs.
+- **Status.** Decided, implemented in wave3 (`5c6de64`); canonical re-verification pending (STATUS gate 2).

@@ -16,11 +16,11 @@ This roadmap records actual project direction. Items are separated by commitment
 
 ## Current
 
-- v2.0 scanner on `dev` (M1–M3 + M3.x hardening done; M4 docs-prep in progress, version bump HELD): `folio-scan` core (detect → warp → enhance, Otsu + closing + area-order + spine-split merge), dedicated scan worker + WASM (protocol v2 `detectOnly`/`detected`), CameraCapture integration with review-before-accept for processed scans and fallback auto-accept for no-boundary captures, live-guidance-only detection, portaled scanner surface, memory-safe sequential imports (`MAX_IMPORT_LONG_EDGE = 2500`, PNG→JPEG). Also on `dev`: PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG + Rearrange-parity page list (D18), perf P0–P2+P4 (D19/D20), naming-first downloads all tools (D21), preview hardenings F-18/F-19. Real-device Android validation PENDING — gates the v2.0.0 release (checklist in `docs/STATUS.md`); `package.json` still 1.8.0.
+- v2.0 scanner on `dev` (M1–M3 + M3.x hardening done; M4 docs-prep done 2026-09-27, version bump HELD): `folio-scan` core (detect → warp → enhance, Otsu + closing + area-order + spine-split merge), dedicated scan worker + WASM (protocol v2 `detectOnly`/`detected`), CameraCapture integration with review-before-accept for processed scans and fallback auto-accept for no-boundary captures, live-guidance-only detection, portaled scanner surface, memory-safe sequential imports (`MAX_IMPORT_LONG_EDGE = 2500`, PNG→JPEG). Also on `dev`: PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG + Rearrange-parity page list (D18), perf P0–P2+P4 with P0.2 shelved (D19/D20), naming-first downloads all tools (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings F-18/F-19/F-20, audit-hardening waves 1–7 (K-series fixes, benchmark matrix). Real-device Android validation PENDING — gates the v2.0.0 release (checklist in `docs/STATUS.md`); `package.json` 1.9.0 (waves 1–7 metadata marker).
 
 ## Next
 
-- **Performance program (`docs/PERFORMANCE.md`).** P0, P1, P2, P3, P4 **all done 2026-09-26** (P3: image-build sharding + parallel-honesty-by-construction, D22). Remaining: P0.2 main-thread slice removal (design-gated on measurements — P4 harness available; HELD for deep discussion per user). Threaded WASM explicitly gated behind a future decision.
+- **Performance program (`docs/PERFORMANCE.md`) — all done.** P0, P1, P2, P3, P4 implemented 2026-09-26 (P3: image-build sharding + parallel-honesty-by-construction, D22). P0.2 main-thread slice removal measured-and-SHELVED 2026-09-27 on real-device evidence (phone 55 MB merge staging 79 ms cold / 28 ms warm vs ~40 ms engine; see `docs/WORKLOG.md` + `docs/PERFORMANCE.md`) — no implementation, reopens only on a large-PDF-on-phone crash or staging >~500 ms on a used file. Threaded WASM explicitly gated behind a future decision.
 - Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
 
 ## Future / not committed
@@ -28,8 +28,8 @@ This roadmap records actual project direction. Items are separated by commitment
 The following appear in the product surface or history as aspirations. None are committed, scheduled, or designed. Do not quote them as roadmap promises.
 
 - **Compress** — button reserved in the Studio UI; engine + UI implementation not started.
-- **Sign & annotate** — listed in the About page version tree as a planned "v1.2.0" (e-signatures, form-fill overlay, watermarks/page numbers). About-page aspiration only.
-- **Batch & OCR** — listed in the About page version tree as a planned "v2.0.0" (batch queue, local OCR). About-page aspiration only. Note: that "v2.0.0" label predates the scanner v2.0 release and collides with its numbering — resolving it is an explicit gate in the `docs/STATUS.md` v2.0.0 checklist.
+- **Sign & annotate** — a former About version-tree "v1.2.0" entry (e-signatures, form-fill overlay, watermarks/page numbers), removed 2026-09-27 with the tree. About-page aspiration only.
+- **Batch & OCR** — a former About version-tree "v2.0.0" entry (batch queue, local OCR), removed 2026-09-27 with the tree. About-page aspiration only. Note: that "v2.0.0" label predated the scanner v2.0 release and collided with its numbering — resolved by the removal (`docs/STATUS.md` checklist gate 5 closed).
 - Engine-adjacent ideas mentioned in code comments as "later lessons" (text extraction, rendering inside the engine, compression, encryption): explicitly out of scope for the current engine, recorded here only so they are not mistaken for plans.
 
 - **Scanner zoom (revisit)** — the zoom control was removed because the track-reported range is not a focal-length multiplier (docs/BUGS.md F-11); revisit only with focal-accurate lens handling.

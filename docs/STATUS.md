@@ -1,11 +1,11 @@
 # Folio — Status
 
-> Current as of `dev` pre-v2.0 (`fef775b`, 2026-09-26 — scanner M1–M3+M3.x, perf P0–P2+P4, D16–D21; package.json still 1.8.0, v2.0.0 release HELD pending real-device validation).
+> Current as of `dev` pre-v2.0 (`97dc8c2`, 2026-09-27 — scanner M1–M3+M3.x, perf P0–P2+P4 with P0.2 shelved, D16–D23, F-11–F-20, audit-hardening waves 1–7; package.json 1.9.0 waves-metadata marker, v2.0.0 release HELD pending real-device validation).
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
 
-**Pre-v2.0 (`dev`).** Scanner v2.0 M1–M3 plus M3.x mobile hardening, performance passes P0–P2+P4, PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), and preview hardenings (F-18 portaled-modal F-19) are implemented on `dev` and deployed to the `dev` Cloudflare branch. No version bump: `package.json` remains 1.8.0 and the v2.0.0 release is HELD pending real-device Android validation (see the release checklist below).
+**Pre-v2.0 (`dev`).** Scanner v2.0 M1–M3 plus M3.x mobile hardening, performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.0 (waves 1–7 metadata marker per `docs/CHANGELOG.md`) and the v2.0.0 release is HELD pending real-device Android validation (see the release checklist below). The last docs-recorded Cloudflare `dev` deploy is the 2026-09-27 UX-batch build (see `docs/WORKLOG.md`); deploy state for waves 1–7 is unrecorded.
 
 ## Completed work
 
@@ -27,13 +27,17 @@
 - JPEG DCT passthrough in `images_to_pdf` (D17, F-14): baseline orientation-1 JPEGs embed byte-identical; holders of the old behavior see ~5× smaller outputs.
 - Performance passes P0–P2+P4 done 2026-09-26 (D19, D20; see `docs/PERFORMANCE.md`): owned WASM inputs, page-map cache, in-place rotate, single-pass split/delete/reorder/inspect, progress coalescing, scan borrowed-view + detect-only live path, one-`getPage` thumbnails, single-decode imports, encode-worker offload, bounded-2 thumbnail encode, preview LRU (cap 8), engine bench CLI + dev-only perf attribution.
 - Naming-first downloads, all tools (D21): `downloadNaming.ts` smart defaults + `DownloadCard`/`MultiDownloadCard` (Smart prefilled / Custom blank); auto-downloads removed.
-- Preview hardening (F-18: eager load, one-shot blob-URL recovery, explicit "Preview unavailable" fallback, decode-checked E2E) and portaled viewport-anchored preview modal (F-19: escapes the `backdrop-filter` containing block, `dvh` caps).
+- P3 worker-level Images parallelism (D22): ≥8-page batches shard across K device-aware engine jobs with ordered merge; below 8 pages the historical single call runs byte-for-byte; sharded duration reports max-shard + merge wall.
+- Usage-based Home ordering + copy truth-pass + update honesty (D23): hero follows local usage counts; About versioned entries replaced by one unversioned Coming-soon card; banner navigates to About with literal log copy.
+- Preview hardening (F-18: eager load, one-shot blob-URL recovery, explicit "Preview unavailable" fallback, decode-checked E2E), portaled viewport-anchored preview modal (F-19: escapes the `backdrop-filter` containing block, `dvh` caps), and Split preview opener + portaled overlay (F-20: thumbnail click previews, label pill keeps the toggle).
+- P0.2 measured-and-shelved (2026-09-27 real-device evidence, see `docs/WORKLOG.md` + `docs/PERFORMANCE.md`): phone 55 MB merge staging 79 ms cold / 28 ms warm vs ~40 ms engine — no implementation.
+- Audit-hardening waves 1–7 (2026-09-27, commits `ad592f9`–`97dc8c2`): rotation nearest-wins (K1), extract pre-final cancel (K2), page-dimension clamp + DPI min (K7b), permissive PDF pre-gate (K10), last-mile filename sanitize (K13), glue sanitize cap, engine-worker init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix + cancel-midrun/edge audit tests (see `docs/BUGS.md` K-series).
 
 ## Current work
 
 - **Real-device Android validation is PENDING and gates the v2.0.0 release**: the 30-photo crash scenario (10/20/30/50 imports, 30 captures, mixed, cancel, remove, build) must be re-tested on the affected phone before any release claim.
-- M4 docs-prep pass in progress (this change): reconcile STATUS/ROADMAP/OPERATIONS/ARCHITECTURE to the `dev` state above; no code, no version bump.
-- Design-gated perf remainders (see `docs/PERFORMANCE.md` + `docs/ROADMAP.md`): P0.2 main-thread slice removal and P3 worker-level Images parallelism, both awaiting P4 measurements; threaded WASM explicitly gated behind a future decision.
+- M4 docs-prep pass done with this change: STATUS/ROADMAP/OPERATIONS/ARCHITECTURE reconciled to the `dev` state above (D22/D23/F-20/shelved-P0.2/waves 1–7); no code, no version bump.
+- Performance program closed: P0–P4 implemented, P0.2 measured-and-shelved with real-device evidence (see `docs/PERFORMANCE.md`); threaded WASM explicitly gated behind a future decision.
 
 ## Pending work
 
@@ -51,9 +55,9 @@ None. No blocked items.
 - **Metadata `set` with `""` is rejected** — use `Clear`. Read preserves `Some("")` distinctly from absent.
 - **`pdf.inspect` does no text extraction, rendering, or image extraction** — structural inspection only (page count, version, encryption, metadata, optional per-page geometry).
 - **`pdf.images_to_pdf` accepts JPEG/PNG only**; anything else fails as `UNSUPPORTED_FORMAT`.
-- Planned About-page items (**Sign & annotate** as "v1.2.0", **Batch & OCR** as "v2.0.0") are listed aspirations, not committed roadmap items. Note: the About tree's "v2.0.0" label predates the scanner v2.0 release and collides with its numbering — resolving the tree at release time is an explicit gate in the checklist below (no code change in this pass).
+- About-page future items live in one unversioned **Coming soon** card (Compress, sharing/annotation ideas — aspirations, never promises; verified in `app/src/studio/About.tsx`). The old versioned tree ("v1.2.0 · Sign & annotate", "v2.0.0 · Batch & OCR") was removed 2026-09-27, closing the numbering collision with scanner v2.0 (checklist gate 5).
 
-## Validated baseline (pre-v2.0, `dev` @ `fef775b`, 2026-09-26)
+## Validated baseline (pre-v2.0, `dev` @ `97dc8c2`, 2026-09-27 — numbers are the last verified baselines; waves 1–7 added tests with no recorded full-suite re-run, so treat as unverified until checklist gate 2 runs on the release commit)
 
 | Check                                                         | Result                                                                                                                                                                                                |
 | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -70,24 +74,24 @@ None. No blocked items.
 | Canonical E2E (`node e2e/studio.e2e.mjs`, no corpus)          | 57/57 passing, 4 skipped (large-file sections need optional `test pdfs/merged.pdf`)                                                                                                                   |
 | Optional large-file E2E (historical, needs local corpus)      | ~514 MB / 2585 pages: full count, bounded thumbnails (24 imgs), zero console errors, cancellation verified (v1.7.0–Phase 2 runs; not re-run without the corpus)                                       |
 
-These values were established during the v1.7.0 integration verification (fresh-clone runs included), re-confirmed by the Phase 3 verification in `docs/DEVELOPMENT.md`, re-confirmed for v1.7.1 (F-7–F-10, UI-only), extended for v1.8.0 (Images → PDF page assembly: +16 frontend tests, +4 canonical E2E checks), and advanced through v2.0 M1–M3+M3.x, the P0–P2+P4 performance passes, and D16–D21 (see `docs/WORKLOG.md` for the per-pass records; latest: frontend 257, canonical E2E 52/52 + 4 SKIP). The 25/25 full-corpus result remains the benchmark for runs _with_ the optional corpus; the 25/25 + 4 SKIP result is the expected fresh-clone result _without_ it. If any number changes, update this table in the same commit.
+These values were established during the v1.7.0 integration verification (fresh-clone runs included), re-confirmed by the Phase 3 verification in `docs/DEVELOPMENT.md`, re-confirmed for v1.7.1 (F-7–F-10, UI-only), extended for v1.8.0 (Images → PDF page assembly: +16 frontend tests, +4 canonical E2E checks), and advanced through v2.0 M1–M3+M3.x, the P0–P2+P4 performance passes, D16–D23, F-11–F-20, and audit waves 1–7 (see `docs/WORKLOG.md` for the per-pass records; latest verified: frontend 289, canonical E2E 57/57 + 4 SKIP). The 25/25 full-corpus result remains the benchmark for runs _with_ the optional corpus; the 25/25 + 4 SKIP result is the expected fresh-clone result _without_ it. If any number changes, update this table in the same commit.
 
-## v2.0.0 release checklist (HELD — all gates PENDING)
+## v2.0.0 release checklist (HELD — gate 5 DONE, all others PENDING)
 
 The v2.0.0 version bump and release are HELD pending the user's real-device phone validation. Gates run in this exact order; none may be skipped or reordered.
 
 1. **Real-device Android validation — PENDING.** Affected phone runs: 10/20/30/50 imported photos, 30 camera captures, mixed scan+import build, import-while-scanning, cancel halfway, remove imported pages, build. iOS Safari run pending. No release claim until this passes.
 2. **Full suite green on the release commit — PENDING.** Rust `cargo test` + `fmt --check` + `clippy` (`engine/`, `scan/`), `build:wasm` + `build:scan`, frontend typecheck/lint/format/test, production build, canonical E2E — with `docs/STATUS.md` baselines updated in the same commit.
-3. **CHANGELOG v2.0.0 entry — PENDING.** New entry per the file's per-released-version convention (verified against git history; never invent). Must cover: scanner M1–M3+M3.x, D16–D21, F-11–F-19 resolutions, P0–P2+P4.
+3. **CHANGELOG v2.0.0 entry — PENDING.** New entry per the file's per-released-version convention (verified against git history; never invent). Must cover: scanner M1–M3+M3.x, D16–D23, F-11–F-20 resolutions, P0–P2+P4 (P0.2 shelved), audit waves 1–7.
 4. **`package.json` bump to 2.0.0 — HELD.** Only after gates 1–3. The About `latest` entry follows automatically via `__FOLIO_VERSION__`.
-5. **About tree check — PENDING.** The About version tree's planned "v2.0.0 · Batch & OCR" entry collides with the scanner v2.0.0 numbering (verified in `app/src/studio/About.tsx`, read-only in this pass). Resolve before shipping: retitle or re-scope the planned entry so STATUS/ROADMAP/README-surface claims agree.
+5. **About tree check — DONE 2026-09-27.** The versioned tree is gone: About now carries one unversioned Coming-soon card ("Ideas under consideration" + Suggest-a-feature link, verified in `app/src/studio/About.tsx`), so the scanner-v2.0 numbering collision no longer exists.
 6. **Deploy — PENDING.** Ship `app/dist/` to Cloudflare Pages `folio-pdf` branch `dev`; phones reload once to the current shell (update-manager banner is the live path).
 7. **`main`-promotion decision — SEPARATE, unscheduled.** Promoting the Folio build to `main`/production hosting is an explicit decision, never a side effect of this release.
 
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `fef775b` (naming-first downloads docs, 2026-09-26). `package.json` 1.8.0 — v2.0.0 bump HELD (see release checklist above).
+- Branch: `dev`. HEAD: `97dc8c2` (audit wave 7, 2026-09-27). `package.json` 1.9.0 — v2.0.0 bump HELD (see release checklist above).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace.
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
 - `main` untouched (pre-engine release at `5d83b16`).

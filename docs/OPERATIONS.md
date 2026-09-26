@@ -28,7 +28,7 @@ Global rules for all operations: inputs arrive as bytes (never paths); validatio
 - **Output.** `SplitSummary` (`inputPageCount`, per-part `name` + `pageCount`) plus one output document per part.
 - **Atomicity.** Outputs return only after **every** part succeeds — no partial results on failure.
 - **Errors.** Structured range errors (asserted in E2E: invalid ranges are rejected with actionable messages, nothing is produced).
-- **Testing.** `engine/tests/pdf_split.rs` + unit tests + E2E (pick mode download, range error, 21/22 toggle).
+- **Testing.** `engine/tests/pdf_split.rs` + unit tests + E2E (pick mode download, range error, 21/22 toggle, preview open/decode/viewport-anchored/close).
 
 ## `pdf.reorder` — exact permutation
 

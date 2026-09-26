@@ -2,6 +2,16 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.9.0 — Correctness, memory, and UX hardening (`dev`, 2026-09-27)
+
+Waves 1–7 (`ad592f9`..`97dc8c2`): engine + app hardening on the pre-v2.0 `dev` line. Scanner v2.0 scope (M1–M3+M3.x, D16–D21, P0–P2+P4, F-11–F-19) stays reserved for the v2.0.0 entry; the v2.0.0 release itself remains HELD pending real-device validation (see `docs/STATUS.md` checklist). App-only version marker — the About-page version tree follows automatically via `__FOLIO_VERSION__`, no About edit needed.
+
+- Correctness: rotate resolves effective rotation per planned page only (sparse selections skip untouched pages; ancestor-inherited `/Rotate` reads the nearest holder); extract is cancellable; loader caps inputs (100 MiB / 10 000 pages, empty input reclassified `InvalidInput`); MediaBox clamp, images-to-PDF DPI minimum, split context validation, folio-service fixes (wave 1). WASM glue sanitization cap, worker init-fatal path, condensed event trail, scan/encode IPC hardening, render fail-path canvas release (wave 2).
+- Performance / memory: single-encode scan path with prescale + pixel gates; service-owned preview URLs (single-owner rule — cancelled jobs revoke already-minted URLs, encode lanes observe cancellation); staging progress surfaced in the folio service (wave 3).
+- UI / UX / motion / copy: honest progress staging across tools, portaled modals, handle-drag page lists, memoized rows, update-banner guard, 44px touch gaps, DropZone single-tab-stop CTA (wave 4); motion hygiene — scoped transitions, stagger caps, modal enter/exit, drag lift, scanner fades (wave 5); mobile camera behavior — stream pause, HTTPS branch, landscape-compact layout, low-tier capture, constraint hardening (wave 6); copy truth-pass — About tool count corrected (seven → six), Compress levels say "Not available yet", Home taglines rewritten (wave 7). Compress stays reserved/disabled, consistent with the About Coming-soon wording.
+- Tests / bench: engine audit benchmark-matrix example (`audit_bench_matrix`) plus audit coverage tests (cancel-midrun, images edge, metadata edge, parse caps); frontend coverage for folio-service ownership/cancel, page thumbs, image prepare/sharding/import, DownloadCard, scan processor, camera constraints/lifecycle (waves 1–3, 6–7).
+- Verification: this entry records the wave 1–7 lead commits above (subjects + stats verified against git history); suite-wide re-verification numbers live in `docs/STATUS.md` and are unchanged by this metadata pass.
+
 ## v1.8.0 — Images → PDF page assembly (`dev`, 2026-09-23)
 
 - Unified ordered page collection (`ImagePage[]`) for uploads + camera captures: preview grid, ←/→ move-button reorder (HTML5 drag as desktop-only enhancement), per-page remove, add-more after initial selection, per-page rotate (app-side canvas re-encode; unrotated pages byte-identical), camera input (`getUserMedia` → video → JPEG capture, per-error failure copy, stream stopped on Done/close/unmount).

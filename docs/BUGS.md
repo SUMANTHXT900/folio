@@ -4,54 +4,7 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
-### F-17 — Live scanner detection could never fire (corner shape mismatch)
-
-- **Status.** Resolved. **Area.** Scan bridge (`scan/src/wasm.rs` envelope ↔ `app/src/studio/tools/scan/scanWorkerClient.ts` parsing; live path in `useScanProcessor.ts`). **Severity.** Medium (guidance-only: the "Document detected — capture when ready" pill never appeared; scanning itself worked).
-- **Symptoms.** Live framing guidance never reported a detection even on clear pages; `liveDetected` stayed false.
-- **Root cause.** The WASM glue serializes corners as `[[x, y] × 4]` arrays, but the client parsed `{x, y}` objects only — the filter yielded an empty list, so `corners` was always `null` and the status gate could never be satisfied.
-- **Fix.** `parseCorners` accepts both shapes, hardened by scan protocol v2's `detected` status; the live tick now runs detection-only and reports corners honestly.
-- **Verification.** Scan unit tests (detect-only corners + fallback), scan worker/client tests, canonical E2E 46/46 + 4 SKIP.
-
-### F-13 — Hard-cached PWA with no update path after a deploy
-
-- **Status.** Resolved (update manager). **Area.** PWA/service-worker boundary (`app/src/pwa/`, `StudioApp.tsx`, `About.tsx`). **Severity.** High (after every deploy, mobile and desktop users sat on the stale precache with no in-app recourse — only a manual hard refresh, undiscoverable on phones).
-- **Symptoms.** New versions deployed to Cloudflare Pages never surfaced in the installed/open app; users had to know to hard-refresh. `registerType: 'autoUpdate'` updated the worker silently in the background while the open page kept serving old chunks.
-- **Root cause.** Nothing in the app ever called `registerSW` / listened for `onNeedRefresh`, so a waiting worker had no UI. Stale-chunk recovery (F-12) only fires after a lazy import already failed.
-- **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
-- **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
-- **Follow-up 2026-09-27 (honesty + UX pass, D23 batch).** Banner now navigates to About (auto-expands details while an update waits) instead of a dead tap; `applyUpdate` shows an `applying` phase; log lines carry real timestamps and literal copy (`Re-fetching sw.js…`, `Waiting 5s for the worker to answer…`, `No new version answered within 5s…`) replacing embellished lines ("edge server", "worker integrity", "hashes match"). The mechanism was verified real: `registration.update()` re-fetches `sw.js`, `updateSW(true)` activates + reloads; no-request clicks trace to disabled-button state, the LAN guard, or DevTools filters.
-
-### F-19 — Preview modal not viewport-anchored on tall lists (phone video report)
-
-- **Status.** Resolved (portaled modal). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** High (on a 23-page phone list the preview image opened off-screen — the user's "light background, not the image").
-- **Symptoms.** Tapping a row preview on a tall list dimmed the whole page; "Page N" + "Close" sat at the screen's bottom edge and the image itself was invisible, centered somewhere in the middle of the tall overlay. Verified in the user's screen recording (frames showed the backdrop spanning all 23 rows) and reproduced locally (backdrop rect 356×1840 on an 844px viewport).
-- **Root cause.** The tool card above the modal carries `backdrop-filter` (glass style). Per spec, any non-`none` `backdrop-filter` (like `filter`) on an ancestor makes it the containing block for in-tree `position: fixed` descendants — so `fixed inset-0` resolved against the tall card, not the viewport. Proven by walking the dialog's ancestor chain (the card flagged `backdrop-filter`) while `position: fixed` itself computed correctly.
-- **Fix.** The modal renders via `createPortal(..., document.body)` (escapes every ancestor; immune to any future filter/transform above it), z-index raised above the sticky header (`z-[100]`), and viewport caps use `dvh` units (`92dvh` dialog, `78dvh` image) so the Android URL bar can't crop. New E2E assertion pins it: backdrop rect must equal the viewport and the dialog must sit inside it.
-- **Verification.** Tall-list (14 pages, phone viewport, scrolled to middle) probe: backdrop exactly 390×844 at scroll 873 (was 356×1840), dialog fully inside, header covered, image decodes and visible; viewport-anchored E2E checks green for Images (50/50) and Split (57/57).
-
-### F-18 — Images previews could silently fail ("light background, not the image")
-
-- **Status.** Resolved (hardened; the report could not be reproduced in any automated probe — see verification). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** Medium (previews are how users verify their pages).
-- **Symptoms.** Real-phone report: page previews did not appear; rows showed only the light card background.
-- **Root cause.** Not confirmed in reproduction. Inspection found three real silent-failure mechanisms: (1) `loading="lazy"` gated blob-URL previews (pointless for local URLs; can starve in some mobile/in-app browsers); (2) a failed decode had no recovery — Android can reclaim blob-URL storage across tab restore, leaving dead URLs; (3) neither the row nor the modal rendered any fallback, so a broken image showed as blank space indistinguishable from "still loading".
-- **Fix.** Previews load eagerly; `onError` re-materializes the object URL from the retained File handle once; persistent failure renders an explicit "Preview unavailable" tile (row) / panel (modal). Modal is scroll-safe; row layout cleaned up for phones (larger thumbnails, truncated name/meta). Three E2E checks now assert previews actually decode (`naturalWidth > 0`) for uploads, the modal, and accepted scans.
-- **Verification.** E2E 47→49 with the decode checks (twice green). Nine visual/functional probes: dev + deployed builds, light + dark themes, small/large/PNG/JPEG uploads, downscale path, 12-photo list after scroll, scanner review, accepted scan row, modal — all loaded correctly. If the report recurs, it is device-state-specific and the new explicit fallback will show which page failed.
-
-### F-20 — Split pages had no preview; overlay would have inherited the F-19 bug class
-
-- **Status.** Resolved (opener wired + portaled overlay). **Area.** Split pick mode (`app/src/studio/tools/SplitTool.tsx`). **Severity.** Medium (users picked pages blind; the overlay also sat in-tree under glass ancestors).
-- **Symptoms.** `setPreview` existed but no UI ever opened it — `ThumbTile` only toggled keep/remove. The overlay itself used the same in-tree `fixed inset-0` pattern that F-19 proved capturable.
-- **Root cause.** Dead opener (single code path set preview, and it was the closer) plus the F-19-prone structure: verified uncaptured in Split's current tree by live probe and ancestor walk, but one refactor away from breaking.
-- **Fix.** Thumbnail click previews (bottom label pill keeps the keep/remove toggle — Rearrange separation parity); overlay portaled via `createPortal(..., document.body)` with `z-[100]` + `dvh` caps as defense-in-depth.
-- **Verification.** +4 E2E (open, decode `naturalWidth > 0`, viewport-anchored backdrop == viewport, close); suite **57/57 + 4 SKIP**.
-
-### F-14 — Images → PDF output ~5× larger than the input photos (81 MB for 13 images)
-
-- **Status.** Resolved (DCT passthrough). **Area.** Engine (`engine/src/processing/pdf/images_to_pdf/mod.rs`), engine-only — wire, protocol, and app untouched. **Severity.** High (the scanner's main output was unusable at scale: share failures, storage bloat).
-- **Symptoms.** 13 phone/camera photos (~2–4 MB JPEGs each) built an ~81 MB PDF on a real phone.
-- **Root cause.** The engine decoded every JPEG to raw pixels and embedded an _uncompressed_ stream (`w×h×3` bytes, no `/Filter`) — the original JPEG compression was discarded at the engine boundary. A 2500px photo entered as ~3 MB and left as ~14 MB.
-- **Fix.** Baseline orientation-1 JPEGs embed byte-identical (`/DCTDecode`); progressive/YCCK/EXIF-rotated fall back to one internal q82 re-encode; PNGs keep the lossless raw path (D17).
-- **Verification.** 8 new Rust tests (byte identity, DCT filter, fallback dims, parser gates incl. progressive rejection + Adobe CMYK); full Rust 354 passing, fmt/clippy clean; frontend 228 + E2E 43/43 + 4 SKIP unchanged (DCT renders identically in PDF.js).
+No active issues — every recorded issue is resolved below.
 
 ## Known limitations (by design, not defects)
 
@@ -174,3 +127,108 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Root cause.** `prepareImportFile` retained within-budget originals regardless of format; `addFiles` never normalized at all. PNG has no engine DCT path by design (lossless raw), so retained PNG bytes exploded.
 - **Fix.** PNGs always convert to white-filled JPEG at import (budget-clamped, `.jpg` rename — truthful, matches scan naming); `Add images`/DropZone now run the same normalized `importFiles` path with progress text instead of raw `addFiles`. JPEG behavior unchanged (originals retained).
 - **Verification.** New unit tests (PNG conversion identity, JPEG retention); E2E upload block updated for the rename + still builds; canonical E2E 45/45 + 4 SKIP.
+
+### F-13 — Hard-cached PWA with no update path after a deploy
+
+- **Status.** Resolved (update manager). **Area.** PWA/service-worker boundary (`app/src/pwa/`, `StudioApp.tsx`, `About.tsx`). **Severity.** High (after every deploy, mobile and desktop users sat on the stale precache with no in-app recourse — only a manual hard refresh, undiscoverable on phones).
+- **Symptoms.** New versions deployed to Cloudflare Pages never surfaced in the installed/open app; users had to know to hard-refresh. `registerType: 'autoUpdate'` updated the worker silently in the background while the open page kept serving old chunks.
+- **Root cause.** Nothing in the app ever called `registerSW` / listened for `onNeedRefresh`, so a waiting worker had no UI. Stale-chunk recovery (F-12) only fires after a lazy import already failed.
+- **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
+- **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
+- **Follow-up 2026-09-27 (honesty + UX pass, D23 batch).** Banner now navigates to About (auto-expands details while an update waits) instead of a dead tap; `applyUpdate` shows an `applying` phase; log lines carry real timestamps and literal copy (`Re-fetching sw.js…`, `Waiting 5s for the worker to answer…`, `No new version answered within 5s…`) replacing embellished lines ("edge server", "worker integrity", "hashes match"). The mechanism was verified real: `registration.update()` re-fetches `sw.js`, `updateSW(true)` activates + reloads; no-request clicks trace to disabled-button state, the LAN guard, or DevTools filters.
+
+### F-14 — Images → PDF output ~5× larger than the input photos (81 MB for 13 images)
+
+- **Status.** Resolved (DCT passthrough). **Area.** Engine (`engine/src/processing/pdf/images_to_pdf/mod.rs`), engine-only — wire, protocol, and app untouched. **Severity.** High (the scanner's main output was unusable at scale: share failures, storage bloat).
+- **Symptoms.** 13 phone/camera photos (~2–4 MB JPEGs each) built an ~81 MB PDF on a real phone.
+- **Root cause.** The engine decoded every JPEG to raw pixels and embedded an _uncompressed_ stream (`w×h×3` bytes, no `/Filter`) — the original JPEG compression was discarded at the engine boundary. A 2500px photo entered as ~3 MB and left as ~14 MB.
+- **Fix.** Baseline orientation-1 JPEGs embed byte-identical (`/DCTDecode`); progressive/YCCK/EXIF-rotated fall back to one internal q82 re-encode; PNGs keep the lossless raw path (D17).
+- **Verification.** 8 new Rust tests (byte identity, DCT filter, fallback dims, parser gates incl. progressive rejection + Adobe CMYK); full Rust 354 passing, fmt/clippy clean; frontend 228 + E2E 43/43 + 4 SKIP unchanged (DCT renders identically in PDF.js).
+
+### F-17 — Live scanner detection could never fire (corner shape mismatch)
+
+- **Status.** Resolved. **Area.** Scan bridge (`scan/src/wasm.rs` envelope ↔ `app/src/studio/tools/scan/scanWorkerClient.ts` parsing; live path in `useScanProcessor.ts`). **Severity.** Medium (guidance-only: the "Document detected — capture when ready" pill never appeared; scanning itself worked).
+- **Symptoms.** Live framing guidance never reported a detection even on clear pages; `liveDetected` stayed false.
+- **Root cause.** The WASM glue serializes corners as `[[x, y] × 4]` arrays, but the client parsed `{x, y}` objects only — the filter yielded an empty list, so `corners` was always `null` and the status gate could never be satisfied.
+- **Fix.** `parseCorners` accepts both shapes, hardened by scan protocol v2's `detected` status; the live tick now runs detection-only and reports corners honestly.
+- **Verification.** Scan unit tests (detect-only corners + fallback), scan worker/client tests, canonical E2E 46/46 + 4 SKIP.
+
+### F-18 — Images previews could silently fail ("light background, not the image")
+
+- **Status.** Resolved (hardened; the report could not be reproduced in any automated probe — see verification). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** Medium (previews are how users verify their pages).
+- **Symptoms.** Real-phone report: page previews did not appear; rows showed only the light card background.
+- **Root cause.** Not confirmed in reproduction. Inspection found three real silent-failure mechanisms: (1) `loading="lazy"` gated blob-URL previews (pointless for local URLs; can starve in some mobile/in-app browsers); (2) a failed decode had no recovery — Android can reclaim blob-URL storage across tab restore, leaving dead URLs; (3) neither the row nor the modal rendered any fallback, so a broken image showed as blank space indistinguishable from "still loading".
+- **Fix.** Previews load eagerly; `onError` re-materializes the object URL from the retained File handle once; persistent failure renders an explicit "Preview unavailable" tile (row) / panel (modal). Modal is scroll-safe; row layout cleaned up for phones (larger thumbnails, truncated name/meta). Three E2E checks now assert previews actually decode (`naturalWidth > 0`) for uploads, the modal, and accepted scans.
+- **Verification.** E2E 47→49 with the decode checks (twice green). Nine visual/functional probes: dev + deployed builds, light + dark themes, small/large/PNG/JPEG uploads, downscale path, 12-photo list after scroll, scanner review, accepted scan row, modal — all loaded correctly. If the report recurs, it is device-state-specific and the new explicit fallback will show which page failed.
+
+### F-19 — Preview modal not viewport-anchored on tall lists (phone video report)
+
+- **Status.** Resolved (portaled modal). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** High (on a 23-page phone list the preview image opened off-screen — the user's "light background, not the image").
+- **Symptoms.** Tapping a row preview on a tall list dimmed the whole page; "Page N" + "Close" sat at the screen's bottom edge and the image itself was invisible, centered somewhere in the middle of the tall overlay. Verified in the user's screen recording (frames showed the backdrop spanning all 23 rows) and reproduced locally (backdrop rect 356×1840 on an 844px viewport).
+- **Root cause.** The tool card above the modal carries `backdrop-filter` (glass style). Per spec, any non-`none` `backdrop-filter` (like `filter`) on an ancestor makes it the containing block for in-tree `position: fixed` descendants — so `fixed inset-0` resolved against the tall card, not the viewport. Proven by walking the dialog's ancestor chain (the card flagged `backdrop-filter`) while `position: fixed` itself computed correctly.
+- **Fix.** The modal renders via `createPortal(..., document.body)` (escapes every ancestor; immune to any future filter/transform above it), z-index raised above the sticky header (`z-[100]`), and viewport caps use `dvh` units (`92dvh` dialog, `78dvh` image) so the Android URL bar can't crop. New E2E assertion pins it: backdrop rect must equal the viewport and the dialog must sit inside it.
+- **Verification.** Tall-list (14 pages, phone viewport, scrolled to middle) probe: backdrop exactly 390×844 at scroll 873 (was 356×1840), dialog fully inside, header covered, image decodes and visible; viewport-anchored E2E checks green for Images (50/50) and Split (57/57).
+
+### F-20 — Split pages had no preview; overlay would have inherited the F-19 bug class
+
+- **Status.** Resolved (opener wired + portaled overlay). **Area.** Split pick mode (`app/src/studio/tools/SplitTool.tsx`). **Severity.** Medium (users picked pages blind; the overlay also sat in-tree under glass ancestors).
+- **Symptoms.** `setPreview` existed but no UI ever opened it — `ThumbTile` only toggled keep/remove. The overlay itself used the same in-tree `fixed inset-0` pattern that F-19 proved capturable.
+- **Root cause.** Dead opener (single code path set preview, and it was the closer) plus the F-19-prone structure: verified uncaptured in Split's current tree by live probe and ancestor walk, but one refactor away from breaking.
+- **Fix.** Thumbnail click previews (bottom label pill keeps the keep/remove toggle — Rearrange separation parity); overlay portaled via `createPortal(..., document.body)` with `z-[100]` + `dvh` caps as defense-in-depth.
+- **Verification.** +4 E2E (open, decode `naturalWidth > 0`, viewport-anchored backdrop == viewport, close); suite **57/57 + 4 SKIP**.
+
+### K1 — Page geometry accumulated chained /Rotate instead of inheriting
+
+- **Status.** Resolved. **Area.** Engine (`engine/src/processing/pdf/core/document.rs`).
+- **Symptoms.** A page with its own /Rotate 180 under a Pages node with /Rotate 90 read back as 270° — geometry disagreed with the effective rotation whenever two holders existed in one chain.
+- **Fix.** Nearest holder on the page → ancestors chain wins (PDF spec inheritance); rotate materializes the resolved value on the page so re-reads are stable.
+- **Verification.** Fix + regression tests recorded in wave1 (`ad592f9`: `nearest_rotate_holder_wins_over_ancestors`, `geometry_matches_effective_after_ancestor_inherited_rotate`); canonical re-verification pending (STATUS gate 2).
+
+### K2 — Extract had no pre-final cancellation checkpoint
+
+- **Status.** Resolved. **Area.** Engine (`engine/src/processing/pdf/extract/mod.rs`).
+- **Symptoms.** Cancelling after the last per-page copy but before completion could still report 100% — the terminal band had no observable checkpoint.
+- **Fix.** `ctx.check_cancellation()` before the final progress report; a late cancel now fails honestly with `CANCELLED` and no output escapes.
+- **Verification.** Fix + regression test recorded in wave1 (`ad592f9`: `cancellation_before_final_reports_no_completion`); canonical re-verification pending (STATUS gate 2).
+
+### K7b — Low-DPI large-pixel images produced viewer-unopenable pages
+
+- **Status.** Resolved. **Area.** Engine (`engine/src/processing/pdf/images_to_pdf/mod.rs`).
+- **Symptoms.** A 30000 px image at ~1 DPI sized its FitImage page to ~2.16 M pt — viewers cap sheets at 14400 pt, so the output could not be opened. Non-square EXIF pixels also read X-only DPI.
+- **Fix.** `natural_size_pt` scales uniformly down to `MAX_PAGE_DIMENSION_PT` (14400 pt, aspect preserved); non-square pixels use `min(X, Y)` DPI so the image is never rendered smaller than intended.
+- **Verification.** Fix + regression tests recorded in wave1 (`ad592f9`: `huge_low_dpi_image_clamps_to_viewer_sane_page`, `ordinary_sizes_pass_through_unclamped`); canonical re-verification pending (STATUS gate 2).
+
+### K8 — Sharded Images duration summed concurrent shards
+
+- **Status.** Resolved. **Area.** App (`app/src/studio/tools/imageSharding.ts`).
+- **Symptoms.** The completion line added every shard's engine duration, overstating wall time for work that ran concurrently.
+- **Fix.** Reported duration is now max-shard + sequential merge wall; per-shard perfMarks merge namespaced (`shard:<i>:<name>`) so concurrent spans stay distinguishable.
+- **Verification.** Fix + updated sharding unit tests recorded in wave1 (`ad592f9`); canonical re-verification pending (STATUS gate 2).
+
+### K9 — Split-part names with colons were truncated
+
+- **Status.** Resolved. **Area.** App (`app/src/utils/parse.ts`).
+- **Symptoms.** `parseSplitParts` split each line on every colon, so `"1,2:cover:extra"` lost everything after the second colon.
+- **Fix.** Split on the first colon only; the remainder is the name verbatim.
+- **Verification.** Fix + regression test recorded in wave1 (`ad592f9`, `parse.test.ts`); canonical re-verification pending (STATUS gate 2).
+
+### K10 — PDF pre-gate rejected BOM/whitespace-prefixed headers
+
+- **Status.** Resolved. **Area.** App (`app/src/studio/services/folio.ts` `isPdfBytes`).
+- **Symptoms.** The gate required an exact offset-0 8-byte header, rejecting otherwise-valid documents with a UTF-8 BOM or leading whitespace — and tiny-but-well-formed 5-byte headers.
+- **Fix.** Permissive pre-gate: `%PDF` anywhere in the first 16 bytes passes (5-byte minimum); the engine/render load that follows still owns the real verdict.
+- **Verification.** Fix + unit tests recorded in wave1 (`ad592f9`, `folio.test.ts`); canonical re-verification pending (STATUS gate 2).
+
+### K13 — Downloads/shares used raw caller-provided filenames
+
+- **Status.** Resolved. **Area.** App (`app/src/studio/services/folio.ts`) + WASM glue (`wasm/src/lib.rs`).
+- **Symptoms.** `studioDownload`/`studioShare` passed caller names (user-typed, overlong) straight to the anchor/File; the glue `sanitize_name` never truncated and trimmed whitespace only.
+- **Fix.** Last-mile `sanitizeFileName` in both service functions; glue parity (dot/space trim, 40-char char-boundary cap, `document` fallback).
+- **Verification.** Fix + regression tests recorded in wave1/wave2 (`ad592f9`, `b0b58df`: 4 glue sanitize tests); canonical re-verification pending (STATUS gate 2).
+
+### Init-fatal — engine worker boot failure hung on the ready timeout
+
+- **Status.** Resolved. **Area.** App (`app/src/engine/engine.worker.ts`, adapter).
+- **Symptoms.** A failed WASM init posted nothing, so every execute hung until the adapter's ready-timeout with no cause.
+- **Fix.** Boot failure posts an explicit `fatal` (mirroring the scan worker) carrying the init error; the adapter fails in-flight jobs fast, and the fail-fast message includes the cause.
+- **Verification.** Fix + adapter tests recorded in wave2 (`b0b58df`, `WasmWorkerEngineAdapter.test.ts`); canonical re-verification pending (STATUS gate 2).

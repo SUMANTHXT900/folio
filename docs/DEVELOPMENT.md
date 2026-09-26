@@ -53,7 +53,7 @@ No backend, no proxy, no localhost bridge. The dev server serves the app; the en
 
 ```bash
 # 1. Rust engine — inside engine/
-cargo test                 # 345 tests: units + integration (one file per op + lifecycle)
+cargo test                 # 357 tests: units + integration (one file per op + lifecycle)
 cargo fmt --check          # must be clean
 cargo clippy --all-targets # must be clean (warnings fail the bar)
 
@@ -69,7 +69,7 @@ npm run build:wasm         # wasm-pack build --target web --out-dir pkg (takes ~
 npm run typecheck          # tsc --noEmit (requires wasm/pkg/ present)
 npm run lint               # eslint src
 npm run format:check       # prettier --check .
-npm test                   # vitest run — 118 tests
+npm test                   # vitest run — 289 tests
 
 # 4. Production build — inside app/
 npm run build              # tsc + vite build + PWA service worker (precaches WASM)

@@ -29,7 +29,7 @@ Only approaches verified in code, documentation, or git history are recorded. Sp
 - **What happened.** It served its purpose through engine development, then accumulated problems (unbounded `pastExecutions` history — see `docs/BUGS.md` F-4) and risked shipping dev code in the production bundle.
 - **Problems discovered.** Dev-only UI bloat, unbounded state retention, production-bundle contamination risk.
 - **Why abandoned.** Manual panels were superseded by automated tests + production E2E; the app was removed from the product (kept locally during transition, then deleted from the repo).
-- **What replaced it.** Rust unit/integration tests, frontend unit tests, and the production E2E suite (25/25, real Chrome, real engine).
+- **What replaced it.** Rust unit/integration tests, frontend unit tests, and the production E2E suite (57/57 + 4 SKIP per the `docs/STATUS.md` baseline, real Chrome, real engine).
 - **Current status.** No `testbench/` directory, route, HTML, or bundle strings (verified by tree + bundle scans). Legitimate automated tests preserved.
 
 ## T-4 — Separate `folio-engine` development directory
@@ -38,7 +38,7 @@ Only approaches verified in code, documentation, or git history are recorded. Sp
 - **Why we tried it.** Iteration speed while the engine API was still churning.
 - **What happened.** The engine matured there (lessons 0–14), but two directories meant two sources of truth and a fragile transplant workflow.
 - **Why abandoned.** The project requires a single repository that builds from a fresh clone with the engine source inside it.
-- **What replaced it.** Unified repository: `src/`, `wasm/`, `tests/`, `examples/` committed alongside `frontend/` (v1.7.0, commit `d76a22e`).
+- **What replaced it.** Unified repository (v1.7.0, commit `d76a22e`; Phase 2 canonical layout: `engine/` + `wasm/` + `app/`): engine source, bridge, tests, examples, and frontend build from a fresh clone.
 - **Current status.** No second repository required; fresh-clone verification is the standing proof.
 
 ## T-5 — Production-only WASM integration (commit `866761f`)
