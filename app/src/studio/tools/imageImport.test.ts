@@ -3,8 +3,12 @@
  * processing, cancellation, error isolation, and original retention.
  * The renderer is injected — no DOM/canvas/WASM needed here.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
+  __setEncodeWorkerFactoryForTests,
+  browserImportRenderer,
+  EncodeWorkerUnavailableError,
+  encodeBitmapToJpeg,
   MAX_IMPORT_LONG_EDGE,
   prepareImportFile,
   planNormalization,
@@ -216,5 +220,165 @@ describe('runImportQueue', () => {
     // a and b prepared; c never started.
     expect(started).toEqual(['a.jpg', 'b.jpg']);
     expect(outcomes).toHaveLength(2);
+  });
+});
+
+describe('encode worker offload (P2 item 11)', () => {
+  function fakeBitmap() {
+    return {
+      width: 40,
+      height: 30,
+      close: vi.fn(),
+    } as unknown as ImageBitmap;
+  }
+
+  /** Main-thread canvas stand-in (jsdom has no 2D context). */
+  function stubMainThreadCanvas(returnBytes: number[]) {
+    const ctx = { fillStyle: '', fillRect: vi.fn(), drawImage: vi.fn() };
+    class FakeOffscreenCanvas {
+      width: number;
+      height: number;
+      constructor(width: number, height: number) {
+        this.width = width;
+        this.height = height;
+      }
+      getContext() {
+        return ctx;
+      }
+      async convertToBlob() {
+        return new Blob([new Uint8Array(returnBytes)], { type: 'image/jpeg' });
+      }
+    }
+    Object.defineProperty(globalThis, 'OffscreenCanvas', {
+      value: FakeOffscreenCanvas,
+      configurable: true,
+      writable: true,
+    });
+    return ctx;
+  }
+
+  /** FakeWorker-pattern double speaking the encode protocol. */
+  function fakeEncodeWorker(offscreen: boolean, replyBytes: number[]) {
+    return class {
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      posted: unknown[] = [];
+      transfers: Transferable[][] = [];
+      terminated = false;
+      constructor() {
+        queueMicrotask(() => {
+          this.onmessage?.({ data: { kind: 'ready', offscreen } } as unknown as MessageEvent);
+        });
+      }
+      postMessage(message: unknown, transfer?: Transferable[]) {
+        this.posted.push(message);
+        this.transfers.push(transfer ?? []);
+        const msg = message as { kind?: string; id?: number };
+        if (msg.kind === 'encode' && typeof msg.id === 'number') {
+          const id = msg.id;
+          const buffer = new Uint8Array(replyBytes).buffer;
+          queueMicrotask(() => {
+            this.onmessage?.({
+              data: { kind: 'result', id, ok: true, buffer },
+            } as unknown as MessageEvent);
+          });
+        }
+      }
+      terminate() {
+        this.terminated = true;
+      }
+    };
+  }
+
+  afterEach(() => {
+    __setEncodeWorkerFactoryForTests(null);
+    // @ts-expect-error test-only cleanup of stubbed globals
+    delete globalThis.Worker;
+    // @ts-expect-error test-only cleanup of stubbed globals
+    delete globalThis.OffscreenCanvas;
+  });
+
+  it('signals unavailable (not failure) when there is no Worker', async () => {
+    // jsdom default: Worker undefined — the bitmap is NOT consumed.
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 40, height: 30 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+  });
+
+  it('encodes through the worker with the bitmap transferred', async () => {
+    const FakeWorker = fakeEncodeWorker(true, [7, 7, 7]);
+    const instances: Array<InstanceType<typeof FakeWorker>> = [];
+    __setEncodeWorkerFactoryForTests(() => {
+      const worker = new FakeWorker();
+      instances.push(worker);
+      return worker as unknown as Worker;
+    });
+    const bitmap = fakeBitmap();
+    const bytes = await encodeBitmapToJpeg(bitmap, { width: 40, height: 30 }, 0.92);
+    expect(bytes).toEqual(new Uint8Array([7, 7, 7]));
+    expect(instances).toHaveLength(1);
+    const posted = instances[0]?.posted[0] as {
+      kind: string;
+      width: number;
+      height: number;
+      quality: number;
+      flipHorizontal: boolean;
+    };
+    expect(posted.kind).toBe('encode');
+    expect(posted.width).toBe(40);
+    expect(posted.height).toBe(30);
+    expect(posted.quality).toBe(0.92);
+    expect(posted.flipHorizontal).toBe(false);
+    // Transferable bitmap: zero-copy handoff where possible.
+    expect(instances[0]?.transfers[0]).toContain(bitmap);
+  });
+
+  it('falls back to the main-thread path when construction throws', async () => {
+    const workerCtor = vi.fn(() => {
+      throw new Error('workers blocked');
+    });
+    Object.defineProperty(globalThis, 'Worker', {
+      value: workerCtor,
+      configurable: true,
+      writable: true,
+    });
+    const ctx = stubMainThreadCanvas([9, 9]);
+    const bitmap = fakeBitmap();
+    // The worker path is attempted exactly once, then the CURRENT
+    // main-thread path runs: same white-fill, same draw, same bytes.
+    const bytes = await browserImportRenderer.resizeToJpeg(
+      { width: 40, height: 30, bitmap },
+      { width: 40, height: 30 },
+      0.92,
+    );
+    expect(workerCtor).toHaveBeenCalledTimes(1);
+    expect(bytes).toEqual(new Uint8Array([9, 9]));
+    expect(ctx.fillStyle).toBe('#ffffff');
+    expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 40, 30);
+    expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+    // resizeToJpeg never closes: the prepareImportFile `finally` owns it.
+    expect(bitmap.close).not.toHaveBeenCalled();
+  });
+
+  it('falls back when the worker reports no OffscreenCanvas support', async () => {
+    const FakeWorker = fakeEncodeWorker(false, [7, 7, 7]);
+    const instances: Array<InstanceType<typeof FakeWorker>> = [];
+    __setEncodeWorkerFactoryForTests(() => {
+      const worker = new FakeWorker();
+      instances.push(worker);
+      return worker as unknown as Worker;
+    });
+    const ctx = stubMainThreadCanvas([5, 6, 7]);
+    const bitmap = fakeBitmap();
+    const bytes = await browserImportRenderer.resizeToJpeg(
+      { width: 40, height: 30, bitmap },
+      { width: 20, height: 15 },
+      0.92,
+    );
+    // Probed, found incapable, never sent work — main thread encoded.
+    expect(instances).toHaveLength(1);
+    expect(instances[0]?.posted).toHaveLength(0);
+    expect(bytes).toEqual(new Uint8Array([5, 6, 7]));
+    expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 20, 15);
   });
 });

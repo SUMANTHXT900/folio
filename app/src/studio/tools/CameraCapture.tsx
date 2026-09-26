@@ -33,7 +33,12 @@ import {
   type CameraCapabilities,
 } from './cameraCapabilities';
 import { buildVideoConstraints } from './cameraConstraints';
-import { prepareImportFile } from './imageImport';
+import {
+  encodeBitmapToJpeg,
+  EncodeWorkerUnavailableError,
+  IMPORT_JPEG_QUALITY,
+  prepareImportFile,
+} from './imageImport';
 import { useContainBox } from './scanViewport';
 import { useScanProcessor } from './scan/useScanProcessor';
 
@@ -73,6 +78,40 @@ function failureMessage(error: unknown): string {
 function stopStream(stream: MediaStream | null) {
   if (stream) {
     for (const track of stream.getTracks()) track.stop();
+  }
+}
+
+/**
+ * Shutter encode offload (P2 item 11, finding 12): snapshots the live
+ * frame and encodes it in the encode worker. Returns null when the
+ * worker path is unavailable (or the frame cannot be snapshotted) so
+ * the caller falls back to its main-thread canvas path; throws only
+ * when the worker consumed the bitmap but failed — the same
+ * user-visible outcome as the old `toBlob → null` failure.
+ */
+async function encodeShutterViaWorker(
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+  flipHorizontal: boolean,
+): Promise<Uint8Array | null> {
+  let bitmap: ImageBitmap | null = null;
+  try {
+    if (typeof createImageBitmap !== 'function') return null;
+    bitmap = await createImageBitmap(video);
+  } catch {
+    return null;
+  }
+  try {
+    return await encodeBitmapToJpeg(bitmap, { width, height }, IMPORT_JPEG_QUALITY, flipHorizontal);
+  } catch (error) {
+    try {
+      bitmap.close();
+    } catch {
+      // Release best-effort (neutered after a transfer).
+    }
+    if (error instanceof EncodeWorkerUnavailableError) return null;
+    throw error;
   }
 }
 
@@ -456,32 +495,47 @@ export function CameraCapture({
    * Shutter: captures the full-res frame, then either hands it straight
    * to the collection (Original mode — v1.9 path, no worker) or sends it
    * to the scan worker for processing + review.
+   *
+   * The JPEG encode runs in `imageEncode.worker.ts` (P2 item 11) when
+   * available: the frame is snapshotted via `createImageBitmap` (the
+   * video keeps playing underneath) and the bitmap is transferred. Any
+   * worker failure falls back to the original main-thread canvas path
+   * below — the live video element still holds the frame, so the retry
+   * re-reads it with identical pixels, quality (q0.92), and mirroring.
    */
   const captureFrame = async (): Promise<File | null> => {
     const video = videoRef.current;
     if (!video || video.videoWidth === 0 || capturing) return null;
     setCapturing(true);
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (ctx === null) throw new Error('2D canvas unavailable for capture.');
+      const width = video.videoWidth;
+      const height = video.videoHeight;
       // Front camera: un-mirror so text reads correctly.
-      if (facing === 'user') {
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
+      const flipHorizontal = facing === 'user';
+      const workerBytes = await encodeShutterViaWorker(video, width, height, flipHorizontal);
+      let bytes: Uint8Array | null = workerBytes;
+      if (bytes === null) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx === null) throw new Error('2D canvas unavailable for capture.');
+        if (flipHorizontal) {
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+        }
+        ctx.drawImage(video, 0, 0);
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, 'image/jpeg', IMPORT_JPEG_QUALITY),
+        );
+        canvas.width = 0;
+        canvas.height = 0;
+        if (blob === null) throw new Error('Capture encode failed.');
+        bytes = new Uint8Array(await blob.arrayBuffer());
       }
-      ctx.drawImage(video, 0, 0);
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, 'image/jpeg', 0.92),
-      );
-      canvas.width = 0;
-      canvas.height = 0;
-      if (blob === null) throw new Error('Capture encode failed.');
       counterRef.current += 1;
       const name = `scan-${String(counterRef.current).padStart(3, '0')}.jpg`;
-      return new File([blob], name, { type: 'image/jpeg' });
+      return new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' });
     } catch (error) {
       setFailure(error instanceof Error ? error.message : 'Capture failed.');
       return null;

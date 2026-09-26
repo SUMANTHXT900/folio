@@ -50,6 +50,24 @@ export interface StudioResult {
   summary: ResultSummary;
   outputs: StudioOutput[];
   durationMs: number;
+  /**
+   * App-side attribution spans (intake → staging → transfer → wait →
+   * outputs; PERFORMANCE.md P4 item 16). DEV-only: present when
+   * `import.meta.env.DEV`, absent in production builds. The engine's
+   * `durationMs` remains the authoritative operation duration (D4).
+   */
+  perfMarks?: StudioPerfMark[];
+}
+
+/**
+ * One app-side attribution span (wall time around a folio service stage).
+ * Dev-only diagnostic data; never part of the engine wire contract.
+ */
+export interface StudioPerfMark {
+  /** Span name, e.g. `studio:run:wait`. */
+  name: string;
+  /** Wall duration in milliseconds (`performance.now()` delta). */
+  durationMs: number;
 }
 
 /** Real engine progress for UI display (fraction 0..1 when known). */
@@ -244,6 +262,7 @@ export async function closeStudioDoc(id: string): Promise<void> {
   const renderId = renderDocIds.get(id);
   renderDocIds.delete(id);
   if (renderId !== undefined) {
+    purgePreviewsForRender(renderId);
     await renders.closeDocument(renderId).catch(() => undefined);
   }
   binaries.delete(id);
@@ -251,6 +270,94 @@ export async function closeStudioDoc(id: string): Promise<void> {
 
 export interface StudioRunOptions {
   onProgress?: (progress: StudioProgress) => void;
+}
+
+/* ---------- app-side attribution (PERFORMANCE.md P4 item 16) ---------- */
+
+// Sequence for unique performance mark names across concurrent jobs.
+let perfSeq = 0;
+
+function perfNow(): number {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+  } catch {
+    // Ignore — fall through to Date.now().
+  }
+  return Date.now();
+}
+
+function safeMark(name: string): void {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+      performance.mark(name);
+    }
+  } catch {
+    // Attribution must never fail the pipeline (jsdom, older browsers).
+  }
+}
+
+function safeMeasure(name: string, start: string, end: string): void {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.measure === 'function') {
+      performance.measure(name, start, end);
+    }
+  } catch {
+    // Ignore — the wall duration is still recorded via perfNow().
+  }
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.clearMarks === 'function') {
+      performance.clearMarks(start);
+      performance.clearMarks(end);
+    }
+  } catch {
+    // Ignore.
+  }
+}
+
+/**
+ * Begins an attribution span: marks the start and returns an `end` closure
+ * that marks the end, records a `performance.measure`, and returns the wall
+ * duration in milliseconds. The engine remains the authoritative duration
+ * (D4); these spans only attribute app-side overhead for P4 budgets.
+ */
+function beginPerfSpan(name: string): () => number {
+  const startedAt = perfNow();
+  perfSeq += 1;
+  const startMark = `folio:${name}#${perfSeq}:start`;
+  const endMark = `folio:${name}#${perfSeq}:end`;
+  safeMark(startMark);
+  return () => {
+    const durationMs = perfNow() - startedAt;
+    safeMark(endMark);
+    safeMeasure(`folio:${name}`, startMark, endMark);
+    return durationMs;
+  };
+}
+
+/** Times a synchronous stage and appends its span to `marks`. */
+function spanSync<T>(marks: StudioPerfMark[], name: string, fn: () => T): T {
+  const end = beginPerfSpan(name);
+  try {
+    return fn();
+  } finally {
+    marks.push({ name, durationMs: end() });
+  }
+}
+
+/** Times an async stage and appends its span to `marks`. */
+async function spanAsync<T>(
+  marks: StudioPerfMark[],
+  name: string,
+  promise: Promise<T>,
+): Promise<T> {
+  const end = beginPerfSpan(name);
+  try {
+    return await promise;
+  } finally {
+    marks.push({ name, durationMs: end() });
+  }
 }
 
 /**
@@ -269,18 +376,29 @@ export function runStudioOperation(
   let cancelAdapter: (() => Promise<void>) | null = null;
   const done = (async (): Promise<StudioResult> => {
     const { adapter } = await engines();
-    const inputs = docIds.map((id) => {
-      const entry = binaries.get(id);
-      if (entry === undefined) {
-        throw toStudioError(
-          { code: 'INVALID_INPUT', message: 'document is no longer open' },
-          operation,
-        );
-      }
-      return { name: entry.name, bytes: entry.bytes, transfer: stagedIds.has(id) };
-    });
-    const request = { operation, inputs, options } as EngineRequest;
-    const { jobId, done: adapterDone } = adapter.execute(request);
+    // P4-16 attribution: wall spans per app-side stage. Behavior-preserving —
+    // the spans only observe; the engine duration stays authoritative (D4).
+    const perfMarks: StudioPerfMark[] = [];
+    const inputs = spanSync(perfMarks, 'studio:run:intake', () =>
+      docIds.map((id) => {
+        const entry = binaries.get(id);
+        if (entry === undefined) {
+          throw toStudioError(
+            { code: 'INVALID_INPUT', message: 'document is no longer open' },
+            operation,
+          );
+        }
+        return { name: entry.name, bytes: entry.bytes, transfer: stagedIds.has(id) };
+      }),
+    );
+    const request = spanSync(
+      perfMarks,
+      'studio:run:staging',
+      () => ({ operation, inputs, options }) as EngineRequest,
+    );
+    const { jobId, done: adapterDone } = spanSync(perfMarks, 'studio:run:transfer', () =>
+      adapter.execute(request),
+    );
     cancelAdapter = () => adapter.cancel(jobId);
     if (cancelled) {
       await adapter.cancel(jobId);
@@ -296,7 +414,7 @@ export function runStudioOperation(
       }
     });
     try {
-      const finished = await adapterDone;
+      const finished = await spanAsync(perfMarks, 'studio:run:wait', adapterDone);
       if (finished.status === 'cancelled') {
         throw toStudioError({ code: 'CANCELLED', message: finished.error?.message }, operation);
       }
@@ -309,22 +427,30 @@ export function runStudioOperation(
       }
       // Move outputs into studio ownership: resolve bytes by reference,
       // then release the adapter store entries (no copies, no retention).
-      const outputs: StudioOutput[] = (finished.result.outputs ?? []).map((ref) => {
-        const bytes = getBytes(ref.outputId);
-        releaseBytes(ref.outputId);
-        if (bytes === undefined) {
-          throw toStudioError(
-            { code: 'INTERNAL', message: 'engine output went missing' },
-            operation,
-          );
-        }
-        return { name: ref.name, bytes, byteLength: ref.byteLength, pageCount: ref.pageCount };
-      });
-      return {
-        summary: finished.result.summary,
+      // (Narrowed here: the closure below would lose `finished` narrowing.)
+      const engineResult = finished.result;
+      const outputs: StudioOutput[] = spanSync(perfMarks, 'studio:run:outputs', () =>
+        (engineResult.outputs ?? []).map((ref) => {
+          const bytes = getBytes(ref.outputId);
+          releaseBytes(ref.outputId);
+          if (bytes === undefined) {
+            throw toStudioError(
+              { code: 'INTERNAL', message: 'engine output went missing' },
+              operation,
+            );
+          }
+          return { name: ref.name, bytes, byteLength: ref.byteLength, pageCount: ref.pageCount };
+        }),
+      );
+      const result: StudioResult = {
+        summary: engineResult.summary,
         outputs,
         durationMs: finished.engineDurationMs ?? 0,
       };
+      if (import.meta.env.DEV) {
+        result.perfMarks = perfMarks;
+      }
+      return result;
     } finally {
       unsubscribe();
     }
@@ -413,6 +539,63 @@ function canvasToUrl(canvas: HTMLCanvasElement): Promise<string> {
 }
 
 /**
+ * Bounded encode concurrency for thumbnail windows (P2 finding 13).
+ * Matches the render-side concurrency so encodes never outrun renders.
+ */
+const THUMB_ENCODE_CONCURRENCY = 2;
+
+/**
+ * Encodes thumbnail canvases with bounded concurrency while preserving
+ * input-order output (`urls[i]` belongs to `items[i]`).
+ *
+ * The render side already runs at concurrency 2; previously the encodes ran
+ * sequentially in a `for`-`await` loop on the main thread. Each canvas bitmap
+ * is released after its own encode settles (success or failure), mirroring
+ * the sequential loop's release discipline. The MIME fallback chain
+ * (webp→jpeg→png) lives in the `encodeOne` step, so it is unchanged. If any
+ * encode fails, every started encode still settles (no bitmap is leaked) and
+ * the first error is rethrown after all lanes drain.
+ *
+ * Exported for unit tests; production callers pass `canvasToUrl`.
+ */
+export async function encodeThumbCanvases(
+  items: ReadonlyArray<{ canvas: HTMLCanvasElement; pageNumber: number }>,
+  concurrency: number,
+  encodeOne: (canvas: HTMLCanvasElement) => Promise<string> = canvasToUrl,
+): Promise<string[]> {
+  const urls = new Array<string>(items.length);
+  let next = 0;
+  let firstError: unknown;
+  let failed = false;
+  async function lane(): Promise<void> {
+    // Single-threaded cooperative scheduling: the check-and-claim below
+    // runs without an intervening await, so no two lanes claim one slot.
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      const item = items[index];
+      try {
+        urls[index] = await encodeOne(item.canvas);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      } finally {
+        item.canvas.width = 0;
+        item.canvas.height = 0;
+      }
+    }
+  }
+  const lanes = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: lanes }, () => lane()));
+  if (failed) {
+    throw firstError;
+  }
+  return urls;
+}
+
+/**
  * Renders one thumbnail as an object URL (bounded LRU per document).
  * Target box suits the Studio tile grid (~240 CSS px, retina-sharp).
  * Follows Lesson 14: callers request windows, never whole huge docs.
@@ -495,13 +678,33 @@ export function studioThumbWindow(
     cancelJob = (): void => job.cancel();
     trackThumbJob(docId, cancelJob);
     try {
-      const results = await job.promise;
-      for (const result of results) {
-        const url = await canvasToUrl(result.canvas);
-        result.canvas.width = 0;
-        result.canvas.height = 0;
-        cache.set(result.pageNumber, url);
-        out.set(result.pageNumber, url);
+      const endRender = beginPerfSpan('studio:thumb-window:render');
+      let results: Awaited<typeof job.promise>;
+      try {
+        results = await job.promise;
+      } finally {
+        endRender();
+      }
+      // P2 finding 13: bounded-concurrency encodes (render is already
+      // concurrency-2; the old sequential for-await loop is gone). Order is
+      // restored through the input page list below, not completion order.
+      const endEncode = beginPerfSpan('studio:thumb-window:encode');
+      let urls: string[];
+      try {
+        urls = await encodeThumbCanvases(results, THUMB_ENCODE_CONCURRENCY);
+      } finally {
+        endEncode();
+      }
+      const byPage = new Map<number, string>();
+      for (let index = 0; index < results.length; index += 1) {
+        byPage.set(results[index].pageNumber, urls[index]);
+      }
+      for (const page of missing) {
+        const url = byPage.get(page);
+        if (url !== undefined) {
+          cache.set(page, url);
+          out.set(page, url);
+        }
       }
       return out;
     } finally {
@@ -519,6 +722,85 @@ export function studioThumbWindow(
   };
 }
 
+/* ---------- full-resolution preview cache (bounded LRU, P2 finding 17) ---------- */
+
+// Small second layer behind the tools' per-mount maps (those stay the fast
+// path and are untouched): repeat previews of the same (document, page) skip
+// the scale-2 render + encode. Render ids are `renderdoc-N` (no colons), so
+// `renderId:page` keys are unambiguous.
+//
+// Ownership: the caller still owns revocation of the returned URL (contract
+// unchanged). The service additionally revokes a cached entry when it is
+// evicted and when its document closes, so the cache itself never leaks.
+// Tools never re-request within a mount (per-mount map) and a document close
+// purges its entries, so a revoked URL is never re-served through the
+// tool paths.
+const previewUrls = new Map<string, string>();
+const previewOrder: string[] = [];
+const MAX_PREVIEW_URLS = 8;
+
+function previewCacheKey(renderId: string, pageNumber: number): string {
+  return `${renderId}:${pageNumber}`;
+}
+
+function revokePreviewUrl(url: string): void {
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    // Best effort.
+  }
+}
+
+function previewCacheTouch(key: string, url: string): void {
+  previewUrls.set(key, url);
+  const index = previewOrder.indexOf(key);
+  if (index >= 0) {
+    previewOrder.splice(index, 1);
+  }
+  previewOrder.push(key);
+  while (previewOrder.length > MAX_PREVIEW_URLS) {
+    const oldest = previewOrder.shift();
+    if (oldest !== undefined && oldest !== key) {
+      const evicted = previewUrls.get(oldest);
+      previewUrls.delete(oldest);
+      if (evicted !== undefined) {
+        revokePreviewUrl(evicted);
+      }
+    }
+  }
+}
+
+function previewCacheHit(key: string): string | undefined {
+  const hit = previewUrls.get(key);
+  if (hit === undefined) {
+    return undefined;
+  }
+  const index = previewOrder.indexOf(key);
+  if (index >= 0) {
+    previewOrder.splice(index, 1);
+    previewOrder.push(key);
+  }
+  return hit;
+}
+
+/** Revokes and drops every cached preview rendered from `renderId`. */
+function purgePreviewsForRender(renderId: string): void {
+  const prefix = `${renderId}:`;
+  for (const key of [...previewUrls.keys()]) {
+    if (key.startsWith(prefix)) {
+      const url = previewUrls.get(key);
+      previewUrls.delete(key);
+      const index = previewOrder.indexOf(key);
+      if (index >= 0) {
+        previewOrder.splice(index, 1);
+      }
+      if (url !== undefined) {
+        revokePreviewUrl(url);
+      }
+    }
+  }
+}
+
 /** Full-resolution preview as an object URL (caller owns revocation). */
 export async function studioPreview(docId: string, pageNumber: number): Promise<string> {
   const { renders } = await engines();
@@ -529,14 +811,28 @@ export async function studioPreview(docId: string, pageNumber: number): Promise<
       'pdf.inspect',
     );
   }
+  const key = previewCacheKey(renderId, pageNumber);
+  const cached = previewCacheHit(key);
+  if (cached !== undefined) {
+    return cached;
+  }
   const canvas = document.createElement('canvas');
   const job = renders.renderPage(renderId, pageNumber, canvas, { scale: 2 });
   const cancel = (): void => job.cancel();
   trackThumbJob(docId, cancel);
+  const endRender = beginPerfSpan('studio:preview:render');
   try {
     await job.promise;
-    return await canvasToUrl(canvas);
   } finally {
+    endRender();
+  }
+  const endEncode = beginPerfSpan('studio:preview:encode');
+  try {
+    const url = await canvasToUrl(canvas);
+    previewCacheTouch(key, url);
+    return url;
+  } finally {
+    endEncode();
     untrackThumbJob(docId, cancel);
     canvas.width = 0;
     canvas.height = 0;
@@ -632,6 +928,11 @@ export async function __resetStudioForTests(): Promise<void> {
   for (const docId of [...thumbUrls.keys()]) {
     revokeDocUrls(docId);
   }
+  for (const url of previewUrls.values()) {
+    revokePreviewUrl(url);
+  }
+  previewUrls.clear();
+  previewOrder.length = 0;
   if (renders !== null) {
     for (const renderId of renderDocIds.values()) {
       await renders.closeDocument(renderId).catch(() => undefined);

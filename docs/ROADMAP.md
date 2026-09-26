@@ -20,7 +20,7 @@ This roadmap records actual project direction. Items are separated by commitment
 
 ## Next
 
-- **Performance program (`docs/PERFORMANCE.md`).** P0 (copy elimination, progress coalescing, scan detect-only, single-decode imports) and P1 (page-map cache, in-place rotate, single-pass split/delete/reorder/inspect, one-`getPage` thumbnails) **done 2026-09-26**. Remaining: P0.2 main-thread slice removal (design-gated on measurements), P2 main-thread offload (capture/thumbnail encode, preview cache), P3 worker-level parallelism for Images, P4 measurement harness. Threaded WASM explicitly gated behind a future decision.
+- **Performance program (`docs/PERFORMANCE.md`).** P0 (copy elimination, progress coalescing, scan detect-only, single-decode imports), P1 (page-map cache, in-place rotate, single-pass split/delete/reorder/inspect, one-`getPage` thumbnails), P2 (encode worker offload, bounded-2 thumbnail encode, preview LRU), and P4 (engine bench CLI, dev-only perf attribution) **done 2026-09-26**. Remaining: P0.2 main-thread slice removal (design-gated on measurements — P4 harness now available), P3 worker-level parallelism for Images (gated on P4 data — now available). Threaded WASM explicitly gated behind a future decision.
 - Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
 
 ## Future / not committed

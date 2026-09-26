@@ -299,3 +299,11 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Unit 240; E2E **49/49 + 4 SKIP** twice; typecheck/lint/format/build clean. No version bump.
 
 - **Deploy.** Preview hardening deployed to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-26 — Performance pass P2+P4 (delegated, integrated centrally)
+
+- **Objective.** PERFORMANCE.md P4 measurement harness + P2 main-thread offload, via 3 disjoint subagents.
+- **Work.** (A) `engine/examples/bench_operations.rs`: merge/split/rotate/inspect/images over synthetic {1,10,50p} + optional read-only `--dir` corpus, `--repeat`/`--json`; examples-only, no core changes. (B) `folio.ts`: dev-only `perfMarks` (intake→staging→transfer→wait→outputs + render/encode spans; production shape unchanged), bounded-2 thumbnail encode (order-preserving, same MIME chain), preview LRU cap 8 with eviction/close revocation. (C) `imageEncode.worker.ts` (new): OffscreenCanvas encode worker serving import normalization + shutter capture with verbatim main-thread fallback; finding-15 assessed (zero-caller pair kept; scan `apply_mode` is live tested core, not dead).
+- **Verification.** Engine 357 (239+118), fmt/clippy clean; typecheck/lint/format clean; unit 247 (+7); production build clean; E2E **49/49 + 4 SKIP**. Bench smoke: 15/15 reports, 0 failures (debug timings indicative only).
+- **Docs.** PERFORMANCE.md (findings 12/13/17 ✅, 15 assessed; P2/P4 sections + pass record), STATUS.md baselines (unit 247), ROADMAP.md (P0.2/P3 now unblocked by P4 data), DECISIONS.md D20.
+- **Deploy.** PENDING (commit + push + Cloudflare `dev` after this entry).
