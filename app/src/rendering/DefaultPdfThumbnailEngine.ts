@@ -43,6 +43,27 @@ function createCanvas(): HTMLCanvasElement {
   return document.createElement('canvas');
 }
 
+/**
+ * Drops a canvas bitmap deterministically. Fail/cancel paths only — success
+ * bitmaps stay caller-owned (folio.ts releases after encode). Never throws,
+ * so teardown cannot mask the real failure.
+ */
+function releaseCanvas(canvas: HTMLCanvasElement | undefined): void {
+  if (canvas === undefined) {
+    return;
+  }
+  try {
+    canvas.width = 0;
+  } catch {
+    // Canvas teardown never masks the real failure.
+  }
+  try {
+    canvas.height = 0;
+  } catch {
+    // Canvas teardown never masks the real failure.
+  }
+}
+
 export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
   private readonly renders: PdfRenderEngine;
 
@@ -69,6 +90,9 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           });
         }
       };
+      // Created below; released here on every fail/cancel path. Success
+      // transfers ownership to the caller (released downstream after encode).
+      let canvas: HTMLCanvasElement | undefined;
       try {
         const size = normalizeThumbnailSize(options?.size);
         const rotation = options?.rotation;
@@ -86,10 +110,11 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
         // One render serves both needs: `renderPage` fits the page to the
         // target box from its own single getPage and returns the scale-1
         // source geometry in the same result.
-        const canvas = createCanvas();
+        const ownCanvas = createCanvas();
+        canvas = ownCanvas;
         let rendered;
         try {
-          const task = this.renders.renderPage(documentId, pageNumber, canvas, {
+          const task = this.renders.renderPage(documentId, pageNumber, ownCanvas, {
             targetBox: { width: size.width, height: size.height },
             rotation,
           });
@@ -121,7 +146,7 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
         return {
           documentId,
           pageNumber,
-          canvas,
+          canvas: ownCanvas,
           width: rendered.page.width,
           height: rendered.page.height,
           sourcePageWidth: rendered.page.sourceWidth,
@@ -135,6 +160,10 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           },
         };
       } catch (error) {
+        // Fail/cancel path only: the canvas never reaches the caller, so
+        // drop its bitmap before the rejection propagates. Success returns
+        // above with the live canvas (caller-owned, released downstream).
+        releaseCanvas(canvas);
         if (cancelled) {
           throw toThumbnailError(error, { documentId, pageNumber }, true);
         }
@@ -162,6 +191,22 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
     let settled = false;
     const activeCancellers = new Set<() => void>();
     let rejectInner: ((error: unknown) => void) | undefined;
+    // Points at the in-progress batch buffer once created below. Lets every
+    // cancel/fail path drop completed bitmaps deterministically; cleared
+    // (without touching bitmaps) when ownership transfers on success.
+    let buffered: (ThumbnailResult | undefined)[] | undefined;
+    const releaseBuffered = (): void => {
+      const pending = buffered;
+      buffered = undefined;
+      if (pending === undefined) {
+        return;
+      }
+      for (const item of pending) {
+        if (item !== undefined) {
+          releaseCanvas(item.canvas);
+        }
+      }
+    };
 
     const settleCancel = (reject: (error: unknown) => void): void => {
       if (settled) {
@@ -176,6 +221,10 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           // Cancellation races a finished task; the error below decides.
         }
       });
+      // Cancel path: completed thumbnails never reach the caller, so their
+      // bitmaps are dropped here. In-flight canvases release in their own
+      // renderOne catch as their cancellations land.
+      releaseBuffered();
       reject(
         new ThumbnailError('THUMBNAIL_CANCELLED', 'thumbnail generation was cancelled', {
           documentId,
@@ -216,6 +265,7 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
 
       const total = pages.length;
       const results: (ThumbnailResult | undefined)[] = new Array(total).fill(undefined);
+      buffered = results;
       let completed = 0;
       let nextIndex = 0;
       let active = 0;
@@ -249,7 +299,9 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           }
           settled = true;
           // Ownership transfers to the caller; engine keeps no references
-          // (locals drop here; no instance fields hold bitmaps).
+          // (locals drop here; no instance fields hold bitmaps). Bitmaps
+          // stay live — the caller releases after encode (folio.ts).
+          buffered = undefined;
           resolve(results as ThumbnailResult[]);
         };
 
@@ -266,6 +318,10 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
               // Ignored.
             }
           });
+          // Atomic-failure path: completed thumbnails never reach the
+          // caller, so their bitmaps are dropped here. The failing page's
+          // own canvas releases in its renderOne catch below.
+          releaseBuffered();
           reject(toThumbnailError(error, { documentId, pageNumber }));
         };
 
@@ -275,6 +331,9 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
           const slotStartedAt = new Date().toISOString();
           const slotStartMark = performance.now();
           let cancelRender: (() => void) | undefined;
+          // Created below; released in the catch when this slot never
+          // reaches the caller. Success stores it in `results` (live).
+          let canvas: HTMLCanvasElement | undefined;
           try {
             if (cancelled) {
               throw new ThumbnailError(
@@ -286,16 +345,27 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
                 },
               );
             }
-            const canvas = createCanvas();
+            const slotCanvas = createCanvas();
+            canvas = slotCanvas;
             try {
               // Same single-getPage contract as generateThumbnail.
-              const task = this.renders.renderPage(documentId, pageNumber, canvas, {
+              const task = this.renders.renderPage(documentId, pageNumber, slotCanvas, {
                 targetBox: { width: size.width, height: size.height },
                 rotation,
               });
               cancelRender = () => task.cancel();
               activeCancellers.add(cancelRender);
               const rendered = await task.promise;
+              if (cancelled || settled) {
+                // Superseded: the batch already failed or was cancelled
+                // while this render was in flight (single-getPage stays
+                // unabortable; we skip at this layer for free). The slot
+                // never reaches the caller — drop its bitmap here.
+                releaseCanvas(slotCanvas);
+                canvas = undefined;
+                cancelBatch();
+                return;
+              }
               let geometry;
               try {
                 geometry = calculateThumbnailGeometry(
@@ -315,7 +385,7 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
               const result: ThumbnailResult = {
                 documentId,
                 pageNumber,
-                canvas,
+                canvas: slotCanvas,
                 width: rendered.page.width,
                 height: rendered.page.height,
                 sourcePageWidth: rendered.page.sourceWidth,
@@ -342,6 +412,11 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
               }
             }
           } catch (error) {
+            // Fail/cancel path: this slot's canvas never reaches the caller
+            // (success stores it in `results` above and skips this catch),
+            // so drop its bitmap now. Completed siblings release via
+            // failAtomic/settleCancel's buffered release.
+            releaseCanvas(canvas);
             if (
               cancelled ||
               (error instanceof ThumbnailError && error.code === 'THUMBNAIL_CANCELLED')

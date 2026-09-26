@@ -280,6 +280,10 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
         cancelRenderTask?.();
       };
       record.pendingRenders.add(canceller);
+      // Set once the canvas owns a bitmap below; the outer catch releases
+      // it on every failure/cancel path. Success bitmaps stay caller-owned
+      // (folio.ts releases after encode) — never cleared here.
+      let bitmapLive = false;
       try {
         // PDF.js pages are 1-based, matching Folio's convention — no index translation.
         const pdfPage = await record.proxy.getPage(pageNumber);
@@ -327,6 +331,7 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           }
           canvas.width = width;
           canvas.height = height;
+          bitmapLive = true;
           // v6 render API takes the canvas element (recommended) rather
           // than a bare 2d context.
           const task = pdfPage.render({ canvas, viewport });
@@ -366,6 +371,20 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           pdfPage.cleanup();
         }
       } catch (error) {
+        if (bitmapLive) {
+          // Fail/cancel path only: drop the partial bitmap before the
+          // caller sees the rejection. Success callers keep the canvas.
+          try {
+            canvas.width = 0;
+          } catch {
+            // Canvas teardown never masks the real render failure.
+          }
+          try {
+            canvas.height = 0;
+          } catch {
+            // Canvas teardown never masks the real render failure.
+          }
+        }
         if (cancelled || record.closed) {
           throw new RenderError('RENDER_CANCELLED', 'page render was cancelled', context);
         }

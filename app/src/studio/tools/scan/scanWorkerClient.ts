@@ -123,8 +123,19 @@ export class ScanWorkerClient {
   private jobCounter = 0;
   private epoch = 0;
   private pending = new Map<string, Pending>();
+  /**
+   * Silently-dropped worker messages (malformed framing, legacy `status`,
+   * unknown/settled results, stale epochs). Diagnostic only — no UI reads
+   * this; unit tests assert it so nothing vanishes uncounted.
+   */
+  private droppedCount = 0;
 
   constructor(private readonly createWorker: ScanWorkerFactory = defaultCreateWorker) {}
+
+  /** Diagnostic count of silently-dropped worker messages (no UI). */
+  get droppedMessages(): number {
+    return this.droppedCount;
+  }
 
   /** Terminates the worker: pending jobs reject as cancelled, the epoch
    * advances so late results are discarded, and the next job recreates. */
@@ -152,9 +163,28 @@ export class ScanWorkerClient {
   }
 
   /**
+   * Explicit disposal. Identical to `terminate()`: cancel-by-terminate is
+   * the audit-accepted mechanism (a synchronous WASM call cannot observe
+   * cooperative cancellation mid-flight), so disposal terminates the
+   * worker, rejects pending jobs as cancelled, and advances the epoch so
+   * late results are discarded. The client stays reusable — the next
+   * `process()` transparently recreates the worker.
+   */
+  dispose(): void {
+    this.terminate();
+  }
+
+  /**
    * Runs one scan job. The input buffer is TRANSFERRED (neutered).
    * `detectOnly` selects the live-guidance fast path (no warp/encode,
    * no output bytes; resolves with status `detected`).
+   *
+   * Concurrency note (single-flight lives with the caller): the worker
+   * executes one synchronous WASM call at a time and serves jobs in
+   * arrival order; this client does NOT serialize — concurrent `process()`
+   * calls each get a job id and resolve independently. Callers needing
+   * latest-frame-only semantics (live guidance) must gate themselves
+   * (cf. `useScanProcessor`'s live-pending flag).
    */
   process(input: Uint8Array, mode: ScanModeName, detectOnly = false): Promise<ScanResult> {
     const jobId = `scan-${(this.jobCounter += 1)}`;
@@ -182,9 +212,10 @@ export class ScanWorkerClient {
           return;
         }
         // Transfer: ownership moves to the worker; the caller must never
-        // touch `input` (or its buffer) after this line. Views over a
-        // larger buffer are copied to their exact range first so only
-        // the job's own bytes ever cross.
+        // touch `input` (or its buffer) after this line. Exact-range guard
+        // (mirrors `WasmWorkerEngineAdapter`): views over a larger buffer
+        // are copied to their exact range first so only the job's own
+        // bytes ever cross.
         const exact = input.byteOffset === 0 && input.byteLength === input.buffer.byteLength;
         const buffer = (
           exact
@@ -237,7 +268,10 @@ export class ScanWorkerClient {
 
   private route(data: unknown): void {
     const msg = parseScanMessage(data);
-    if (msg === null) return; // Malformed framing: ignore, never throw.
+    if (msg === null) {
+      this.droppedCount += 1; // Malformed framing: ignore, never throw.
+      return;
+    }
     switch (msg.kind) {
       case 'ready':
         this.ready = true;
@@ -245,7 +279,10 @@ export class ScanWorkerClient {
         this.flushReady();
         break;
       case 'status':
-        break; // Coarse phase only; surfaced via future UI if needed.
+        // No UI consumer (the worker no longer sends these): ignored and
+        // counted. Branch retained for forward compatibility.
+        this.droppedCount += 1;
+        break;
       case 'result':
         this.finish(msg);
         break;
@@ -262,9 +299,13 @@ export class ScanWorkerClient {
 
   private finish(msg: Extract<ScanWorkerToMain, { kind: 'result' }>): void {
     const job = this.pending.get(msg.jobId);
-    if (job === undefined || job.settled) return;
+    if (job === undefined || job.settled) {
+      this.droppedCount += 1; // Unknown or already-settled job: discard.
+      return;
+    }
     // Stale epoch (terminated/restarted since): discard, never mutate.
     if (job.epoch !== this.epoch) {
+      this.droppedCount += 1;
       job.settled = true;
       this.pending.delete(msg.jobId);
       job.reject(

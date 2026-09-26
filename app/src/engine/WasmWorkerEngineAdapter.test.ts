@@ -480,4 +480,148 @@ describe('WasmWorkerEngineAdapter', () => {
     });
     expect(recent.length).toBeGreaterThan(0);
   });
+
+  it('fails fast on boot-time init-fatal instead of hanging on ready', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    // No ready arrives: the worker reports init failure with no job
+    // context (empty clientJobId, mirroring scan.worker's fatal-null).
+    worker.deliver({
+      protocol: 1,
+      kind: 'fatal',
+      clientJobId: '',
+      message: 'WASM engine init failed: boom',
+    });
+    // Resolves on the microtask queue — never the 60s ready timeout
+    // (vitest's own 5s default would fail a hang long before that).
+    const finished = await done;
+    expect(finished.status).toBe('failed');
+    expect(finished.error?.code).toBe('INTERNAL');
+    expect(finished.error?.message).toContain('boom');
+    expect(worker.terminated).toBe(true);
+    // The poisoned worker is dropped: the next execute boots fresh.
+    const second = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: second.jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const retried = await second.done;
+    expect(retried.status).toBe('completed');
+    expect(jobId).not.toBe(second.jobId);
+  });
+
+  it('fails fast when the worker errors during init', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { done } = adapter.execute(inspectRequest());
+    worker.onerror?.({} as Event);
+    const finished = await done;
+    expect(finished.status).toBe('failed');
+    expect(finished.error?.code).toBe('IO_ERROR');
+  });
+
+  function phasedProgress(clientJobId: string, phase: string, percentage: number): WorkerToMain {
+    return {
+      protocol: 1,
+      kind: 'event',
+      clientJobId,
+      event: {
+        timestamp_ms: 1001,
+        kind: 'progress',
+        phase,
+        completed: 1,
+        total: 10,
+        percentage,
+        message: `${phase} ${percentage}`,
+        engine_job_id: 'job-7',
+      },
+    };
+  }
+
+  function phasedLog(clientJobId: string, phase: string, message: string): WorkerToMain {
+    return {
+      protocol: 1,
+      kind: 'event',
+      clientJobId,
+      event: {
+        timestamp_ms: 1002,
+        kind: 'log',
+        level: 'info',
+        phase,
+        message,
+        engine_job_id: 'job-7',
+      },
+    };
+  }
+
+  it('condenses retained trails to first/last-per-phase plus terminal', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    for (const percentage of [0.1, 0.15, 0.2, 0.25, 0.3]) {
+      worker.deliver(phasedProgress(jobId, 'copying', percentage));
+    }
+    worker.deliver(phasedLog(jobId, 'copying', 'first note'));
+    worker.deliver(phasedLog(jobId, 'copying', 'last note'));
+    for (const percentage of [0.4, 0.5]) {
+      worker.deliver(phasedProgress(jobId, 'finalizing', percentage));
+    }
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const finished = await done;
+    // Live trail: started + 5 + 2 + 2 + completed = 11. Replay shape:
+    // lifecycle markers (2) + first/last per phase group (2 + 2 + 2) = 8.
+    expect(finished.events).toHaveLength(8);
+    const percentages = finished.events
+      .map((event) => event.percentage)
+      .filter((value) => value !== undefined);
+    expect(percentages).toEqual([0.1, 0.3, 0.4, 0.5]);
+    expect(finished.events[0].message).toBe('job started');
+    expect(finished.events[finished.events.length - 1].message).toBe('job completed');
+    // Late subscribers replay exactly the condensed trail.
+    const replayed: string[] = [];
+    adapter.subscribe(jobId, (event) => {
+      replayed.push(
+        `${event.kind}:${event.phase ?? ''}:${event.percentage ?? event.message ?? ''}`,
+      );
+    });
+    expect(replayed).toHaveLength(finished.events.length);
+    expect(replayed[0]).toBe('lifecycle::job started');
+  });
+
+  it('retains the full trail behind the debug flag', async () => {
+    WasmWorkerEngineAdapter.retainFullEventTrail = true;
+    try {
+      const { adapter, worker } = makeAdapter();
+      const { done } = adapter.execute(inspectRequest());
+      const jobId = 'wasm-1';
+      worker.deliver({ protocol: 1, kind: 'ready' });
+      await Promise.resolve();
+      for (const percentage of [0.1, 0.15, 0.2, 0.25, 0.3]) {
+        worker.deliver(phasedProgress(jobId, 'copying', percentage));
+      }
+      worker.deliver({
+        protocol: 1,
+        kind: 'result',
+        clientJobId: jobId,
+        resultJson: completedEnvelope(),
+        outputs: [],
+      });
+      const finished = await done;
+      // started + 5 progress + completed: nothing condensed away.
+      expect(finished.events).toHaveLength(7);
+    } finally {
+      WasmWorkerEngineAdapter.retainFullEventTrail = false;
+    }
+  });
 });

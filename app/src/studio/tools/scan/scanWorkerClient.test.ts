@@ -245,3 +245,124 @@ describe('ScanWorkerClient', () => {
     expect(result.status).toBe('processed');
   });
 });
+
+describe('ScanWorkerClient hardening (IPC)', () => {
+  it('ignores legacy status messages without hanging and counts them as dropped', async () => {
+    const worker = new FakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    expect(client.droppedMessages).toBe(0);
+    const done = client.process(new Uint8Array([1, 2, 3]), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastProcess();
+    // The worker no longer sends `status` (no UI consumer); a legacy one
+    // must neither resolve the job nor hang it — just count it.
+    worker.deliver({ protocol: 2, kind: 'status', jobId: req.jobId, phase: 'processing' });
+    expect(client.droppedMessages).toBe(1);
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: processedJson(),
+      output: new Uint8Array([1]).buffer,
+    });
+    const result = await done;
+    expect(result.status).toBe('processed');
+    expect(client.droppedMessages).toBe(1);
+  });
+
+  it('counts malformed and unknown-job messages as dropped', async () => {
+    const worker = new FakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.process(new Uint8Array([1]), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    worker.deliver(null as unknown as ScanWorkerToMain);
+    worker.deliver({ protocol: 999, kind: 'ready' } as unknown as ScanWorkerToMain);
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: 'scan-999',
+      resultJson: processedJson(),
+    });
+    expect(client.droppedMessages).toBe(3);
+    const req = worker.lastProcess();
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: processedJson(),
+      output: new Uint8Array([1]).buffer,
+    });
+    const result = await done;
+    expect(result.status).toBe('processed');
+    expect(client.droppedMessages).toBe(3);
+  });
+
+  it('counts stale late results as dropped', async () => {
+    const worker = new FakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const first = client.process(new Uint8Array([1]), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastProcess();
+    client.terminate();
+    await expect(first).rejects.toMatchObject({ code: 'SCAN_CANCELLED' });
+    const before = client.droppedMessages;
+    // Late result for the dead epoch: discarded, never applied, counted.
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: processedJson(),
+    });
+    expect(client.droppedMessages).toBe(before + 1);
+  });
+
+  it('dispose() terminates, rejects pending as cancelled, and restarts transparently', async () => {
+    let worker = new FakeWorker();
+    const factories: FakeWorker[] = [worker];
+    const client = new ScanWorkerClient(() => {
+      const current = factories[factories.length - 1];
+      return current as unknown as Worker;
+    });
+    const first = client.process(new Uint8Array([1]), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    expect(worker.terminated).toBe(false);
+    client.dispose();
+    expect(worker.terminated).toBe(true);
+    await expect(first).rejects.toMatchObject({ code: 'SCAN_CANCELLED' });
+    worker = new FakeWorker();
+    factories.push(worker);
+    const second = client.process(new Uint8Array([2]), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req2 = worker.lastProcess();
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req2.jobId,
+      resultJson: processedJson(),
+      output: new Uint8Array([7]).buffer,
+    });
+    const result = await second;
+    expect(result.status).toBe('processed');
+  });
+
+  it('copies non-exact views so only the job bytes cross', async () => {
+    const worker = new FakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    // A subarray aliases a larger buffer: the client must send the exact
+    // range (mirrors the adapter's exact-range guard).
+    const done = client.process(new Uint8Array([0, 1, 2, 3, 4]).subarray(1, 4), 'original');
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastProcess();
+    expect(req.buffer.byteLength).toBe(3);
+    expect(new Uint8Array(req.buffer)).toEqual(new Uint8Array([1, 2, 3]));
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: processedJson(),
+      output: new Uint8Array([1]).buffer,
+    });
+    const result = await done;
+    expect(result.status).toBe('processed');
+  });
+});

@@ -76,8 +76,19 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
 
   private worker: Worker | null = null;
   private ready: Promise<void> | null = null;
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyReject: ((error: Error) => void) | null = null;
   private jobCounter = 0;
   private readonly jobs = new Map<string, WorkerJobRecord>();
+
+  /**
+   * Debug escape hatch: when true, settled records (and their executions)
+   * retain the FULL live event trail instead of the condensed replay
+   * shape. Defaults to false — full trails of large jobs are thousands of
+   * structured events per retained record. Unit tests only; the UI never
+   * sets this.
+   */
+  static retainFullEventTrail = false;
 
   /** Injected for unit tests (fake worker); defaults to the real one. */
   constructor(private readonly createWorker: () => Worker = defaultCreateWorker) {}
@@ -152,7 +163,10 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     const worker = this.createWorker();
     this.worker = worker;
     this.ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      this.readyReject = reject;
+      this.readyTimer = setTimeout(() => {
+        this.readyTimer = null;
+        this.readyReject = null;
         reject(
           new Error(
             `WASM worker did not signal ready within ${READY_TIMEOUT_MS / 1000}s (WASM init failed?)`,
@@ -162,9 +176,11 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
       const onReady = (event: MessageEvent<WorkerToMain>): void => {
         const msg = event.data;
         if (msg !== null && typeof msg === 'object' && msg.kind === 'ready') {
-          clearTimeout(timer);
+          this.clearReadyTimer();
           resolve();
         }
+        // Boot-time init-fatals arrive via the permanent router below
+        // (orphan-fatal path), not this waiter: they carry no job context.
       };
       // The permanent router is installed below; this one-shot only waits.
       worker.addEventListener('message', onReady as EventListener, { once: true });
@@ -174,7 +190,25 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     return this.ready;
   }
 
-  private destroyWorker(): void {
+  /** Clears a pending ready timer without settling the waiter. */
+  private clearReadyTimer(): void {
+    if (this.readyTimer !== null) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
+    this.readyReject = null;
+  }
+
+  private destroyWorker(reason?: string): void {
+    // The worker is gone: a pending readiness waiter must never hang
+    // until the 60s timeout — reject it now so in-flight pipelines fail
+    // fast (their catch is settled-guarded, so double-seals are safe).
+    if (this.readyTimer !== null) {
+      clearTimeout(this.readyTimer);
+      this.readyTimer = null;
+    }
+    const reject = this.readyReject;
+    this.readyReject = null;
     try {
       this.worker?.terminate();
     } catch {
@@ -182,13 +216,31 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     }
     this.worker = null;
     this.ready = null;
+    reject?.(new Error(reason ?? 'WASM worker was destroyed before signaling ready'));
   }
 
   private handleWorkerCrash(message: string): void {
-    this.destroyWorker();
+    this.destroyWorker(message);
     for (const [jobId, record] of this.jobs) {
       if (!record.settled) {
         this.sealFailed(record, jobId, 'IO_ERROR', message);
+      }
+    }
+  }
+
+  /**
+   * Worker-level fatal with no live job context: the boot-time init-fatal
+   * (empty clientJobId — the worker has no job to blame yet) or a fatal
+   * for an already-settled/unknown job. The worker instance is poisoned,
+   * so it is destroyed (which also rejects the pending ready waiter — no
+   * 60s hang) and every unsettled job fails fast with INTERNAL. Pipelines
+   * still awaiting readiness hit the settled guard in their catch.
+   */
+  private handleOrphanFatal(message: string): void {
+    this.destroyWorker(message);
+    for (const [jobId, record] of this.jobs) {
+      if (!record.settled) {
+        this.sealFailed(record, jobId, 'INTERNAL', message);
       }
     }
   }
@@ -211,6 +263,13 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
         throw new Error('WASM worker unavailable after initialization');
       }
       const inputs = request.inputs.map((input) => {
+        // Exactness assert before transfer: a transfer moves the WHOLE
+        // underlying buffer, so only a view that IS its whole buffer may
+        // move. Staged inputs (`transfer: true`) over an exact range move
+        // with zero copy; everything else (unstaged, or a view over a
+        // larger buffer) takes the `.slice()` copy path — `slice()` copies
+        // exactly the viewed range, so the posted buffer is always exact
+        // and the source is never neutered.
         if (
           input.transfer === true &&
           input.bytes.byteOffset === 0 &&
@@ -294,6 +353,9 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     }
     const record = this.jobs.get(msg.clientJobId);
     if (record === undefined || record.settled) {
+      if (msg.kind === 'fatal') {
+        this.handleOrphanFatal(msg.message);
+      }
       return;
     }
     switch (msg.kind) {
@@ -511,6 +573,16 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
       return;
     }
     record.settled = true;
+    // Condense the retained trail to its replay shape: live listeners
+    // already saw full fidelity; what stays in memory (25-job window) and
+    // what late subscribers replay is first/last-per-phase + terminal.
+    // The execution snapshot shares the condensed array (same content the
+    // seal sites just snapshotted).
+    const replay = WasmWorkerEngineAdapter.retainFullEventTrail
+      ? [...record.events]
+      : condenseReplayTrail(record.events);
+    record.events = replay;
+    execution.events = replay;
     record.resolve(execution);
     this.pruneSettledJobs();
   }
@@ -538,6 +610,38 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
       }
     }
   }
+}
+
+/**
+ * Condenses a full live event trail to its replay shape: every lifecycle
+ * marker is kept (few per job, including the terminal one), plus the
+ * first and last event of each progress/log phase group. Order is
+ * preserved; the first and terminal events are always included.
+ */
+function condenseReplayTrail(events: EngineEvent[]): EngineEvent[] {
+  if (events.length <= 2) {
+    return [...events];
+  }
+  const firstIndexPerGroup = new Map<string, number>();
+  const lastIndexPerGroup = new Map<string, number>();
+  events.forEach((event, index) => {
+    if (event.kind === 'lifecycle') {
+      return;
+    }
+    const key = `${event.kind}:${event.phase ?? ''}`;
+    if (!firstIndexPerGroup.has(key)) {
+      firstIndexPerGroup.set(key, index);
+    }
+    lastIndexPerGroup.set(key, index);
+  });
+  const keep = new Set<number>([0, events.length - 1]);
+  for (const index of firstIndexPerGroup.values()) {
+    keep.add(index);
+  }
+  for (const index of lastIndexPerGroup.values()) {
+    keep.add(index);
+  }
+  return events.filter((_, index) => keep.has(index));
 }
 
 function lastProgress(record: WorkerJobRecord): number {

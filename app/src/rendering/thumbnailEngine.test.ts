@@ -44,6 +44,7 @@ class FakeRenderEngine implements PdfRenderEngine {
     targetBox?: { width: number; height: number };
   }> = [];
   readonly dimsCalls: Array<{ pageNumber: number; rotation?: number }> = [];
+  readonly seenCanvases: HTMLCanvasElement[] = [];
   activeRenders = 0;
   maxActiveRenders = 0;
   private readonly delayMs: number;
@@ -147,6 +148,9 @@ class FakeRenderEngine implements PdfRenderEngine {
     let cancelDelay: (() => void) | undefined;
     const delay = this.delayByPage[pageNumber] ?? this.delayMs;
     const promise = (async () => {
+      // Track every canvas handed to the renderer so fail-path release
+      // tests can prove no bitmap is retained after a rejection.
+      this.seenCanvases.push(canvas);
       if (documentId !== this.id || this.closed) {
         throw new RenderError('RENDER_CLOSED', `document is not open: ${documentId}`, {
           documentId,
@@ -351,6 +355,27 @@ describe('generateThumbnail (single)', () => {
     job.cancel();
     await expect(job.promise).rejects.toMatchObject({ code: 'THUMBNAIL_CANCELLED' });
   });
+
+  it('releases the canvas bitmap when the render fails', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 3, failPages: [2] });
+    const failure = await thumbs.generateThumbnail(fake.id, 2).promise.catch((error) => error);
+    expect(isThumbnailError(failure)).toBe(true);
+    expect((failure as ThumbnailError).code).toBe('THUMBNAIL_RENDER_FAILED');
+    // Fail path only: the canvas never reaches the caller, so its bitmap
+    // is dropped before the rejection. Success canvases stay live.
+    expect(fake.seenCanvases).toHaveLength(1);
+    expect(fake.seenCanvases[0]?.width).toBe(0);
+    expect(fake.seenCanvases[0]?.height).toBe(0);
+  });
+
+  it('releases the canvas bitmap on cancellation', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 2, renderDelayMs: 50 });
+    const job = thumbs.generateThumbnail(fake.id, 1);
+    job.cancel();
+    await expect(job.promise).rejects.toMatchObject({ code: 'THUMBNAIL_CANCELLED' });
+    expect(fake.seenCanvases).toHaveLength(1);
+    expect(fake.seenCanvases[0]?.width).toBe(0);
+  });
 });
 
 describe('generateThumbnails (batch)', () => {
@@ -414,6 +439,21 @@ describe('generateThumbnails (batch)', () => {
     expect(isThumbnailError(failure)).toBe(true);
     expect((failure as ThumbnailError).code).toBe('THUMBNAIL_RENDER_FAILED');
     expect((failure as ThumbnailError).pageNumber).toBe(3);
+  });
+
+  it('releases every started canvas when a batch fails atomically', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 5, failPages: [3] });
+    const failure = await thumbs
+      .generateThumbnails(fake.id, [1, 2, 3, 4])
+      .promise.catch((error) => error);
+    expect(isThumbnailError(failure)).toBe(true);
+    // Completed siblings never reach the caller on atomic failure, and the
+    // failing slot never reaches it either: all started bitmaps are dropped.
+    // Page 4 is never scheduled (queued pages never start after failure).
+    expect(fake.seenCanvases.length).toBeGreaterThan(0);
+    for (const canvas of fake.seenCanvases) {
+      expect(canvas.width).toBe(0);
+    }
   });
 
   it('validates every page upfront without starting renders', async () => {

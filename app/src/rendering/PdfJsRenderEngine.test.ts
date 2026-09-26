@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   specs: new Map<number, { width: number; height: number; rotate: number }>(),
   getPageCalls: [] as number[],
   destroyed: 0,
+  failRender: false,
 }));
 
 vi.mock('./pdfjs', () => ({
@@ -37,7 +38,12 @@ vi.mock('./pdfjs', () => ({
                 height: (swapped ? spec.width : spec.height) * scale,
               };
             },
-            render: () => ({ promise: Promise.resolve(), cancel: () => undefined }),
+            render: () => {
+              if (state.failRender) {
+                return { promise: Promise.reject(new Error('boom')), cancel: () => undefined };
+              }
+              return { promise: Promise.resolve(), cancel: () => undefined };
+            },
             cleanup: () => undefined,
           };
         },
@@ -70,6 +76,7 @@ beforeEach(() => {
   state.specs.clear();
   state.getPageCalls.length = 0;
   state.destroyed = 0;
+  state.failRender = false;
 });
 
 describe('renderPage geometry', () => {
@@ -138,6 +145,20 @@ describe('renderPage geometry', () => {
     const job = engine.renderPage(id, 1, makeCanvas());
     job.cancel();
     await expect(job.promise).rejects.toMatchObject({ code: 'RENDER_CANCELLED' });
+  });
+
+  it('releases the canvas bitmap when the render fails', async () => {
+    state.failRender = true;
+    const engine = new PdfJsRenderEngine();
+    const id = await loadDocument(engine);
+    const canvas = makeCanvas();
+    await expect(engine.renderPage(id, 1, canvas).promise).rejects.toMatchObject({
+      code: 'RENDER_PAGE_FAILED',
+    });
+    // Fail path only: the partial bitmap is dropped before the rejection.
+    // Success paths keep the live canvas (released downstream after encode).
+    expect(canvas.width).toBe(0);
+    expect(canvas.height).toBe(0);
   });
 });
 

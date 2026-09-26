@@ -38,6 +38,7 @@ import {
 declare const self: DedicatedWorkerGlobalScope;
 
 let engine: WasmEngine | null = null;
+let initError: string | null = null;
 
 function post(response: WorkerToMain, transfer?: Transferable[]): void {
   // Array form (not the options bag): supported by every worker runtime,
@@ -67,7 +68,11 @@ self.onmessage = (ev: MessageEvent<WorkerExecuteRequest>): void => {
     if (engine === null) {
       // Only reachable when boot-time init failed (see below): every
       // execute then fails fast with a clear message instead of hanging.
-      throw new Error('WASM engine not initialized (see worker console for the init error)');
+      throw new Error(
+        initError === null
+          ? 'WASM engine not initialized (see worker console for the init error)'
+          : `WASM engine not initialized (${initError})`,
+      );
     }
     const names = msg.inputs.map((input) => input.name);
     const blobs = msg.inputs.map((input) => new Uint8Array(input.buffer));
@@ -85,6 +90,14 @@ self.onmessage = (ev: MessageEvent<WorkerExecuteRequest>): void => {
       outputs: Uint8Array[];
     };
     const outputs = out.outputs.map((view) => {
+      // Exactness guard: a transfer moves the WHOLE underlying buffer, so
+      // a non-exact view (nonzero offset or a slice of a larger buffer)
+      // would leak neighboring bytes to the main thread. The glue builds
+      // exact fresh buffers (`Uint8Array::from`), so this copy never
+      // fires in practice — it is a no-behavior-change backstop.
+      if (view.byteOffset !== 0 || view.byteLength !== view.buffer.byteLength) {
+        return view.slice().buffer as ArrayBuffer;
+      }
       // `Uint8Array::from` in the glue allocates a FRESH JS buffer per
       // output (it copies out of WASM linear memory), so transferring
       // `.buffer` cannot neuter WASM memory. No extra copy here.
@@ -111,16 +124,23 @@ self.onmessage = (ev: MessageEvent<WorkerExecuteRequest>): void => {
 
 // Eager init at boot so the adapter's readiness handshake is meaningful:
 // by the time {kind:'ready'} arrives, the WASM module is instantiated and
-// the engine handle exists. A failed init posts nothing — the adapter's
-// ready-timeout surfaces it as an initialization failure instead.
+// the engine handle exists. A failed init posts an explicit init-fatal
+// (mirrors scan.worker): at boot there is no job context, so the adapter
+// routes the empty clientJobId as a worker-level failure and every
+// in-flight job resolves fast instead of hanging on the ready timeout.
 (async (): Promise<void> => {
   try {
     await init();
     engine = new WasmEngine();
     post({ protocol: WORKER_PROTOCOL_VERSION, kind: 'ready' });
   } catch (error) {
-    // Init failure is silent here by necessity (nothing to send it to
-    // reliably); the adapter times out waiting for 'ready' and reports it.
+    initError = error instanceof Error ? error.message : 'unknown init failure';
     console.error('folio engine worker init failed:', error);
+    post({
+      protocol: WORKER_PROTOCOL_VERSION,
+      kind: 'fatal',
+      clientJobId: '',
+      message: `WASM engine init failed: ${initError}`,
+    });
   }
 })();

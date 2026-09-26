@@ -18,6 +18,14 @@
  * sender side — the client must not touch them after posting). The glue
  * takes ownership of the bytes with a single JS→WASM copy; output bytes
  * come back as fresh buffers, transferred to main. No base64 anywhere.
+ * Only the job's own byte range ever crosses (exact-range guard, cf.
+ * `WasmWorkerEngineAdapter`); output views aliasing a larger buffer are
+ * copied to their exact range before transfer.
+ *
+ * The worker posts exactly one terminal message per job (`result` or
+ * `fatal`) — no `status` spam: with no UI consumer, coarse phases are
+ * pure noise. `status` stays in the protocol for forward compatibility;
+ * a future progress UI can re-enable it behind an explicit opt-in.
  *
  * Live guidance uses `detectOnly` process requests: detection only, no
  * warp/JPEG output bytes on the wire.
@@ -84,9 +92,9 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
     return;
   }
   const { jobId, buffer, mode, detectOnly } = msg;
-  // Honest coarse status: one indeterminate phase. The core exposes no
-  // stage spans in M2, so no percentages are synthesized (L-5).
-  post({ protocol: SCAN_PROTOCOL_VERSION, kind: 'status', jobId, phase: 'processing' });
+  // No `status` post: with no UI consumer every job emits exactly one
+  // terminal message (`result` or `fatal`). The client's `status` branch
+  // stays for forward compatibility only.
   try {
     const input = new Uint8Array(buffer);
     const envelope = scan_process(input, mode, detectOnly) as {
@@ -95,15 +103,22 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
     };
     if (envelope.output !== null) {
       const out = envelope.output;
+      // Exact-range guard (mirrors `WasmWorkerEngineAdapter`): transfer
+      // only the job's own bytes. The glue normally returns a fresh exact
+      // view, so this copies solely when a view aliases a larger buffer.
+      // Ownership of the transferred buffer moves to main — this worker
+      // must not touch it after posting.
+      const exact = out.byteOffset === 0 && out.byteLength === out.buffer.byteLength;
+      const owned = exact ? out : out.slice();
       post(
         {
           protocol: SCAN_PROTOCOL_VERSION,
           kind: 'result',
           jobId,
           resultJson: envelope.result_json,
-          output: out.buffer as ArrayBuffer,
+          output: owned.buffer as ArrayBuffer,
         },
-        [out.buffer as ArrayBuffer],
+        [owned.buffer as ArrayBuffer],
       );
     } else {
       post({
@@ -114,9 +129,14 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
       });
     }
   } catch (error) {
+    // Fatal path carries operation context (mode, fast-path flag, job)
+    // so main-thread diagnostics can attribute the failure for free.
+    const context = `mode=${mode} detectOnly=${String(detectOnly)} jobId=${jobId}`;
     fail(
       jobId,
-      error instanceof Error ? `scan process failed: ${error.message}` : 'scan process failed',
+      error instanceof Error
+        ? `scan process failed [${context}]: ${error.message}`
+        : `scan process failed [${context}]`,
     );
   }
 };

@@ -976,6 +976,13 @@ fn stem_of(name: &str) -> String {
         .to_string()
 }
 
+/// Maximum sanitized split-part name length, in characters (parity
+/// with the frontend's per-input segment cap: overlong part names
+/// truncate instead of producing filesystem-hostile filenames).
+/// Applied AFTER cleaning, on character (not byte) boundaries so
+/// truncation can never split UTF-8.
+const MAX_SANITIZED_NAME_CHARS: usize = 40;
+
 fn sanitize_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -987,11 +994,20 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
+    // Parity with the frontend `sanitizeFileName`: surrounding dots and
+    // whitespace go (leading dots hide files on Unix, trailing dots and
+    // spaces are illegal on Windows), then overlong names truncate with
+    // a trailing-dot/space re-trim so the cut never ends on one.
+    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let mut out = trimmed.to_string();
+    if out.chars().count() > MAX_SANITIZED_NAME_CHARS {
+        out = out.chars().take(MAX_SANITIZED_NAME_CHARS).collect();
+        out = out.trim_end_matches(['.', ' ']).to_string();
+    }
+    if out.is_empty() {
         "document".to_string()
     } else {
-        trimmed.to_string()
+        out
     }
 }
 
@@ -1146,5 +1162,50 @@ mod tests {
         // Non-decreasing overall; phase boundaries may legitimately repeat
         // a percentage (e.g. preparing 10% → copying 10%).
         assert!(forwarded.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    #[test]
+    fn sanitize_name_keeps_safe_characters_and_replaces_the_rest() {
+        assert_eq!(
+            sanitize_name("chapter 1 - intro_final.v2"),
+            "chapter 1 - intro_final.v2"
+        );
+        assert_eq!(sanitize_name("a/b\\c:d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_name_trims_surrounding_dots_and_spaces_like_frontend() {
+        // Frontend `sanitizeFileName` parity: leading dots hide files on
+        // Unix, trailing dots/spaces are illegal on Windows; inner dots
+        // are content and stay.
+        assert_eq!(sanitize_name("  ...lead...trail...   "), "lead...trail");
+        assert_eq!(sanitize_name("..."), "document");
+        assert_eq!(sanitize_name("   "), "document");
+        assert_eq!(sanitize_name(""), "document");
+    }
+
+    #[test]
+    fn sanitize_name_truncates_overlong_names_on_char_boundaries() {
+        let long = "x".repeat(200);
+        let out = sanitize_name(&long);
+        assert_eq!(out.chars().count(), MAX_SANITIZED_NAME_CHARS);
+        // Multi-byte truncation never splits UTF-8.
+        let wide = "é".repeat(100);
+        let cut = sanitize_name(&wide);
+        assert_eq!(cut.chars().count(), MAX_SANITIZED_NAME_CHARS);
+        assert!(cut.is_char_boundary(cut.len()));
+        // The cut never ends on a dot or space.
+        let dotted = format!("{}. . . {}", "y".repeat(60), "tail");
+        let trimmed = sanitize_name(&dotted);
+        assert!(!trimmed.ends_with(['.', ' ']));
+    }
+
+    #[test]
+    fn sanitize_name_short_names_pass_through_unchanged() {
+        assert_eq!(sanitize_name("part-1"), "part-1");
+        assert_eq!(
+            sanitize_name(&"z".repeat(MAX_SANITIZED_NAME_CHARS)),
+            "z".repeat(40)
+        );
     }
 }
