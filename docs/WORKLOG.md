@@ -309,3 +309,11 @@ Chronological record of meaningful development events. Each entry records object
 - **Deploy.** PENDING (commit + push + Cloudflare `dev` after this entry).
 
 - **Deploy.** P2+P4 shipped to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-26 — Preview modal viewport anchor (F-19, phone video report)
+
+- **Report.** User screen recording (29 s, Chrome Beta, 23-page list): tapping a row preview dimmed the whole tall page; "Page N"/Close stranded at the screen edge; image off-screen. Frames extracted via ffmpeg confirmed it.
+- **Root cause.** Tool card ancestor carries \`backdrop-filter\` (glass) — per spec the containing block for in-tree \`fixed\` descendants, so \`fixed inset-0\` spanned the tall card (measured 356x1840 on an 844px viewport). Proven by ancestor walk; \`position: fixed\` itself computed correctly.
+- **Fix.** Modal renders via \`createPortal(..., document.body)\`, z-index above sticky header (\`z-[100]\`), \`dvh\` viewport caps (92dvh dialog / 78dvh image). New E2E viewport-anchored assertion (backdrop == viewport, dialog inside).
+- **Verification.** Tall-list probe post-fix: backdrop exactly 390x844 at scroll 873, dialog inside, header covered, image visible; unit 247; E2E **50/50 + 4 SKIP**.
+- **Deploy.** PENDING (commit + push + Cloudflare \`dev\` after this entry).

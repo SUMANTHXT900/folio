@@ -20,6 +20,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Fix.** Update manager adapted from the SYNAPSE repo pattern (D16): silent launch check, global one-tap `UpdateBanner`, About "App updates" card (manual check + diagnostics log), localhost/LAN guard.
 - **Verification.** 14 manager unit tests (incl. snapshot-stability regression for `useSyncExternalStore`); canonical E2E 43/43 + 4 SKIP (new: About card checks and reports local status on dev, no stray banner).
 
+### F-19 — Preview modal not viewport-anchored on tall lists (phone video report)
+
+- **Status.** Resolved (portaled modal). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** High (on a 23-page phone list the preview image opened off-screen — the user's "light background, not the image").
+- **Symptoms.** Tapping a row preview on a tall list dimmed the whole page; "Page N" + "Close" sat at the screen's bottom edge and the image itself was invisible, centered somewhere in the middle of the tall overlay. Verified in the user's screen recording (frames showed the backdrop spanning all 23 rows) and reproduced locally (backdrop rect 356×1840 on an 844px viewport).
+- **Root cause.** The tool card above the modal carries `backdrop-filter` (glass style). Per spec, any non-`none` `backdrop-filter` (like `filter`) on an ancestor makes it the containing block for in-tree `position: fixed` descendants — so `fixed inset-0` resolved against the tall card, not the viewport. Proven by walking the dialog's ancestor chain (the card flagged `backdrop-filter`) while `position: fixed` itself computed correctly.
+- **Fix.** The modal renders via `createPortal(..., document.body)` (escapes every ancestor; immune to any future filter/transform above it), z-index raised above the sticky header (`z-[100]`), and viewport caps use `dvh` units (`92dvh` dialog, `78dvh` image) so the Android URL bar can't crop. New E2E assertion pins it: backdrop rect must equal the viewport and the dialog must sit inside it.
+- **Verification.** Tall-list (14 pages, phone viewport, scrolled to middle) probe: backdrop exactly 390×844 at scroll 873 (was 356×1840), dialog fully inside, header covered, image decodes and visible; E2E **50/50 + 4 SKIP** (new viewport-anchored check green).
+
 ### F-18 — Images previews could silently fail ("light background, not the image")
 
 - **Status.** Resolved (hardened; the report could not be reproduced in any automated probe — see verification). **Area.** Images page list (`app/src/studio/tools/PageGrid.tsx`). **Severity.** Medium (previews are how users verify their pages).

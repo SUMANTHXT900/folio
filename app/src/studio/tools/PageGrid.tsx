@@ -11,6 +11,7 @@
  * per-card move buttons stay the E2E-asserted guaranteed path.
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import { formatBytes } from '../components/ui';
 import type { ImagePage } from './imagePages';
@@ -322,30 +323,38 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
         ))}
       </Reorder.Group>
 
-      {viewing !== null && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setViewer(null)}
-        >
+      {viewing !== null &&
+        // Portaled to document.body: the tool card above us carries
+        // `backdrop-filter` (glass), which per spec becomes the containing
+        // block for in-tree `fixed` descendants — the backdrop then spans
+        // the tall card and the dialog centers off-screen (F-19). The
+        // portal escapes every ancestor, so `fixed inset-0` is always the
+        // real viewport. `dvh` caps keep the mobile URL bar from cropping.
+        createPortal(
           <div
-            className="max-w-3xl w-full max-h-[92vh] flex flex-col overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+            onClick={() => setViewer(null)}
           >
-            <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
-              <span className="font-display text-lg">Page {(viewer ?? 0) + 1}</span>
-              <button
-                onClick={() => setViewer(null)}
-                className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
-              >
-                Close
-              </button>
+            <div
+              className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
+            >
+              <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
+                <span className="font-display text-lg">Page {(viewer ?? 0) + 1}</span>
+                <button
+                  onClick={() => setViewer(null)}
+                  className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                >
+                  Close
+                </button>
+              </div>
+              <PreviewFull page={viewing} position={viewer ?? 0} />
             </div>
-            <PreviewFull page={viewing} position={viewer ?? 0} />
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -367,7 +376,7 @@ function PreviewFull({ page, position }: { page: ImagePage; position: number }) 
       alt={`Page ${position + 1} full preview: ${page.name}`}
       onError={onError}
       style={{ transform: `rotate(${page.rotationDeg}deg)` }}
-      className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[82vh]"
+      className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
     />
   );
 }

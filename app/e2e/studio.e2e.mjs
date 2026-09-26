@@ -578,6 +578,34 @@ async function main() {
       modalPreview !== null && modalPreview.naturalWidth > 0,
       JSON.stringify(modalPreview),
     );
+    // F-19 regression: the backdrop must cover the real viewport even on
+    // a tall list (a `backdrop-filter` ancestor used to capture the
+    // in-tree `fixed` modal, centering the dialog off-screen).
+    const modalGeometry = await page.evaluate(() => {
+      const dlg = document.querySelector('[role="dialog"]');
+      const backdrop = dlg?.parentElement ?? null;
+      const b = backdrop?.getBoundingClientRect();
+      const d = dlg?.getBoundingClientRect();
+      return {
+        viewport: { w: window.innerWidth, h: window.innerHeight },
+        backdrop: b
+          ? { y: Math.round(b.y), h: Math.round(b.height), w: Math.round(b.width) }
+          : null,
+        dialog: d ? { y: Math.round(d.y), h: Math.round(d.height) } : null,
+      };
+    });
+    check(
+      'images preview dialog is viewport-anchored (backdrop covers viewport, dialog inside it)',
+      modalGeometry.backdrop !== null &&
+        modalGeometry.dialog !== null &&
+        Math.abs(modalGeometry.backdrop.y) <= 1 &&
+        Math.abs(modalGeometry.backdrop.h - modalGeometry.viewport.h) <= 1 &&
+        Math.abs(modalGeometry.backdrop.w - modalGeometry.viewport.w) <= 1 &&
+        (modalGeometry.dialog?.y ?? -1) >= 0 &&
+        (modalGeometry.dialog?.y ?? 9999) + (modalGeometry.dialog?.h ?? 9999) <=
+          modalGeometry.viewport.h + 1,
+      JSON.stringify(modalGeometry),
+    );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Close')?.click();
     });
