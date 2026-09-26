@@ -29,7 +29,7 @@ The following appear in the product surface or history as aspirations. None are 
 
 - **Compress** — button reserved in the Studio UI; engine + UI implementation not started.
 - **Sign & annotate** — a former About version-tree "v1.2.0" entry (e-signatures, form-fill overlay, watermarks/page numbers), removed 2026-09-27 with the tree. About-page aspiration only.
-- **Batch & OCR** — a former About version-tree "v2.0.0" entry (batch queue, local OCR), removed 2026-09-27 with the tree. About-page aspiration only. Note: that "v2.0.0" label predated the scanner v2.0 release and collided with its numbering — resolved by the removal (`docs/STATUS.md` checklist gate 5 closed).
+- **Batch & OCR** — a former About version-tree "v2.0.0" entry (batch queue, local OCR), removed 2026-09-27 with the other versioned planned entries. About-page aspiration only. Note: that "v2.0.0" label predated the scanner v2.0 release and collided with its numbering — resolved by the removal (`docs/STATUS.md` checklist gate 5 closed).
 - Engine-adjacent ideas mentioned in code comments as "later lessons" (text extraction, rendering inside the engine, compression, encryption): explicitly out of scope for the current engine, recorded here only so they are not mistaken for plans.
 
 - **Scanner zoom (revisit)** — the zoom control was removed because the track-reported range is not a focal-length multiplier (docs/BUGS.md F-11); revisit only with focal-accurate lens handling.

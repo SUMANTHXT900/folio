@@ -12,13 +12,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  AnimatePresence,
-  Reorder,
-  motion,
-  useDragControls,
-  type DragControls,
-} from 'framer-motion';
+import { Reorder, motion, useDragControls, type DragControls } from 'framer-motion';
 import { formatBytes } from '../components/ui';
 import type { ImagePage } from './imagePages';
 
@@ -338,7 +332,7 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
         ))}
       </Reorder.Group>
 
-      <AnimatePresence>
+      <>
         {viewing !== null &&
           // Portaled to document.body: the tool card above us carries
           // `backdrop-filter` (glass), which per spec becomes the containing
@@ -346,8 +340,10 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
           // the tall card and the dialog centers off-screen (F-19). The
           // portal escapes every ancestor, so `fixed inset-0` is always the
           // real viewport. `dvh` caps keep the mobile URL bar from cropping.
-          // Enter/exit is a 180ms fade+scale (transform/opacity only);
-          // close paths set state directly, so unmount never waits on JS.
+          // NOTE: no AnimatePresence here — this framer-motion version
+          // swallows direct createPortal() children (dialog never mounts).
+          // Enter is a 180ms fade+scale via plain motion initial/animate
+          // (transform/opacity only); close unmounts instantly.
           createPortal(
             <motion.div
               initial={{ opacity: 0 }}
@@ -381,7 +377,7 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
             </motion.div>,
             document.body,
           )}
-      </AnimatePresence>
+      </>
     </>
   );
 }

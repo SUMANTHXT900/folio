@@ -55,7 +55,7 @@ None. No blocked items.
 - **Metadata `set` with `""` is rejected** — use `Clear`. Read preserves `Some("")` distinctly from absent.
 - **`pdf.inspect` does no text extraction, rendering, or image extraction** — structural inspection only (page count, version, encryption, metadata, optional per-page geometry).
 - **`pdf.images_to_pdf` accepts JPEG/PNG only**; anything else fails as `UNSUPPORTED_FORMAT`.
-- About-page future items live in one unversioned **Coming soon** card (Compress, sharing/annotation ideas — aspirations, never promises; verified in `app/src/studio/About.tsx`). The old versioned tree ("v1.2.0 · Sign & annotate", "v2.0.0 · Batch & OCR") was removed 2026-09-27, closing the numbering collision with scanner v2.0 (checklist gate 5).
+- About-page future items live in one unversioned **Coming soon** card (Compress, sharing/annotation ideas — aspirations, never promises; verified in `app/src/studio/About.tsx`). The versioned *planned* entries ("v1.2.0 · Sign & annotate", "v2.0.0 · Batch & OCR") were removed 2026-09-27; the tree itself retains real history, closing the numbering collision with scanner v2.0 (checklist gate 5).
 
 ## Validated baseline (pre-v2.0, `dev` @ `97dc8c2`, 2026-09-27 — numbers are the last verified baselines; waves 1–7 added tests with no recorded full-suite re-run, so treat as unverified until checklist gate 2 runs on the release commit)
 
@@ -84,7 +84,7 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 2. **Full suite green on the release commit — PENDING.** Rust `cargo test` + `fmt --check` + `clippy` (`engine/`, `scan/`), `build:wasm` + `build:scan`, frontend typecheck/lint/format/test, production build, canonical E2E — with `docs/STATUS.md` baselines updated in the same commit.
 3. **CHANGELOG v2.0.0 entry — PENDING.** New entry per the file's per-released-version convention (verified against git history; never invent). Must cover: scanner M1–M3+M3.x, D16–D23, F-11–F-20 resolutions, P0–P2+P4 (P0.2 shelved), audit waves 1–7.
 4. **`package.json` bump to 2.0.0 — HELD.** Only after gates 1–3. The About `latest` entry follows automatically via `__FOLIO_VERSION__`.
-5. **About tree check — DONE 2026-09-27.** The versioned tree is gone: About now carries one unversioned Coming-soon card ("Ideas under consideration" + Suggest-a-feature link, verified in `app/src/studio/About.tsx`), so the scanner-v2.0 numbering collision no longer exists.
+5. **About tree check — DONE 2026-09-27.** The versioned *planned* entries are gone: About keeps its real-history tree plus one unversioned Coming-soon card ("Ideas under consideration" + Suggest-a-feature link, verified in `app/src/studio/About.tsx`), so the scanner-v2.0 numbering collision no longer exists.
 6. **Deploy — PENDING.** Ship `app/dist/` to Cloudflare Pages `folio-pdf` branch `dev`; phones reload once to the current shell (update-manager banner is the live path).
 7. **`main`-promotion decision — SEPARATE, unscheduled.** Promoting the Folio build to `main`/production hosting is an explicit decision, never a side effect of this release.
 

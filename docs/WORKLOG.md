@@ -381,3 +381,9 @@ Chronological record of meaningful development events. Each entry records object
 
 - **Added.** BUGS.md F-20 (Split preview opener + portaled overlay, +4 E2E).
 - **Fixed.** F-19 verification line (50/50 → Images 50/50 + Split 57/57); P0.2 open question → answered-by-analysis pointer; cold-merge 190x analysis recorded under PERFORMANCE.md Risks with hypotheses, exclusions, and the laptop experiment.
+
+## 2026-09-27 — Wave-5 AnimatePresence+portal regression caught by E2E (pre-ship)
+
+- **Regression.** Wave 5 wrapped the three portaled preview viewers (PageGrid, SplitTool, RearrangeTool) in `AnimatePresence`; this framer-motion version swallows direct `createPortal()` children, so no dialog ever mounted (6 E2E FAILs, zero console errors). Proven by unwrapping PageGrid live (dialog opened), then fixed in all three viewers.
+- **Fix.** `AnimatePresence` removed from portaled viewers; plain `motion` initial/animate enter fade kept (verified working with portals); close unmounts instantly. Non-portal `AnimatePresence` uses (DropZone hint, banner, scanner pills) verified unaffected.
+- **Verification.** E2E **57/57 + 4 SKIP**, unit 378, typecheck/lint/format clean.

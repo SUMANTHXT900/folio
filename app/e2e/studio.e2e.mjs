@@ -499,9 +499,9 @@ async function main() {
       { timeout: 300000 },
     );
     await page.evaluate(() => {
-      [...document.querySelectorAll('button')].find((b) =>
-        (b.getAttribute('aria-label') ?? '').startsWith('Rotate right'),
-      )?.click();
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Rotate right (page 1)')
+        ?.click();
     });
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]

@@ -1,12 +1,6 @@
 import { useEffect, useState, useMemo, memo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  AnimatePresence,
-  Reorder,
-  motion,
-  useDragControls,
-  type DragControls,
-} from 'framer-motion';
+import { Reorder, motion, useDragControls, type DragControls } from 'framer-motion';
 import {
   ToolHeading,
   DropZone,
@@ -423,7 +417,7 @@ export default function RearrangeTool() {
       {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
       {opError !== null && <ErrorBlock error={opError} />}
 
-      <AnimatePresence>
+      <>
         {viewer !== null &&
           // Portaled to document.body: the Card above carries
           // `backdrop-filter` (via the shared Card's backdrop-blur), which per
@@ -432,8 +426,10 @@ export default function RearrangeTool() {
           // off-screen (F-19, cf. PageGrid). The portal escapes every
           // ancestor, so `fixed inset-0` is always the real viewport. `dvh`
           // caps keep the mobile URL bar from cropping.
-          // Enter/exit is a 180ms fade+scale (transform/opacity only);
-          // close paths set state directly, so unmount never waits on JS.
+          // NOTE: no AnimatePresence here — this framer-motion version
+          // swallows direct createPortal() children (dialog never mounts).
+          // Enter is a 180ms fade+scale via plain motion initial/animate
+          // (transform/opacity only); close unmounts instantly.
           createPortal(
             <motion.div
               initial={{ opacity: 0 }}
@@ -492,7 +488,7 @@ export default function RearrangeTool() {
             </motion.div>,
             document.body,
           )}
-      </AnimatePresence>
+      </>
     </div>
   );
 }
