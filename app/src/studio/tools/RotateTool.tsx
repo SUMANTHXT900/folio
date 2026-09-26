@@ -5,11 +5,12 @@ import {
   FileChip,
   Button,
   Spinner,
-  DoneBanner,
   Progress,
   ResultMeta,
   ErrorBlock,
 } from '../components/ui';
+import { DownloadCard } from '../components/DownloadCard';
+import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
@@ -17,9 +18,7 @@ import {
   openStudioBytes,
   runStudioOperation,
   formatDurationMs,
-  studioDownload,
   studioShareAvailable,
-  studioStripExt,
   type StudioJob,
 } from '../services/folio';
 import { formatBytes } from '../components/ui';
@@ -234,8 +233,7 @@ export default function RotateTool() {
           currentTemp = temp.id;
           currentId = temp.id;
         } else {
-          const name = `${studioStripExt(file.name)}-rotated.pdf`;
-          studioDownload(first.bytes, name);
+          const name = smartOutputName('rotate', [file.name]);
           setDone({
             name,
             blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
@@ -428,7 +426,11 @@ export default function RotateTool() {
           {working && <Spinner label={stage ?? 'Rotating…'} />}
           {done && (
             <div className="mt-6">
-              <DoneBanner name={done.name} blob={done.blob} shareable={studioShareAvailable()} />
+              <DownloadCard
+                blob={done.blob}
+                suggestedName={done.name}
+                shareable={studioShareAvailable()}
+              />
               <ResultMeta lines={meta} />
             </div>
           )}

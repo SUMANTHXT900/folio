@@ -6,17 +6,17 @@ import {
   Button,
   Spinner,
   Card,
-  DoneBanner,
   Progress,
   ResultMeta,
   ErrorBlock,
 } from '../components/ui';
+import { DownloadCard, MultiDownloadCard } from '../components/DownloadCard';
+import { smartSplitPartName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
   runStudioOperation,
   formatDurationMs,
-  studioDownload,
   studioShareAvailable,
   type StudioJob,
 } from '../services/folio';
@@ -85,7 +85,11 @@ export default function SplitTool() {
   const [keep, setKeep] = useState<boolean[]>([]);
   const [mode, setMode] = useState<'pick' | 'ranges'>('pick');
   const [ranges, setRanges] = useState('');
-  const [result, setResult] = useState<{ name: string; blob: Blob } | 'multi' | null>(null);
+  const [result, setResult] = useState<
+    | { name: string; blob: Blob }
+    | { parts: Array<{ key: string; blob: Blob; suggestedName: string }> }
+    | null
+  >(null);
   const [meta, setMeta] = useState<Array<string | null>>([]);
   const [opError, setOpError] = useState<unknown>(null);
   const [preview, setPreview] = useState<number | null>(null);
@@ -167,7 +171,7 @@ export default function SplitTool() {
         jobRef.current = null;
         const first = out.outputs[0];
         setResult({
-          name: file.name.replace(/\.pdf$/i, '') + '-split.pdf',
+          name: smartSplitPartName(file.name, kept[0], kept[kept.length - 1]),
           blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
         });
         const summary = out.summary;
@@ -204,7 +208,7 @@ export default function SplitTool() {
           const first = out.outputs[0];
           const [a, b] = parsed[0];
           setResult({
-            name: `${file.name.replace(/\.pdf$/i, '')}-p${a}-${b}.pdf`,
+            name: smartSplitPartName(file.name, a, b),
             blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
           });
           setMeta([
@@ -213,14 +217,18 @@ export default function SplitTool() {
             `Completed in ${formatDurationMs(out.durationMs)}`,
           ]);
         } else {
-          out.outputs.forEach((o, i) => {
+          const parts = out.outputs.map((o, i) => {
             const [a, b] = parsed[Math.min(i, parsed.length - 1)];
-            studioDownload(o.bytes, `${file.name.replace(/\.pdf$/i, '')}-p${a}-${b}.pdf`);
+            return {
+              key: String(i),
+              blob: new Blob([o.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+              suggestedName: smartSplitPartName(file.name, a, b),
+            };
           });
-          setResult('multi');
+          setResult({ parts });
           setMeta([
             ...partCounts,
-            `${out.outputs.length} files downloaded`,
+            `${out.outputs.length} files ready — name them, then download`,
             `Completed in ${formatDurationMs(out.durationMs)}`,
           ]);
         }
@@ -406,22 +414,22 @@ export default function SplitTool() {
             </div>
           )}
 
-          {result && result !== 'multi' && (
+          {result && 'blob' in result && (
             <>
-              <DoneBanner
-                name={result.name}
+              <DownloadCard
                 blob={result.blob}
+                suggestedName={result.name}
                 shareable={studioShareAvailable()}
               />
               <ResultMeta lines={meta} />
             </>
           )}
 
-          {result === 'multi' && (
-            <Card>
-              <p className="text-sm text-ink-400">Multiple files downloaded.</p>
+          {result && 'parts' in result && (
+            <>
+              <MultiDownloadCard parts={result.parts} shareable={studioShareAvailable()} />
               <ResultMeta lines={meta} />
-            </Card>
+            </>
           )}
         </div>
       )}

@@ -319,3 +319,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Deploy.** PENDING (commit + push + Cloudflare \`dev\` after this entry).
 
 - **Deploy.** F-19 portaled modal shipped to Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`).
+
+## 2026-09-26 — Naming-first downloads, all tools (D21, delegated)
+
+- **Request.** Outputs named generically (`images.pdf` etc.); no smart naming, no naming UI.
+- **Work.** Shared core (central): `downloadNaming.ts` pure policy + 10 tests; `DownloadCard`/`MultiDownloadCard` (Smart prefilled / Custom blank, live exact-name anchor, share with same name, DoneBanner with final name post-save). Wiring (3 parallel subagents, disjoint files): Merge/Rearrange/Rotate; Split (pick/single/multi — multi keeps part Blobs, auto-loop deleted) + Metadata; Images + E2E. Auto-downloads removed everywhere; the card anchor is the single trigger.
+- **Verification.** Typecheck/lint/format clean; unit 257 (+10); E2E **52/52 + 4 SKIP** (+2: smart `red-wide-plus1-pages.pdf`, custom `e2e-custom-name.pdf` exact).
+- **Deploy.** PENDING (commit + push + Cloudflare `dev` after this entry).

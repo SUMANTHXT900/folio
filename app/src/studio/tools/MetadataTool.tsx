@@ -6,12 +6,13 @@ import {
   Button,
   Spinner,
   Card,
-  DoneBanner,
   Progress,
   ResultMeta,
   ErrorBlock,
   formatBytes,
 } from '../components/ui';
+import { DownloadCard } from '../components/DownloadCard';
+import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import {
   closeStudioDoc,
@@ -188,7 +189,7 @@ export default function MetadataTool() {
       const out = await job.done;
       jobRef.current = null;
       const first = out.outputs[0];
-      const name = file.name.replace(/\.pdf$/i, '') + '-metadata.pdf';
+      const name = smartOutputName('metadata', [file.name]);
       setDone({
         name,
         blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
@@ -396,7 +397,11 @@ export default function MetadataTool() {
           {error !== null && <ErrorBlock error={error} />}
           {done && (
             <>
-              <DoneBanner name={done.name} blob={done.blob} shareable={studioShareAvailable()} />
+              <DownloadCard
+                blob={done.blob}
+                suggestedName={done.name}
+                shareable={studioShareAvailable()}
+              />
               <ResultMeta lines={doneMeta} />
             </>
           )}

@@ -4,18 +4,18 @@ import {
   ToolHeading,
   Button,
   Card,
-  DoneBanner,
   Progress,
   ResultMeta,
   ErrorBlock,
   formatBytes,
 } from '../components/ui';
+import { DownloadCard } from '../components/DownloadCard';
+import { smartOutputName } from '../components/downloadNaming';
 import {
   releaseStagedBytes,
   runStudioOperation,
   formatDurationMs,
   stageStudioBytes,
-  studioDownload,
   studioShareAvailable,
   type StudioJob,
 } from '../services/folio';
@@ -208,15 +208,18 @@ export default function ImagesTool() {
       const out = await job.done;
       jobRef.current = null;
       const first = out.outputs[0];
-      const name = 'images.pdf';
-      // ONE Blob for auto-download, re-download, and share (P2): the
+      const name = smartOutputName(
+        'images',
+        pages.map((p) => p.name),
+      );
+      // ONE Blob for download, re-download, and share (P2): the
       // engine output bytes are not retained afterwards, and no second
-      // Blob is built. DoneBanner owns its object URL (revoked on
-      // replace/unmount); the auto-download URL revokes after 60s.
-      // The Blob stays only while this completion card is displayed —
-      // required for save-again/share; cleared on rebuild, clear, unmount.
+      // Blob is built. DownloadCard owns its object URL (revoked on
+      // replace/unmount); no auto-download fires — the card's anchor
+      // is the trigger. The Blob stays only while this completion card
+      // is displayed — required for save-again/share; cleared on
+      // rebuild, clear, unmount.
       const blob = new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' });
-      studioDownload(blob, name);
       setDone({ name, blob });
       const summary = out.summary;
       const imageCount =
@@ -411,7 +414,11 @@ export default function ImagesTool() {
           {error !== null && <ErrorBlock error={error} />}
           {done && (
             <>
-              <DoneBanner name={done.name} blob={done.blob} shareable={studioShareAvailable()} />
+              <DownloadCard
+                blob={done.blob}
+                suggestedName={done.name}
+                shareable={studioShareAvailable()}
+              />
               <ResultMeta lines={meta} />
             </>
           )}

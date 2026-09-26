@@ -4,20 +4,19 @@ import {
   ToolHeading,
   DropZone,
   Button,
-  DoneBanner,
   StageLine,
   Progress,
   ResultMeta,
   ErrorBlock,
   formatBytes,
 } from '../components/ui';
+import { DownloadCard } from '../components/DownloadCard';
+import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import {
   runStudioOperation,
   formatDurationMs,
-  studioDownload,
   studioShareAvailable,
-  studioStripExt,
   type StudioJob,
 } from '../services/folio';
 
@@ -69,8 +68,10 @@ export default function MergeTool() {
       const result = await job.done;
       jobRef.current = null;
       const out = result.outputs[0];
-      const name = `merged-${studioStripExt(files[0].name)}-${files.length}.pdf`;
-      studioDownload(out.bytes, name);
+      const name = smartOutputName(
+        'merge',
+        files.map((f) => f.name),
+      );
       setDone({
         name,
         blob: new Blob([out.bytes as unknown as BlobPart], { type: 'application/pdf' }),
@@ -308,7 +309,11 @@ export default function MergeTool() {
           {error !== null && <ErrorBlock error={error} />}
           {done && (
             <>
-              <DoneBanner name={done.name} blob={done.blob} shareable={studioShareAvailable()} />
+              <DownloadCard
+                blob={done.blob}
+                suggestedName={done.name}
+                shareable={studioShareAvailable()}
+              />
               <ResultMeta lines={meta} />
             </>
           )}

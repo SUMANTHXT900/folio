@@ -7,11 +7,12 @@ import {
   Button,
   Spinner,
   Card,
-  DoneBanner,
   Progress,
   ResultMeta,
   ErrorBlock,
 } from '../components/ui';
+import { DownloadCard } from '../components/DownloadCard';
+import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
@@ -251,7 +252,7 @@ export default function RearrangeTool() {
       jobRef.current = null;
       const first = out.outputs[0];
       setResult({
-        name: file.name.replace(/\.pdf$/i, '') + '-rearranged.pdf',
+        name: smartOutputName('rearrange', [file.name]),
         blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
       });
       const summary = out.summary;
@@ -404,9 +405,9 @@ export default function RearrangeTool() {
 
           {result && (
             <>
-              <DoneBanner
-                name={result.name}
+              <DownloadCard
                 blob={result.blob}
+                suggestedName={result.name}
                 shareable={studioShareAvailable()}
               />
               <ResultMeta lines={meta} />

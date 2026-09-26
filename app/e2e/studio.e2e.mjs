@@ -283,11 +283,18 @@ async function main() {
       /2 files · ready to merge/.test(count),
       count.split('\n')[0],
     );
-    // Start merge; the anchor download is captured in-page (no OS download).
+    // Start merge; the naming card's Download anchor is captured in-page (no OS download).
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Merge '))
         ?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
+      { timeout: 300000 },
+    );
+    await page.evaluate(() => {
+      document.querySelector('a[aria-label="Download PDF"]')?.click();
     });
     const merged = await waitForCapturedDownload(page, 300000);
     check('merge downloads a real PDF', merged !== null, merged ? merged.name : null);
@@ -710,17 +717,47 @@ async function main() {
         .find((b) => b.textContent?.startsWith('Build PDF'))
         ?.click();
     });
-    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
-      timeout: 300000,
-    });
+    await page.waitForFunction(
+      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
+      { timeout: 300000 },
+    );
     await page.evaluate(() => {
-      document.querySelector('a[download]')?.click();
+      document.querySelector('a[aria-label="Download PDF"]')?.click();
     });
     const imagesOut = await waitForCapturedDownload(page, 120000);
     check(
       'images tool builds a PDF',
       imagesOut !== null && imagesOut.magic === '%PDF-',
       imagesOut ? imagesOut.name : null,
+    );
+    check(
+      'images smart default name ends .pdf with plus (multi-page)',
+      imagesOut !== null && imagesOut.name.endsWith('.pdf') && imagesOut.name.includes('plus'),
+      imagesOut ? imagesOut.name : null,
+    );
+    // Custom name on the same card (anchor clicks are captured in-page,
+    // so the card stays up): switch to Custom, type a name, download.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.getAttribute('aria-label') === 'Custom name')
+        ?.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const input = document.querySelector('input[aria-label="File name"]');
+        return input !== null && input.value === '';
+      },
+      { timeout: 10000 },
+    );
+    await page.type('input[aria-label="File name"]', 'e2e-custom-name');
+    await page.evaluate(() => {
+      document.querySelector('a[aria-label="Download PDF"]')?.click();
+    });
+    const imagesCustom = await waitForCapturedDownload(page, 120000);
+    check(
+      'images custom name downloads exactly e2e-custom-name.pdf',
+      imagesCustom !== null && imagesCustom.name === 'e2e-custom-name.pdf',
+      imagesCustom ? imagesCustom.name : null,
     );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
