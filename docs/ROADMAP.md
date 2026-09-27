@@ -21,7 +21,7 @@ This roadmap records actual project direction. Items are separated by commitment
 ## Next
 
 - **Performance program (`docs/PERFORMANCE.md`) — all done.** P0, P1, P2, P3, P4 implemented 2026-09-26 (P3: image-build sharding + parallel-honesty-by-construction, D22). P0.2 main-thread slice removal measured-and-SHELVED 2026-09-27 on real-device evidence (phone 55 MB merge staging 79 ms cold / 28 ms warm vs ~40 ms engine; see `docs/WORKLOG.md` + `docs/PERFORMANCE.md`) — no implementation, reopens only on a large-PDF-on-phone crash or staging >~500 ms on a used file. Threaded WASM explicitly gated behind a future decision.
-- Decide promotion of the Folio build to `main` / production hosting (currently `main` carries the pre-engine release). Unscheduled — requires an explicit decision, not a side effect of other work.
+- **Production promotion — DONE 2026-09-27.** `dev` fast-forwarded into `main` and pushed; `https://folio-pdf.pages.dev` verified serving the v1.9.0 build.
 
 ## Future / not committed
 

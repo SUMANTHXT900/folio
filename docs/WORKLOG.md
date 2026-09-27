@@ -396,3 +396,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Docs.** STATUS/ROADMAP/WORKLOG/DECISIONS/PROJECT/DEVELOPMENT baselines synced to the numbers above; CHANGELOG v1.9.0 entry extended with the wave-A user-visible items (no new version entry); BUGS/PERFORMANCE/OPERATIONS/GLOSSARY/LESSONS/DETOURS/AGENTS checked, no stale wave-A claims found. v2.0.0 checklist stays HELD — no gate cleared this wave.
 
 - **Deploy.** Full audit implementation (waves 1–8 + waveA + portal fix) shipped: GitHub `dev` (`eebfd4b..6004e3b`) + Cloudflare Pages `folio-pdf` branch `dev` (`https://dev.folio-pdf.pages.dev`). v1.9.0 live on dev.
+
+## 2026-09-27 — Production promotion: dev fast-forwarded to main, prod deployed
+
+- **README.** Rewritten for production: prod badge/link only (`https://folio-pdf.pages.dev`), no dev-branch notice, no project-history section, current counts (engine 382, scan 39, frontend 380/35, E2E 57/57), scanner + smart-naming coverage, Suggest-a-feature link.
+- **Deploy order (as instructed: CF prod first, then GitHub main).** Production build from `dev` deployed with `--branch main` → Cloudflare confirmed `Environment: Production`, deployment `7b777763`; `folio-pdf.pages.dev` fetched (200) and serves the new bundle hash (`index-d7VCcvWC.js`, matching local `dist/`).
+- **Merge.** `main` was an ancestor of `dev` → clean fast-forward `5d83b16..e49d614`, pushed to `origin/main`.
+- **Docs.** STATUS/ROADMAP promotion items closed; v2.0.0 checklist gate 5 stays DONE; real-device validation still PENDING.

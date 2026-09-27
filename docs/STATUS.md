@@ -43,7 +43,7 @@
 
 ## Pending work
 
-- `main` branch still carries the pre-engine production release; promoting the Folio build to `main`/production hosting is a separate, unscheduled decision.
+- `main` now carries the Folio v1.9.0 build (fast-forwarded from `dev` 2026-09-27) and serves production at `https://folio-pdf.pages.dev`; `dev` continues as the staging line.
 
 ## Blocked work
 
@@ -88,7 +88,7 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 4. **`package.json` bump to 2.0.0 — HELD.** Only after gates 1–3. The About `latest` entry follows automatically via `__FOLIO_VERSION__`.
 5. **About tree check — DONE 2026-09-27.** The versioned _planned_ entries are gone: About keeps its real-history tree plus one unversioned Coming-soon card ("Ideas under consideration" + Suggest-a-feature link, verified in `app/src/studio/About.tsx`), so the scanner-v2.0 numbering collision no longer exists.
 6. **Deploy — PENDING.** Ship `app/dist/` to Cloudflare Pages `folio-pdf` branch `dev`; phones reload once to the current shell (update-manager banner is the live path).
-7. **`main`-promotion decision — SEPARATE, unscheduled.** Promoting the Folio build to `main`/production hosting is an explicit decision, never a side effect of this release.
+7. **`main` promotion — DONE 2026-09-27** (fast-forward `dev` → `main`, pushed; production deploy verified serving the new build).
 
 ## Repository state
 
@@ -96,9 +96,9 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 - Branch: `dev`. HEAD: `e74e71b` (wave-A app finish, 2026-09-27). `package.json` 1.9.0 — v2.0.0 bump HELD (see release checklist above).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace.
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
-- `main` untouched (pre-engine release at `5d83b16`).
+- `main` at v1.9.0 (promoted 2026-09-27, fast-forward from `dev`).
 - Generated/ignored: `wasm/pkg/`, `engine/target/`, `app/dist/`, `app/node_modules/`, optional `test pdfs/` corpus, E2E artifacts — none committed.
 
 ## Immediate next steps
 
-1. Decide `main`/production promotion separately — out of scope for this change; do NOT promote as a side effect.
+1. Real-device Android validation (30-photo scenario, camera/scan feel, large rotate/split) — still PENDING, gates v2.0.0.
