@@ -1,60 +1,34 @@
 <p align="center">
-  <img src="app/public/favicon.svg" alt="Folio" width="64" height="64" />
+  <img src="app/public/favicon.svg" alt="Folio" width="72" height="72" />
 </p>
 
 <h1 align="center">Folio</h1>
 
 <p align="center">
-  <strong>Private, fully local PDF tools — now powered by the Folio Rust engine.</strong><br />
-  Merge, split, rearrange, rotate, edit metadata, and build PDFs from images - entirely in your browser.<br />
+  <strong>Private PDF tools that stay on your device.</strong><br />
+  Merge, split, rearrange, rotate, edit metadata, scan pages, and build PDFs from images — entirely in your browser.<br />
   Your files never leave your device.
 </p>
 
 <p align="center">
-  <a href="https://dev.folio-pdf.pages.dev/" target="_blank" rel="noopener">
-    <img src="https://img.shields.io/badge/Live-dev.folio--pdf.pages.dev-d9902d?style=for-the-badge&logo=cloudflare&logoColor=white" alt="Live dev preview" />
+  <a href="https://folio-pdf.pages.dev/" target="_blank" rel="noopener">
+    <img src="https://img.shields.io/badge/Open-folio--pdf.pages.dev-d9902d?style=for-the-badge&logo=cloudflare&logoColor=white" alt="Open Folio" />
   </a>
   <img src="https://img.shields.io/badge/version-1.9.0-d9902d?style=for-the-badge" alt="Version" />
   <img src="https://img.shields.io/badge/engine-Rust%20WASM-b7410e?style=for-the-badge" alt="Engine" />
   <img src="https://img.shields.io/badge/privacy-100%25%20local-16a34a?style=for-the-badge" alt="Privacy" />
 </p>
 
-> **This is the `dev` branch** - staging preview. Production (`main`) lives at [folio-pdf.pages.dev](https://folio-pdf.pages.dev).
-
 ---
-
-## New architecture (v1.7.0)
-
-This repository is the single source of truth for **both** the Folio production
-application **and** the complete Folio PDF engine: the Rust source (`engine/src/`),
-the WASM bridge (`wasm/`), engine tests (`engine/tests/`), CLI examples
-(`engine/examples/`), and the React frontend (`app/`) all live here. No separate engine repository is required.
-
-```text
-PDF manipulation          Studio → Folio service → WasmWorkerEngineAdapter
-                          → Web Worker → Rust/WASM (lopdf)
-
-PDF rendering             Studio → PdfRenderEngine → PDF.js → canvas
-```
-
-- **Rust/WASM** performs all PDF manipulation (inspect, extract, split, reorder, delete,
-  rotate, merge, images-to-PDF, metadata read/write), executed locally in a Web Worker
-  so heavy work stays off the UI thread.
-- **PDF.js** is used separately for rendering, previews, thumbnails, and page-count
-  intake. It does not manipulate documents. The previous `pdf-lib` processing
-  implementation has been fully removed.
-- The interactive Developer Testbench used during engine development is not part of
-  this repository; only automated tests and the production E2E suite ship with it.
 
 ## Why Folio?
 
-Most PDF tools upload your documents to a server to process them. **Folio doesn't.**
-Every operation runs locally in your browser. It's a Progressive Web App, so it also works offline once loaded.
+Most PDF tools upload your documents to a server to process them. **Folio doesn't.** Every operation runs locally in your browser. It's a Progressive Web App, so it also works offline once loaded.
 
-- 🔒 **Private by design** - files are processed in-memory and discarded when you close the tab
-- ⚡ **Fast** - no network round-trips, no waiting on a server
-- 📴 **Offline-capable** - installable PWA, works without a connection (including the WASM engine, which is precached)
-- 🪶 **Lightweight** - no account, no tracking, no cookies
+- 🔒 **Private by design** — files are processed in memory and discarded when you close the tab
+- ⚡ **Fast** — no network round-trips, no waiting on a server
+- 📴 **Offline-capable** — installable PWA, works without a connection (the WASM engine is precached)
+- 🪶 **Lightweight** — no account, no tracking, no cookies
 
 ## Features
 
@@ -65,19 +39,22 @@ Every operation runs locally in your browser. It's a Progressive Web App, so it 
 | **Rearrange** | Drag to reorder pages, preview at full resolution, then save |
 | **Rotate** | Rotate individual pages or the whole document by quarter turns |
 | **Metadata** | Read and edit titles, authors, dates, and other document properties (set / clear / leave unchanged) |
-| **Images → PDF** | Build one PDF from JPEG/PNG images, one page per image, fit or A4 pages |
-| **Compress** | *Coming in a future update* - the action stays disabled rather than pretending to work |
+| **Images → PDF** | Build one PDF from JPEG/PNG images — upload, or scan pages with the on-device camera (auto-crop + enhance) |
+| **Compress** | *Coming in a future update* — the action stays disabled rather than pretending to work |
 
-Every tool reports real engine progress (stage + percentage), honest cancellation, completion time, and output sizes.
+Every completed file gets a smart name derived from your inputs (or your own custom name) before it downloads. Every tool reports real engine progress, honest cancellation, completion time, and output sizes.
 
-## Tech stack
+## How it works
 
-- **React** + **TypeScript** + **Vite** - application UI and orchestration
-- **Rust** compiled to **WebAssembly** (`wasm/`, via `wasm-pack`) - PDF manipulation and CPU-heavy document processing (`engine/src/`, powered by `lopdf`)
-- **Web Worker** - keeps heavy processing off the UI thread (`app/src/engine/engine.worker.ts`)
-- **PDF.js** - rendering, previews, thumbnails, and page-count intake only (never document mutation)
-- **Tailwind CSS** + **Framer Motion** - styling and transitions
-- **Cloudflare Pages** for hosting (hash routing, no SPA rewrite needed)
+```text
+PDF manipulation          Studio → Folio service → WasmWorkerEngineAdapter
+                          → Web Worker → Rust/WASM (lopdf)
+
+PDF rendering             Studio → PdfRenderEngine → PDF.js → canvas
+```
+
+- **Rust/WASM** performs all PDF manipulation (inspect, extract, split, reorder, delete, rotate, merge, images-to-PDF, metadata read/write), executed locally in a Web Worker so heavy work stays off the UI thread.
+- **PDF.js** is used separately for rendering, previews, thumbnails, and page-count intake. It never manipulates documents.
 
 ## Privacy / local-first
 
@@ -91,6 +68,7 @@ Every tool reports real engine progress (stage + percentage), honest cancellatio
 folio/
 ├── app/          Production Studio (React + TS + Vite)
 ├── engine/       Folio Rust PDF engine (src, tests, examples, Cargo.toml)
+├── scan/         On-device document-scan core (detect, warp, enhance)
 ├── wasm/         Rust → WASM bridge (wasm-pack)
 ├── docs/         Persistent project memory
 ├── AGENTS.md
@@ -106,8 +84,9 @@ Requires Node.js 18+ and a Rust toolchain with the `wasm32-unknown-unknown` targ
 cd app
 npm install
 
-# build the WASM engine package (generates wasm/pkg/, gitignored)
+# build the WASM engine + scan packages (generates wasm/pkg/ and scan/pkg/, gitignored)
 npm run build:wasm
+npm run build:scan
 
 # run the dev server (production Studio)
 npm run dev
@@ -122,54 +101,35 @@ npm run preview
 ## Tests
 
 ```bash
-# Rust engine (345 tests: units + integration)
-cargo test
-cargo fmt --check
-cargo clippy --all-targets
+# Rust engine + scan core (382 + 39 tests)
+cd engine && cargo test && cargo fmt --check && cargo clippy --all-targets
+cd ../scan && cargo test && cargo fmt --check && cargo clippy --all-targets
 
-# Frontend (unit tests, typecheck, lint, format) — run inside app/
+# Frontend (380 unit tests, typecheck, lint, format) — run inside app/
+cd app
 npm test
 npm run typecheck
 npm run lint
 npm run format:check
 ```
 
-Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/`.
-The canonical suite passes from a fresh clone with no private corpus:
+Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/` — 57/57 passing from a fresh clone with no private corpus:
 
 ```bash
 cd app
+npx vite --port 5199 --strictPort &
 node e2e/studio.e2e.mjs --dev http://localhost:5199
 ```
 
-Small fixtures fall back to deterministic synthetic PDFs when the optional local
-corpus is absent; only the large-file sections need the real corpus and SKIP
-explicitly without it. `large-files` / `thumbnail` / `metadata` E2E are optional
-suites for developer-owned stress runs (see `docs/DEVELOPMENT.md`). The
-gitignored `test pdfs/` directory at the repo root is never committed.
-
 ## Deploy
 
-Folio is a static site. Build and deploy `app/dist/` to any static host — Cloudflare Pages, Netlify,
-GitHub Pages, or your own server.
+Folio is a static site. Production deploys from `main` to Cloudflare Pages:
 
 ```bash
 cd app
 npm run build
-npx wrangler pages deploy dist --project-name folio-pdf --branch dev
+npx wrangler pages deploy dist --project-name folio-pdf --branch main
 ```
-
-## Project history
-
-- **v1.8.0 (dev)** - Images → PDF page assembly: unified ordered page collection for uploads + camera captures with preview grid, move-button reorder, remove, add-more, per-page rotate, and camera input — app-only, engine untouched (see `docs/DECISIONS.md` D14).
-- **v1.7.1 (dev)** - Mobile UI fixes F-7–F-10 (patch, UI-only, engine untouched): single-row snap-scrolling bottom nav inside tools with page padding reserved only where the nav renders, hero proof-line wraps below `sm`, Rearrange drag starts from a grip handle with `pan-y` page scroll preserved. Full suite re-verified (see `docs/STATUS.md` baseline).
-- **v1.7.0 (dev)** - Folio engine integration: the complete Rust engine source, WASM bridge, tests, and examples now live in this repository alongside the production Studio. Rust/WASM-powered PDF processing in a Web Worker, PDF.js retained for rendering, real progress/cancellation/structured errors, completion metadata (duration, page counts, output sizes), new Metadata and Images → PDF tools, Compress reserved for a future update, production UI preserved, Developer Testbench removed from the product.
-- **v1.6.0** - cancellable merge jobs with stage progress, large-selection memory notice, mobile-aware blur.
-- **v1.5.0** - PDF render Worker + main-thread fallback, blob-URL thumbs, Show-All resume, scaleX progress.
-- **v1.4.0** - windowed rendering, right-sized scale, PWA offline fix, object-URL revocation, dead code removal, theme polish.
-- **v1.0.0** - first public release: local Merge, Split, Rearrange, Rotate & Compress.
-
-Git history is preserved; this release is a normal commit on top of it (no rewrites).
 
 ## License
 
@@ -180,4 +140,5 @@ Git history is preserved; this release is a normal commit on top of it (no rewri
 <p align="center">
   Made with care by <a href="https://github.com/SUMANTHXT900" target="_blank" rel="noopener">Sumanth</a>
   · <a href="https://www.linkedin.com/in/sai-sumanth-giduthuri-0a9956329/" target="_blank" rel="noopener">LinkedIn</a>
+  · <a href="https://github.com/SUMANTHXT900/folio/issues/new" target="_blank" rel="noopener">Suggest a feature</a>
 </p>
