@@ -18,7 +18,7 @@ Private PDF tools that are fast, honest, and local — an application users can 
 
 ## Goals
 
-- **Correctness first.** Page-level operations must be byte-exact: no dropped pages, no reordered-without-consent output, no silent metadata loss. The engine test suite (345 Rust tests) exists to guarantee this.
+- **Correctness first.** Page-level operations must be byte-exact: no dropped pages, no reordered-without-consent output, no silent metadata loss. The engine test suite (382 Rust tests) exists to guarantee this.
 - **Honest UX.** Real progress (engine events, not spinners), honest cancellation (the `CANCELLED` path is a first-class status, verified in E2E), structured errors with codes (never "something went wrong" alone), and completion metadata (duration, page counts, output size) on every tool.
 - **Large-file competence.** The engine is designed for hundred-megabyte / thousand-page documents (historically verified against a ~514 MB / 2585-page file — optional benchmark evidence, not a repository fixture): bounded thumbnails, windowed processing, no full-document materialization, no binary copies, cancellable work, released resources.
 - **Single repository.** The Rust engine source, WASM bridge, tests, examples, and the production frontend live in one repository that builds from a fresh clone. Generated WASM (`wasm/pkg/`) is a reproducible artifact, never the source of truth.

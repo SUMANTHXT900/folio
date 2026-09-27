@@ -8,7 +8,7 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Reason.** One verified implementation shared by native tests, CLI examples, and the browser build; precise control over copies for large documents; `lopdf` is pure-Rust with no OS dependencies.
 - **Alternatives considered.** `pdf-lib` in TypeScript (used by the pre-engine app; removed — see `docs/DETOURS.md`).
 - **Consequences.** A WASM build step is mandatory for frontend work (`npm run build:wasm`); engine changes require Rust + TypeScript contract updates together.
-- **Status.** Decided, implemented, verified (357 Rust tests + E2E).
+- **Status.** Decided, implemented, verified (382 Rust tests + E2E).
 
 ## D2 — PDF.js is rendering-only
 
@@ -209,3 +209,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** Cancel-during-render and cancel-during-encode checkpoints release bitmaps, revoke fresh URLs nobody owns, and surface `CANCELLED` instead of completing (verified in `app/src/studio/services/folio.ts` + `usePageThumbs.ts`).
 - **Reason.** A synchronous encode cannot be preempted, but every lane boundary can still abort — so a cancelled job leaves neither leaked canvases nor orphaned URLs.
 - **Status.** Decided, implemented in wave3 (`5c6de64`); canonical re-verification pending (STATUS gate 2).
+
+## D28 — Empty document bytes fail as InvalidInput (K4 alignment)
+
+- **Decision.** `Document::from_bytes` rejects empty input with `ErrorCode::InvalidInput` ("document bytes must not be empty"), matching the constructor to the wave-1 loader-caps reclassification (verified in `engine/src/core/document.rs`).
+- **Reason.** Rationale not recorded beyond consistency with the wave-1 loader-caps reclassification (see `docs/CHANGELOG.md` v1.9.0).
+- **Status.** Decided, implemented in wave-A (`e74e71b`); canonical re-verification pending (STATUS gate 2).
