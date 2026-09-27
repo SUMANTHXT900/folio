@@ -56,6 +56,10 @@ describe('statusTextFor', () => {
       expect(statusTextFor(phase).length).toBeGreaterThan(0);
     }
   });
+
+  it('uses plain preview-build wording for the local phase (no dev jargon)', () => {
+    expect(statusTextFor('local')).toBe('Preview build — update checks run on the deployed site.');
+  });
 });
 
 describe('createUpdateManager', () => {

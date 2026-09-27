@@ -88,7 +88,7 @@ function UpdateCard() {
           type="button"
           onClick={() => void updateManager.checkForUpdates(true)}
           disabled={!state.canCheck}
-          className="rounded-xl border border-paper-300 dark:border-ink-700 px-4 py-2 text-sm font-medium text-ink-700 dark:text-paper-100 transition-colors hover:bg-paper-200 dark:hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-xl border border-paper-300 dark:border-ink-700 px-4 py-2 min-h-[44px] text-sm font-medium text-ink-700 dark:text-paper-100 transition-colors hover:bg-paper-200 dark:hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {state.checking ? 'Checking…' : 'Check for updates'}
         </button>
@@ -107,7 +107,7 @@ function UpdateCard() {
             type="button"
             onClick={() => setShowLog((v) => !v)}
             aria-expanded={expanded}
-            className="text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 dark:hover:text-paper-100 transition-colors px-2 py-2"
+            className="text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 dark:hover:text-paper-100 transition-colors px-2 py-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center"
           >
             {expanded ? 'Hide details' : 'Details'}
           </button>

@@ -258,7 +258,9 @@ export default function MergeTool() {
           {/* file list */}
           <div className="mb-4 flex items-center justify-between">
             <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-              {files.length} file{files.length > 1 ? 's' : ''} · ready to merge
+              {files.length < 2
+                ? '1 file selected — add one more PDF to merge'
+                : `${files.length} files selected — ready to merge`}
             </p>
             <button
               onClick={clear}

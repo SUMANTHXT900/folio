@@ -469,7 +469,7 @@ function MobileNav({ route }: { route: string }) {
       className="sm:hidden fixed bottom-0 inset-x-0 z-50 glass bg-paper-100/92 dark:bg-ink-950/92 border-t border-paper-300/60 dark:border-ink-800/60 pb-[env(safe-area-inset-bottom)]"
       aria-label="Tools"
     >
-      <div className="flex gap-1 overflow-x-auto px-2 py-1.5 snap-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex gap-1 overflow-x-auto px-2 py-1.5 snap-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,transparent,black_16px,black_calc(100%-16px),transparent)]">
         <a
           href="#/"
           className="relative flex shrink-0 snap-start flex-col items-center justify-center gap-0.5 rounded-xl px-3.5 py-1.5 min-h-[56px] min-w-[62px]"

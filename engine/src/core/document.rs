@@ -92,7 +92,7 @@ impl Document {
     ) -> Result<Self, EngineError> {
         if bytes.is_empty() {
             return Err(EngineError::new(
-                ErrorCode::InvalidDocument,
+                ErrorCode::InvalidInput,
                 "document bytes must not be empty",
             ));
         }
@@ -178,7 +178,7 @@ mod tests {
     fn rejects_empty_bytes() {
         let err = Document::from_bytes(test_id(), MediaType::Pdf, None, Vec::new())
             .expect_err("empty bytes must fail");
-        assert_eq!(err.code(), ErrorCode::InvalidDocument);
+        assert_eq!(err.code(), ErrorCode::InvalidInput);
     }
 
     #[test]

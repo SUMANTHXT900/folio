@@ -301,7 +301,10 @@ export default function Home() {
                 >
                   {tool.name}
                 </h3>
-                <p className="text-xs sm:text-sm text-ink-500 dark:text-ink-300 mt-1.5 leading-relaxed max-w-xs text-pretty">
+                <p
+                  id={`tool-desc-${tool.id}`}
+                  className="text-xs sm:text-sm text-ink-500 dark:text-ink-300 mt-1.5 leading-relaxed max-w-xs text-pretty"
+                >
                   {TAGLINES[tool.id]}
                 </p>
               </div>
@@ -316,6 +319,8 @@ export default function Home() {
                 key={tool.id}
                 variants={cardV}
                 aria-disabled="true"
+                aria-describedby={`tool-desc-${tool.id}`}
+                tabIndex={0}
                 title="Reserved for a future update"
                 className={cardClass + ' opacity-60 saturate-50 cursor-not-allowed'}
               >

@@ -248,14 +248,14 @@ async function main() {
         .find((b) => b.textContent === 'Check for updates')
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Running locally'), {
+    await page.waitForFunction(() => document.body.innerText.includes('Preview build'), {
       timeout: 30000,
     });
     const updateCard = await page.evaluate(() => {
       const text = document.body.innerText;
       return {
         hasCard: text.includes('App updates'),
-        localStatus: text.includes('Running locally'),
+        localStatus: text.includes('Preview build'),
         noBanner: document.querySelector('[role="alert"]') === null,
       };
     });
@@ -274,13 +274,16 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'merge');
     await upload(page, 'input[type="file"]', [SMALL_22, RICH_80]);
-    await page.waitForFunction(() => document.body.innerText.includes('ready to merge'), {
-      timeout: 60000,
-    });
+    await page.waitForFunction(
+      () => document.body.innerText.includes('2 files selected — ready to merge'),
+      {
+        timeout: 60000,
+      },
+    );
     const count = await page.evaluate(() => document.body.innerText);
     check(
       'merge lists 2 files with page counts',
-      /2 files · ready to merge/.test(count),
+      /2 files selected — ready to merge/.test(count),
       count.split('\n')[0],
     );
     // Start merge; the naming card's Download anchor is captured in-page (no OS download).
@@ -1523,9 +1526,12 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'merge');
     await upload(page, 'input[type="file"]', [LARGE, SMALL_22]);
-    await page.waitForFunction(() => document.body.innerText.includes('ready to merge'), {
-      timeout: 300000,
-    });
+    await page.waitForFunction(
+      () => document.body.innerText.includes('2 files selected — ready to merge'),
+      {
+        timeout: 300000,
+      },
+    );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Merge '))

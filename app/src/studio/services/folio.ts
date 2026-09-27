@@ -768,57 +768,6 @@ export async function encodeThumbCanvases(
 }
 
 /**
- * Renders one thumbnail as an object URL (bounded LRU per document).
- * Target box suits the Studio tile grid (~240 CSS px, retina-sharp).
- * Follows Lesson 14: callers request windows, never whole huge docs.
- */
-export async function studioThumb(docId: string, pageNumber: number): Promise<string> {
-  const { thumbs } = await engines();
-  const renderId = renderDocIds.get(docId);
-  if (renderId === undefined) {
-    throw toStudioError(
-      { code: 'INVALID_INPUT', message: 'document is no longer open' },
-      'pdf.inspect',
-    );
-  }
-  const pages = touchDoc(docId);
-  const cached = pages.get(pageNumber);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const job = thumbs.generateThumbnail(renderId, pageNumber, {
-    size: { width: 400, height: 400 },
-  });
-  const cancel = (): void => job.cancel();
-  trackThumbJob(docId, cancel);
-  try {
-    const result = await job.promise;
-    const url = await canvasToUrl(result.canvas);
-    // Release the canvas bitmap now that the encoded URL exists.
-    result.canvas.width = 0;
-    result.canvas.height = 0;
-    // The document may have closed or been evicted mid-flight: never
-    // resurrect a dropped entry or serve a URL for a closed document.
-    const live = liveThumbCache(docId);
-    if (live === null) {
-      try {
-        URL.revokeObjectURL(url);
-      } catch {
-        // Best effort.
-      }
-      throw toStudioError(
-        { code: 'INVALID_INPUT', message: 'document is no longer open' },
-        'pdf.inspect',
-      );
-    }
-    thumbCacheSet(live, docId, pageNumber, url);
-    return url;
-  } finally {
-    untrackThumbJob(docId, cancel);
-  }
-}
-
-/**
  * Renders a window of thumbnails with bounded concurrency (engine
  * concurrency 2) and resolves page→objectURL in input order. Canvases
  * are released as their URLs are encoded; windows stay small (the hook

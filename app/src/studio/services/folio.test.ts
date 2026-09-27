@@ -405,6 +405,15 @@ describe('encodeThumbCanvases cancellation', () => {
   });
 });
 
+describe('studioThumb dead path', () => {
+  it('has no single-thumb helper — windows use bounded encodeThumbCanvases', async () => {
+    const mod = (await import('./folio')) as Record<string, unknown>;
+    expect(mod['studioThumb']).toBeUndefined();
+    expect(typeof mod['studioThumbWindow']).toBe('function');
+    expect(typeof mod['encodeThumbCanvases']).toBe('function');
+  });
+});
+
 describe('preview cache ownership', () => {
   const revoked: string[] = [];
 

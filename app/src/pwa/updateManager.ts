@@ -125,7 +125,7 @@ export function statusTextFor(phase: UpdatePhase): string {
     case 'unknown':
       return 'Preparing update check…';
     case 'local':
-      return 'Running locally — updates activate on deploy.';
+      return 'Preview build — update checks run on the deployed site.';
     case 'unsupported':
       return 'This browser cannot check for updates.';
     case 'idle':
