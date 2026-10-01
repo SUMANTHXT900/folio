@@ -403,3 +403,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Deploy order (as instructed: CF prod first, then GitHub main).** Production build from `dev` deployed with `--branch main` → Cloudflare confirmed `Environment: Production`, deployment `7b777763`; `folio-pdf.pages.dev` fetched (200) and serves the new bundle hash (`index-d7VCcvWC.js`, matching local `dist/`).
 - **Merge.** `main` was an ancestor of `dev` → clean fast-forward `5d83b16..e49d614`, pushed to `origin/main`.
 - **Docs.** STATUS/ROADMAP promotion items closed; v2.0.0 checklist gate 5 stays DONE; real-device validation still PENDING.
+
+## 2026-10-01 — Scanner v2.1 research handoff (6-agent round, research only)
+
+- **Objective.** Next-level capture/crop options for the Hermes (VPC) agent to pick up; persist the full findings in `docs/` so no chat history is needed.
+- **Work.** Six parallel specialists, read-only: (A) auto-crop refinement (quad scoring, edge refinement, multi-frame fusion, confidence gating); (B) manual corner-adjust UX (drag-on-original pattern, loupe, keyboard steppers, warp-on-release); (C) auto-capture triggers (stability ring + countdown default-off, sharpness calibration-first); (D) illumination/shadow handling (clamped background-divide + gray-world pre-step; full removal deferred); (E) output enhancement modes (sticky 3-mode preference now, Readable gray later; Sauvola/auto-suggest deferred); (F) ecosystem guardrails (image+imageproc stay frozen, OpenCV ruled out, ML deferred, Shape Detection API unusable).
+- **Docs.** New `docs/SCANNER-V2.1-RESEARCH.md` (status: research only — nothing approved, scheduled, or promised); registered in `AGENTS.md` doc list (14→15 documents). No ROADMAP/DECISIONS commitments written; direction to be recorded once chosen.
+- **Verification.** No code changed; no verification runs needed.

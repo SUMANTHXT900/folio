@@ -31,6 +31,7 @@ docs/LESSONS.md
 docs/DEVELOPMENT.md
 docs/OPERATIONS.md
 docs/PERFORMANCE.md
+docs/SCANNER-V2.1-RESEARCH.md
 docs/CHANGELOG.md
 docs/WORKLOG.md
 docs/GLOSSARY.md
@@ -57,7 +58,7 @@ Then inspect source code where required to verify implementation claims.
 ```text
 folio/
 ├── AGENTS.md          This file — agent entry point.
-├── docs/              Persistent project memory (14 documents).
+├── docs/              Persistent project memory (15 documents).
 ├── engine/            Folio Rust PDF engine — independent of UI concerns.
 │   ├── src/           Engine source (core, execution, observability, processing, testing).
 │   ├── tests/         Rust integration tests (one file per operation + lifecycle).
