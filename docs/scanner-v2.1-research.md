@@ -5,6 +5,12 @@ Six specialist research agents reported 2026-10-01 (chat session `ses_f319c1318f
 Nothing below is committed, scheduled, or promised. When direction is chosen,
 record it in `docs/ROADMAP.md` + `docs/DECISIONS.md` per `AGENTS.md`.
 
+> **Reuse pattern.** This file is the template for all future research
+> handoffs: lowercase `docs/<topic>-research.md`, same section shape
+> (baseline → constraints → findings → phasing → deferred → hooks →
+> validation), status header always stating research-only until direction
+> is chosen. See `AGENTS.md` research-brief convention.
+
 ## How to use this document (remote agents start here)
 
 1. Read `AGENTS.md`, then `docs/PROJECT.md`, `docs/STATUS.md`, `docs/ARCHITECTURE.md`

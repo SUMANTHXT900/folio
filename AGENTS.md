@@ -31,13 +31,19 @@ docs/LESSONS.md
 docs/DEVELOPMENT.md
 docs/OPERATIONS.md
 docs/PERFORMANCE.md
-docs/SCANNER-V2.1-RESEARCH.md
+docs/scanner-v2.1-research.md
 docs/CHANGELOG.md
 docs/WORKLOG.md
 docs/GLOSSARY.md
 ```
 
 Then inspect source code where required to verify implementation claims.
+
+Research handoffs (multi-agent findings for a remote agent to pick up) live as
+lowercase `docs/<topic>-research.md`, following the section shape of
+`docs/scanner-v2.1-research.md` (baseline → constraints → findings → phasing →
+deferred → hooks → validation), always marked research-only until direction is
+chosen in `ROADMAP.md`/`DECISIONS.md`.
 
 ### Task-category mapping
 

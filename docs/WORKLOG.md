@@ -410,3 +410,8 @@ Chronological record of meaningful development events. Each entry records object
 - **Work.** Six parallel specialists, read-only: (A) auto-crop refinement (quad scoring, edge refinement, multi-frame fusion, confidence gating); (B) manual corner-adjust UX (drag-on-original pattern, loupe, keyboard steppers, warp-on-release); (C) auto-capture triggers (stability ring + countdown default-off, sharpness calibration-first); (D) illumination/shadow handling (clamped background-divide + gray-world pre-step; full removal deferred); (E) output enhancement modes (sticky 3-mode preference now, Readable gray later; Sauvola/auto-suggest deferred); (F) ecosystem guardrails (image+imageproc stay frozen, OpenCV ruled out, ML deferred, Shape Detection API unusable).
 - **Docs.** New `docs/SCANNER-V2.1-RESEARCH.md` (status: research only — nothing approved, scheduled, or promised); registered in `AGENTS.md` doc list (14→15 documents). No ROADMAP/DECISIONS commitments written; direction to be recorded once chosen.
 - **Verification.** No code changed; no verification runs needed.
+
+## 2026-10-01 — Research brief renamed + established as reusable pattern
+
+- Renamed `docs/SCANNER-V2.1-RESEARCH.md` → `docs/scanner-v2.1-research.md` (git mv, history preserved) per request for lowercase handoff naming.
+- Established the reusable convention: future research handoffs live as lowercase `docs/<topic>-research.md` with the same section shape; convention recorded in `AGENTS.md`, template note added to the brief itself. List entry updated, count stays 15 documents.
