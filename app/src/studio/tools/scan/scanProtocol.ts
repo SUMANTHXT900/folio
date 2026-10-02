@@ -5,12 +5,17 @@
  * v2 adds `detectOnly` to `process` (live guidance detects without
  * warping/encoding; the worker answers with status `detected`).
  *
+ * `rewrap` is additive under the same v2 (crop review re-warps with a
+ * caller quad; the worker answers with the existing result envelope at
+ * status `processed`).
+ *
  * Mirrors the `workerProtocol.ts` discipline: every message carries the
  * protocol version; malformed framing is ignored, never thrown. Bytes
  * cross as transferable `ArrayBuffer`s, never inside JSON.
  *
  * Message kinds:
- * - main → worker: `process` (one scan job).
+ * - main → worker: `process` (one scan job), `rewrap` (re-warp with a
+ *   caller-supplied quad).
  * - worker → main: `ready` (WASM initialized, accepts jobs),
  *   `status` (coarse honest phase — indeterminate, never fake %),
  *   `result` (terminal envelope + optional output bytes; `detected`
@@ -38,7 +43,29 @@ export interface ScanProcessRequest {
   detectOnly: boolean;
 }
 
-export type MainToScanWorker = ScanProcessRequest;
+/**
+ * One corner of a rewrap quad in FULL-RES capture pixel coordinates —
+ * the space of `result.corners` and the `warp_quad` input. Crop review
+ * edits detection corners in place and passes them back unchanged (no
+ * scaling).
+ */
+export interface ScanQuadPoint {
+  x: number;
+  y: number;
+}
+
+export interface ScanRewrapRequest {
+  protocol: number;
+  kind: 'rewrap';
+  /** Client job id (`scan-N`, adapter-monotonic). Identity, not a key. */
+  jobId: string;
+  /** Original full-res capture bytes. TRANSFERRED — the sender must not touch it after. */
+  bytes: ArrayBuffer;
+  /** User-adjusted quad in FULL-RES capture pixel coordinates (exactly 4). */
+  quad: ScanQuadPoint[];
+}
+
+export type MainToScanWorker = ScanProcessRequest | ScanRewrapRequest;
 
 export interface ScanReady {
   protocol: number;

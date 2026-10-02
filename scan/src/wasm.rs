@@ -24,6 +24,10 @@
 //! JPEG encoding do not (`status: "detected"`, `output: null`). The
 //! shutter always uses the full pipeline.
 //!
+//! `scan_process_with_quad` re-warps caller-supplied quads (crop review):
+//! same `processed` / `error` envelope shape, no `detect_only`, no
+//! `original` fallback. Corners stay in full-resolution capture pixels.
+//!
 //! "No document detected" is NOT an error: it returns status
 //! `"original"` with `output: null`, and the caller falls back to the
 //! input bytes it already holds. Only malformed inputs and internal
@@ -33,8 +37,10 @@ use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use crate::enhance::ScanMode;
-use crate::error::ScanErrorKind;
-use crate::pipeline::{scan_document, ScanRequest};
+use crate::error::{ScanError, ScanErrorKind};
+use crate::geometry::{order_corners, validate_quad, Point};
+use crate::pipeline::{scan_document, ScanRequest, MAX_OUTPUT_LONG_EDGE};
+use crate::warp::warp_to_jpeg;
 
 /// Installs readable panic messages; idempotent.
 #[wasm_bindgen]
@@ -134,6 +140,168 @@ pub fn scan_process(input: Vec<u8>, mode: &str, detect_only: bool) -> Result<JsV
         }
     };
     Ok(envelope(&output.0, output.1))
+}
+
+/// Re-warps owned image bytes with a caller-supplied quad (crop review).
+///
+/// `input`: same JPEG/PNG bytes as [`scan_process`] (ownership moves in).
+/// `quad`: four corners in FULL-RESOLUTION capture pixel coordinates —
+/// the same space as `result.corners` and the `warp_quad` input.
+/// `[{x, y} × 4]` (the worker's shape) or `[[x, y] × 4]` pairs (the
+/// glue's own corner shape) are accepted; anything else is an
+/// `invalid-input` error envelope.
+///
+/// The product scans in color only (no mode knob — the shutter's
+/// `Original` path), so this runs the identical warp→JPEG step the
+/// shutter runs for `Original` (same long-edge cap, same JPEG quality):
+/// behavior is byte-comparable with a shutter scan of the same quad,
+/// though callers must not assume byte-identity (detection rounding,
+/// encoder state).
+///
+/// Validation uses the existing [`ScanError`] path — never warps garbage:
+/// malformed/non-finite points and out-of-bounds corners are
+/// `InvalidInput`; degenerate quads (duplicates, non-convex winding via
+/// [`validate_quad`]) surface as the validator reports them. There is no
+/// `original` fallback here: the caller already holds the bytes.
+///
+/// Returns the `processed` envelope (`width`, `height`, `mode`,
+/// `corners` echoing the ordered quad, `confidence: 1.0` for the
+/// user-confirmed quad) plus the output JPEG bytes.
+#[wasm_bindgen]
+pub fn scan_process_with_quad(input: Vec<u8>, quad: JsValue) -> Result<JsValue, JsValue> {
+    match rewarp_document(&input, &quad) {
+        Ok((value, bytes)) => Ok(envelope(&value, Some(bytes))),
+        Err(err) => {
+            let code = match err.kind() {
+                ScanErrorKind::InvalidInput => "invalid-input",
+                ScanErrorKind::UnsupportedDimensions => "unsupported-dimensions",
+                ScanErrorKind::NoDocument => "no-document",
+                ScanErrorKind::WarpFailed => "warp-failed",
+                ScanErrorKind::EncodeFailed => "encode-failed",
+            };
+            Ok(envelope(
+                &json!({
+                    "status": "error",
+                    "code": code,
+                    "message": err.message(),
+                }),
+                None,
+            ))
+        }
+    }
+}
+
+/// Rewarp core: parse → decode → normalize → bounds → validate → warp.
+/// Each stage rejects through [`ScanError`]; the caller maps kinds to the
+/// envelope's `code` exactly like [`scan_process`].
+fn rewarp_document(
+    input: &[u8],
+    quad: &JsValue,
+) -> Result<(serde_json::Value, Vec<u8>), ScanError> {
+    let points = parse_rewarp_quad(quad)?;
+    let rgb = decode_rewarp_input(input)?;
+    let (w, h) = (rgb.width(), rgb.height());
+    // Normalize winding first: rejects duplicates/ambiguity, and lets
+    // the bounds + convexity gates below assume tl→tr→br→bl order.
+    let ordered = order_corners(points)?;
+    for (i, p) in ordered.corners().iter().enumerate() {
+        if !(0.0..=f64::from(w)).contains(&p.x) || !(0.0..=f64::from(h)).contains(&p.y) {
+            return Err(ScanError::new(
+                ScanErrorKind::InvalidInput,
+                "rewrap quad corner is outside the image bounds",
+            )
+            .with_details(format!("index={i} x={} y={} image={w}x{h}", p.x, p.y)));
+        }
+    }
+    // Same geometric gate detection passed (convexity, angles, area).
+    validate_quad(&ordered, f64::from(w), f64::from(h))?;
+    // Identical warp→JPEG step as the shutter's Original path.
+    let (bytes, out_w, out_h) = warp_to_jpeg(rgb.as_raw(), w, h, &ordered, MAX_OUTPUT_LONG_EDGE)?;
+    let corners = ordered
+        .corners()
+        .iter()
+        .map(|p| json!([round1(p.x), round1(p.y)]))
+        .collect::<Vec<_>>();
+    let value = json!({
+        "status": "processed",
+        "width": out_w,
+        "height": out_h,
+        "mode": "original",
+        "corners": corners,
+        // User-confirmed quad, not earned detection: fixed at full.
+        "confidence": 1.0,
+    });
+    Ok((value, bytes))
+}
+
+/// Parses a rewrap quad from JS: `[{x, y} × 4]` or `[[x, y] × 4]`.
+/// Non-finite coordinates degrade to `null` under `JSON.stringify`, so
+/// they (and every other non-numeric shape) fail here as `InvalidInput`.
+/// Degeneracy (duplicates, non-convex winding) is rejected downstream by
+/// `order_corners` / `validate_quad`, not here.
+fn parse_rewarp_quad(quad: &JsValue) -> Result<[Point; 4], ScanError> {
+    let invalid = |details: String| {
+        ScanError::new(
+            ScanErrorKind::InvalidInput,
+            "rewrap quad must be four {x, y} points in capture pixel coordinates",
+        )
+        .with_details(details)
+    };
+    let text = js_sys::JSON::stringify(quad)
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| invalid("quad is not JSON-serializable".to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|err| invalid(err.to_string()))?;
+    let entries = match value.as_array() {
+        Some(entries) if entries.len() == 4 => entries,
+        _ => return Err(invalid("expected an array of four points".to_string())),
+    };
+    let mut points = [Point::new(0.0, 0.0); 4];
+    for (i, entry) in entries.iter().enumerate() {
+        let (x, y) = if let Some(pair) = entry.as_array() {
+            if pair.len() != 2 {
+                return Err(invalid(format!("index={i}: expected [x, y]")));
+            }
+            (pair[0].as_f64(), pair[1].as_f64())
+        } else {
+            (
+                entry.get("x").and_then(|v| v.as_f64()),
+                entry.get("y").and_then(|v| v.as_f64()),
+            )
+        };
+        match (x, y) {
+            (Some(x), Some(y)) => points[i] = Point::new(x, y),
+            _ => return Err(invalid(format!("index={i}: non-numeric coordinates"))),
+        }
+    }
+    Ok(points)
+}
+
+/// Decodes rewrap input bytes to RGB8 (same acceptance as the shutter
+/// path: empty/undecodable/zero-size inputs are errors, never warped).
+fn decode_rewarp_input(input: &[u8]) -> Result<image::RgbImage, ScanError> {
+    if input.is_empty() {
+        return Err(ScanError::new(
+            ScanErrorKind::InvalidInput,
+            "scan input bytes must not be empty",
+        ));
+    }
+    let decoded = image::load_from_memory(input).map_err(|err| {
+        ScanError::new(
+            ScanErrorKind::InvalidInput,
+            "scan input is not a readable JPEG/PNG image",
+        )
+        .with_details(err.to_string())
+    })?;
+    let rgb = decoded.into_rgb8();
+    if rgb.width() == 0 || rgb.height() == 0 {
+        return Err(ScanError::new(
+            ScanErrorKind::UnsupportedDimensions,
+            "scan input has zero dimensions",
+        ));
+    }
+    Ok(rgb)
 }
 
 fn mode_name(mode: ScanMode) -> &'static str {

@@ -22,7 +22,13 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ScanWorkerClient, type ScanResult, type ScanWorkerFactory } from './scanWorkerClient';
+import {
+  ScanWorkerClient,
+  type ScanCorner,
+  type ScanRewrapResult,
+  type ScanResult,
+  type ScanWorkerFactory,
+} from './scanWorkerClient';
 
 /**
  * The hardened scanner has ONE capture experience (product decision):
@@ -55,6 +61,88 @@ export interface PendingReview {
   result: ScanResult;
 }
 
+/**
+ * Crop-verify rewarp plumbing (Agent B contract, consumed directly):
+ * `client.rewrapScan(original, quad)` re-warps the full-res capture with
+ * an operator-adjusted quad in full-res capture pixel coords and resolves
+ * `{bytes, width, height}`; it rejects when the glue refuses the quad.
+ * Both verify call sites treat rejection as "keep the auto result".
+ */
+type RewrapScanFn = (original: Uint8Array, quad: ScanCorner[]) => Promise<ScanRewrapResult>;
+
+function rewrapOf(client: ScanWorkerClient): RewrapScanFn {
+  return client.rewrapScan.bind(client);
+}
+
+/**
+ * Preview budget: debounced verify previews are downscaled to ≤800px on
+ * the long edge; full resolution crosses the worker only on Confirm.
+ */
+const VERIFY_PREVIEW_LONG_EDGE = 800;
+/** Confirm never hangs the verify screen: a slow rewarp falls back to the auto result. */
+const REWRAP_TIMEOUT_MS = 30000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let id = 0;
+  const timeout = new Promise<never>((_, reject) => {
+    id = window.setTimeout(() => reject(new Error('scan rewarp timed out')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(id));
+}
+
+/**
+ * Builds the debounced preview payload: downscales `original` on a
+ * canvas to the preview budget and maps the full-res quad into the
+ * downscaled space. Returns null when decode/encode is unavailable —
+ * the preview is best-effort, the overlay stays authoritative.
+ */
+async function downscaleForPreview(
+  original: File,
+  result: ScanResult,
+  quad: ScanCorner[],
+): Promise<{ bytes: Uint8Array; quad: ScanCorner[] } | null> {
+  if (typeof createImageBitmap !== 'function') return null;
+  let bitmap: ImageBitmap | null = null;
+  try {
+    bitmap = await createImageBitmap(original);
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    if (srcW <= 0 || srcH <= 0) return null;
+    const scale = Math.min(1, VERIFY_PREVIEW_LONG_EDGE / Math.max(srcW, srcH));
+    const dstW = Math.max(1, Math.round(srcW * scale));
+    const dstH = Math.max(1, Math.round(srcH * scale));
+    // Quad space is the capture pixel space (result.width/height); the
+    // decoded bitmap is the same frame, mapped defensively in case the
+    // glue ever reports dims from a different stage.
+    const toBitmapX = result.width > 0 ? srcW / result.width : 1;
+    const toBitmapY = result.height > 0 ? srcH / result.height : 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = dstW;
+    canvas.height = dstH;
+    const ctx = canvas.getContext('2d');
+    if (ctx === null) return null;
+    ctx.drawImage(bitmap, 0, 0, dstW, dstH);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.8),
+    );
+    canvas.width = 0;
+    canvas.height = 0;
+    if (blob === null) return null;
+    return {
+      bytes: new Uint8Array(await blob.arrayBuffer()),
+      quad: quad.map((p) => ({ x: p.x * toBitmapX * scale, y: p.y * toBitmapY * scale })),
+    };
+  } catch {
+    return null;
+  } finally {
+    try {
+      bitmap?.close();
+    } catch {
+      // Release best-effort.
+    }
+  }
+}
+
 export interface AcceptedScan {
   file: File;
   /** Pre-scan capture to retain (processed accepts only). */
@@ -73,6 +161,23 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const pendingRef = useRef<PendingReview | null>(null);
   pendingRef.current = pending;
 
+  // Crop-verify (Agent C surface): a processed capture opens the verify
+  // screen FIRST (original photo + adjustable quad overlay). Confirm
+  // re-warps at full resolution and drops into the existing review;
+  // Cancel keeps the auto result untouched. Fallback (`original`) and
+  // error reviews never open verify — their paths are unchanged.
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  const [verifyPreviewUrl, setVerifyPreviewUrl] = useState<string | null>(null);
+  const [verifyPreviewPending, setVerifyPreviewPending] = useState(false);
+  const [rewrapping, setRewrapping] = useState(false);
+  const verifyOpenRef = useRef(false);
+  verifyOpenRef.current = verifyOpen;
+  const verifyPreviewUrlRef = useRef<string | null>(null);
+  verifyPreviewUrlRef.current = verifyPreviewUrl;
+  // Latest-wins token for debounced previews: superseded responses never
+  // install (mirrors the review latest-wins discipline).
+  const previewTokenRef = useRef(0);
+
   const client = (): ScanWorkerClient => {
     if (clientRef.current === null) {
       clientRef.current =
@@ -85,6 +190,24 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     if (review?.previewUrl) URL.revokeObjectURL(review.previewUrl);
   }, []);
 
+  /** Releases the debounced preview URL (verify-session scoped). */
+  const revokeVerifyPreview = useCallback(() => {
+    if (verifyPreviewUrlRef.current !== null) {
+      URL.revokeObjectURL(verifyPreviewUrlRef.current);
+      verifyPreviewUrlRef.current = null;
+      setVerifyPreviewUrl(null);
+    }
+  }, []);
+
+  /** Leaves verify: invalidates in-flight previews, drops flags, frees the preview URL. Pending untouched. */
+  const closeVerify = useCallback(() => {
+    previewTokenRef.current += 1;
+    setVerifyPreviewPending(false);
+    setRewrapping(false);
+    setVerifyOpen(false);
+    revokeVerifyPreview();
+  }, [revokeVerifyPreview]);
+
   /** Invalidates the session: stale results dropped, worker terminated. */
   const reset = useCallback(() => {
     genRef.current += 1;
@@ -94,18 +217,20 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     setPending(null);
     setProcessing(false);
     setLiveDetected(false);
+    closeVerify();
     try {
       clientRef.current?.terminate();
     } catch {
       // Best effort.
     }
     clientRef.current = null;
-  }, [revokePending]);
+  }, [closeVerify, revokePending]);
 
   useEffect(() => {
     return () => {
       genRef.current += 1;
       revokePending(pendingRef.current);
+      revokeVerifyPreview();
       try {
         clientRef.current?.terminate();
       } catch {
@@ -113,7 +238,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       }
       clientRef.current = null;
     };
-  }, [revokePending]);
+  }, [revokePending, revokeVerifyPreview]);
 
   /**
    * Sends a full-res capture for processing. Previous pending review is
@@ -125,6 +250,8 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       const gen = genRef.current;
       revokePending(pendingRef.current);
       setPending(null);
+      // A new capture supersedes any verify session (latest wins).
+      closeVerify();
       setLiveDetected(false);
       setProcessing(true);
       void (async () => {
@@ -137,6 +264,14 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
               ? new Blob([result.bytes as unknown as BlobPart], { type: 'image/jpeg' })
               : original;
           setPending({ original, previewUrl: URL.createObjectURL(previewBlob), result });
+          // Processed captures verify FIRST (dims guard the contain
+          // mapping); fallback/error reviews keep their existing paths.
+          // The verify screen owns the original-photo URL itself
+          // (mount-scoped, revoked on unmount) — no hook URL here, so
+          // the review accept/discard accounting is unchanged.
+          if (result.status === 'processed' && result.width > 0 && result.height > 0) {
+            setVerifyOpen(true);
+          }
         } catch {
           if (genRef.current !== gen) return;
           setPending({
@@ -162,7 +297,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
         }
       })();
     },
-    [revokePending],
+    [closeVerify, revokePending],
   );
 
   /** Accepts the review: returns files for the page collection. */
@@ -172,6 +307,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       if (review === null) return null;
       revokePending(review);
       setPending(null);
+      closeVerify();
       if (useProcessed && review.result.status === 'processed' && review.result.bytes !== null) {
         return {
           file: new File([review.result.bytes as unknown as BlobPart], review.original.name, {
@@ -183,14 +319,15 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       }
       return { file: review.original, original: null, name: review.original.name };
     },
-    [revokePending],
+    [closeVerify, revokePending],
   );
 
   /** Discards the pending review (Retake): accepted pages untouched. */
   const discard = useCallback(() => {
     revokePending(pendingRef.current);
     setPending(null);
-  }, [revokePending]);
+    closeVerify();
+  }, [closeVerify, revokePending]);
 
   /**
    * Latest-frame live detection tick. Skipped while a live request, a
@@ -243,6 +380,129 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     })();
   }, []);
 
+  /**
+   * Debounced verify preview (CropEditor release / 300ms idle): re-warps
+   * a ≤800px downscale of the original with the adjusted quad and shows
+   * the result beside the overlay. Best-effort and latest-wins: failures
+   * or superseded responses leave the overlay authoritative. Full
+   * resolution crosses the worker only on Confirm.
+   */
+  const requestVerifyPreview = useCallback((quad: ScanCorner[]) => {
+    const review = pendingRef.current;
+    if (review === null || review.result.status !== 'processed' || quad.length !== 4) return;
+    if (!verifyOpenRef.current) return;
+    const worker = clientRef.current;
+    // No worker (reset raced the debounce): no preview, overlay only.
+    if (worker === null) return;
+    const rewrap = rewrapOf(worker);
+    const token = (previewTokenRef.current += 1);
+    const gen = genRef.current;
+    setVerifyPreviewPending(true);
+    void (async () => {
+      try {
+        const scaled = await downscaleForPreview(review.original, review.result, quad);
+        if (
+          scaled === null ||
+          previewTokenRef.current !== token ||
+          genRef.current !== gen ||
+          !verifyOpenRef.current
+        ) {
+          return;
+        }
+        const out = await rewrap(scaled.bytes, scaled.quad);
+        if (previewTokenRef.current !== token || genRef.current !== gen || !verifyOpenRef.current) {
+          return;
+        }
+        const url = URL.createObjectURL(
+          new Blob([out.bytes as unknown as BlobPart], { type: 'image/jpeg' }),
+        );
+        const prev = verifyPreviewUrlRef.current;
+        verifyPreviewUrlRef.current = url;
+        setVerifyPreviewUrl(url);
+        if (prev !== null) URL.revokeObjectURL(prev);
+      } catch {
+        // Preview is best-effort: the overlay stays authoritative.
+      } finally {
+        if (previewTokenRef.current === token && genRef.current === gen) {
+          setVerifyPreviewPending(false);
+        }
+      }
+    })();
+  }, []);
+
+  /**
+   * Verify Cancel/Back: returns to the existing review panel with the
+   * auto result untouched (Cancel is disabled while Confirm is in
+   * flight, so no race with the rewarp continuation).
+   */
+  const cancelVerify = useCallback(() => {
+    previewTokenRef.current += 1;
+    setVerifyPreviewPending(false);
+    revokeVerifyPreview();
+    setVerifyOpen(false);
+  }, [revokeVerifyPreview]);
+
+  /**
+   * Verify Confirm: re-warps the FULL-RES original with the adjusted
+   * quad and replaces the pending processed bytes, then drops into the
+   * existing review panel (unchanged semantics). Any failure — worker
+   * error, glue refusal, timeout — keeps the untouched auto result and
+   * still lands on the review. Generation-guarded like every other
+   * continuation.
+   */
+  const confirmVerify = useCallback(
+    (quad: ScanCorner[]) => {
+      const review = pendingRef.current;
+      if (review === null || review.result.status !== 'processed' || quad.length !== 4) return;
+      const worker = clientRef.current;
+      if (worker === null) {
+        // Worker gone (reset raced Confirm): keep the auto result.
+        cancelVerify();
+        return;
+      }
+      const rewrap = rewrapOf(worker);
+      const gen = genRef.current;
+      previewTokenRef.current += 1;
+      setVerifyPreviewPending(false);
+      setRewrapping(true);
+      void (async () => {
+        try {
+          // Fresh exact-range bytes: transfer neuters the buffer, so the
+          // retained original File is re-read (never a shared view).
+          const bytes = new Uint8Array(await review.original.arrayBuffer());
+          if (genRef.current !== gen) return;
+          const quadCopy = quad.map((p) => ({ x: p.x, y: p.y }));
+          const out = await withTimeout(rewrap(bytes, quadCopy), REWRAP_TIMEOUT_MS);
+          if (genRef.current !== gen) return;
+          const current = pendingRef.current;
+          if (current === null) return;
+          const url = URL.createObjectURL(
+            new Blob([out.bytes as unknown as BlobPart], { type: 'image/jpeg' }),
+          );
+          URL.revokeObjectURL(current.previewUrl);
+          setPending({
+            original: current.original,
+            previewUrl: url,
+            result: {
+              ...current.result,
+              bytes: out.bytes,
+              width: out.width,
+              height: out.height,
+              corners: quadCopy,
+            },
+          });
+        } catch {
+          // Rewarp failure keeps the auto result — verify still closes
+          // and the existing review shows what detection produced.
+        } finally {
+          // Stale (reset/discarded mid-flight): cleanup already ran.
+          if (genRef.current === gen) closeVerify();
+        }
+      })();
+    },
+    [cancelVerify, closeVerify],
+  );
+
   return {
     processing,
     pending,
@@ -253,5 +513,12 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     requestLive,
     reset,
     warm,
+    verifyOpen,
+    verifyPreviewUrl,
+    verifyPreviewPending,
+    rewrapping,
+    requestVerifyPreview,
+    confirmVerify,
+    cancelVerify,
   };
 }

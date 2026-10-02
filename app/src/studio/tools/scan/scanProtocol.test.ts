@@ -3,7 +3,7 @@
  * success/fallback/error distinction the UI branches on.
  */
 import { describe, expect, it } from 'vitest';
-import { SCAN_PROTOCOL_VERSION, parseScanMessage } from './scanProtocol';
+import { SCAN_PROTOCOL_VERSION, parseScanMessage, type ScanRewrapRequest } from './scanProtocol';
 
 describe('scanProtocol', () => {
   it('pins the protocol version', () => {
@@ -35,5 +35,25 @@ describe('scanProtocol', () => {
     expect(parseScanMessage({ protocol: 2, kind: 'nope' })).toBeNull();
     expect(parseScanMessage({ protocol: 2, kind: 'result', jobId: 'scan-1' })).toBeNull();
     expect(parseScanMessage({ protocol: 2, kind: 'fatal', jobId: null })).toBeNull();
+  });
+
+  it('carries rewrap additively under the same v2', () => {
+    // No version bump, no new worker→main shapes: rewrap reuses the
+    // existing result envelope (status `processed` + output bytes).
+    const rewrap: ScanRewrapRequest = {
+      protocol: SCAN_PROTOCOL_VERSION,
+      kind: 'rewrap',
+      jobId: 'scan-9',
+      bytes: new ArrayBuffer(3),
+      quad: [
+        { x: 10, y: 10 },
+        { x: 630, y: 10 },
+        { x: 630, y: 790 },
+        { x: 10, y: 790 },
+      ],
+    };
+    expect(rewrap.protocol).toBe(2);
+    expect(rewrap.kind).toBe('rewrap');
+    expect(rewrap.quad).toHaveLength(4);
   });
 });

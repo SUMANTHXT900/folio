@@ -215,3 +215,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** `Document::from_bytes` rejects empty input with `ErrorCode::InvalidInput` ("document bytes must not be empty"), matching the constructor to the wave-1 loader-caps reclassification (verified in `engine/src/core/document.rs`).
 - **Reason.** Rationale not recorded beyond consistency with the wave-1 loader-caps reclassification (see `docs/CHANGELOG.md` v1.9.0).
 - **Status.** Decided, implemented in wave-A (`e74e71b`); canonical re-verification pending (STATUS gate 2).
+
+## D29 — Crop-verify screen + detection recall upgrades (F-21 mitigations)
+
+- **Decision.** Processed captures land on a crop-verify screen first (original photo + draggable quad overlay seeded from auto corners, keyboard steppers, release-preview ≤800px, full-res rewarp on Confirm into the unchanged review panel); fallback auto-accept path untouched. Detection gains weighted quad scoring over largest-wins, grayscale-Canny fallback on empty candidate sets, and 5–8-gon acceptance through the unchanged validate + support gates (verified in `scan/src/detect.rs`, `scan/src/wasm.rs` rewrap entry, `app/src/studio/tools/scan/CropEditor.tsx`).
+- **Reason.** Auto-crop misses silently fall back to photos; manual correction previously impossible (D15 deferred it). Verification before accept keeps the review-before-accept invariant while making misses recoverable.
+- **Status.** Decided, implemented; field hit-rate validation pending (F-21 stays Active until real-device evidence).

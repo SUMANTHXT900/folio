@@ -30,16 +30,27 @@
  * Live guidance uses `detectOnly` process requests: detection only, no
  * warp/JPEG output bytes on the wire.
  *
+ * Crop review uses `rewrap` requests: the caller supplies the quad
+ * (edited detection corners, full-res capture pixels); the worker
+ * re-warps through `scan_process_with_quad` and answers with the same
+ * `result` envelope at status `processed` (or `error` when the quad is
+ * rejected — never a warp of garbage).
+ *
  * Cancellation follows Folio philosophy: the client terminates this
  * worker. A synchronous WASM call cannot observe cancellation mid-flight,
  * so there is no cooperative cancel inside a job — termination is the
  * mechanism and stale results are discarded client-side by job identity.
  */
 
-import init, { scan_init, scan_process } from '../../../../../scan/pkg/folio_scan.js';
+import init, {
+  scan_init,
+  scan_process,
+  scan_process_with_quad,
+} from '../../../../../scan/pkg/folio_scan.js';
 import {
   SCAN_PROTOCOL_VERSION,
   type MainToScanWorker,
+  type ScanRewrapRequest,
   type ScanWorkerToMain,
 } from './scanProtocol';
 
@@ -84,11 +95,15 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
   if (msg === null || typeof msg !== 'object' || msg.protocol !== SCAN_PROTOCOL_VERSION) {
     return; // Malformed framing is the client's bug; ignore, never throw.
   }
-  if (msg.kind !== 'process' || !ready) {
+  if ((msg.kind !== 'process' && msg.kind !== 'rewrap') || !ready) {
     fail(
-      msg.kind === 'process' ? msg.jobId : null,
+      msg.kind === 'process' || msg.kind === 'rewrap' ? msg.jobId : null,
       ready ? `unknown scan request kind` : 'scan WASM not initialized',
     );
+    return;
+  }
+  if (msg.kind === 'rewrap') {
+    runRewrap(msg);
     return;
   }
   const { jobId, buffer, mode, detectOnly } = msg;
@@ -140,3 +155,61 @@ self.onmessage = (ev: MessageEvent<MainToScanWorker>): void => {
     );
   }
 };
+
+/**
+ * Serves one crop-review rewarp: re-warps the original capture with the
+ * caller-supplied quad (full-res capture pixels) and answers with the
+ * existing `result` envelope (`processed` + output bytes, or `error`
+ * when the glue rejects the quad). Terminal posting mirrors the process
+ * path exactly (same exact-range guard, same transfer discipline).
+ */
+function runRewrap(msg: ScanRewrapRequest): void {
+  const { jobId, bytes, quad } = msg;
+  // Framing guard: content validation (finite/bounds/convex) lives in
+  // the glue, which answers with the error envelope; only a missing
+  // payload is a client bug (fatal, like the process path).
+  if (bytes === undefined || bytes === null || !Array.isArray(quad)) {
+    fail(typeof jobId === 'string' ? jobId : null, 'malformed rewrap request');
+    return;
+  }
+  try {
+    const input = new Uint8Array(bytes);
+    const envelope = scan_process_with_quad(input, quad) as {
+      result_json: string;
+      output: Uint8Array | null;
+    };
+    if (envelope.output !== null) {
+      const out = envelope.output;
+      // Exact-range guard (mirrors the process path): transfer only the
+      // job's own bytes. Ownership of the transferred buffer moves to
+      // main — this worker must not touch it after posting.
+      const exact = out.byteOffset === 0 && out.byteLength === out.buffer.byteLength;
+      const owned = exact ? out : out.slice();
+      post(
+        {
+          protocol: SCAN_PROTOCOL_VERSION,
+          kind: 'result',
+          jobId,
+          resultJson: envelope.result_json,
+          output: owned.buffer as ArrayBuffer,
+        },
+        [owned.buffer as ArrayBuffer],
+      );
+    } else {
+      post({
+        protocol: SCAN_PROTOCOL_VERSION,
+        kind: 'result',
+        jobId,
+        resultJson: envelope.result_json,
+      });
+    }
+  } catch (error) {
+    const context = `rewrap jobId=${jobId}`;
+    fail(
+      jobId,
+      error instanceof Error
+        ? `scan rewrap failed [${context}]: ${error.message}`
+        : `scan rewrap failed [${context}]`,
+    );
+  }
+}

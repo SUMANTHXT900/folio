@@ -44,6 +44,7 @@ import {
   prepareImportFile,
 } from './imageImport';
 import { useContainBox } from './scanViewport';
+import { CropEditor } from './scan/CropEditor';
 import { useScanProcessor } from './scan/useScanProcessor';
 
 /** Import state for the scanner's image-picker flow. */
@@ -1199,10 +1200,33 @@ export function CameraCapture({
               {scan.liveDetected ? 'Document detected — capture when ready' : 'Framing guide'}
             </span>
 
+            {/* Crop-verify: processed captures land here FIRST — the
+              original photo with an adjustable quad overlay. Confirm
+              re-warps at full resolution into the existing review below;
+              Cancel keeps the untouched auto result. Fallback captures
+              never reach this screen (they auto-accept as photos). */}
+            {scan.verifyOpen &&
+              scan.pending !== null &&
+              scan.pending.result.status === 'processed' && (
+                <CropEditor
+                  originalFile={scan.pending.original}
+                  imageWidth={scan.pending.result.width}
+                  imageHeight={scan.pending.result.height}
+                  initialCorners={scan.pending.result.corners}
+                  previewUrl={scan.verifyPreviewUrl}
+                  previewPending={scan.verifyPreviewPending}
+                  confirming={scan.rewrapping}
+                  onPreviewRequest={scan.requestVerifyPreview}
+                  onConfirm={scan.confirmVerify}
+                  onCancel={scan.cancelVerify}
+                />
+              )}
+
             {/* Review: pending scan decision. Session state only — nothing
               enters the page collection until Accept. Compact so the
-              viewport keeps maximum height while deciding. */}
-            {scan.pending !== null && (
+              viewport keeps maximum height while deciding. Hidden while
+              the crop-verify screen owns the decision. */}
+            {scan.pending !== null && !scan.verifyOpen && (
               <div className="rounded-2xl border border-brass-400/40 bg-paper-50 p-2.5 dark:bg-ink-800/60">
                 <div className="flex gap-2.5">
                   <img

@@ -246,6 +246,141 @@ describe('ScanWorkerClient', () => {
   });
 });
 
+describe('ScanWorkerClient rewrap', () => {
+  class RewrapFakeWorker extends FakeWorker {
+    lastRewrap(): {
+      jobId: string;
+      bytes: ArrayBuffer;
+      quad: Array<{ x: number; y: number }>;
+    } {
+      const found = this.posted.find(
+        (
+          p,
+        ): p is {
+          message: {
+            kind: string;
+            jobId: string;
+            bytes: ArrayBuffer;
+            quad: Array<{ x: number; y: number }>;
+          };
+          transfer?: unknown;
+        } =>
+          typeof p.message === 'object' &&
+          p.message !== null &&
+          (p.message as { kind?: string }).kind === 'rewrap',
+      );
+      if (found === undefined) throw new Error('no rewrap message posted');
+      return {
+        jobId: found.message.jobId,
+        bytes: found.message.bytes,
+        quad: found.message.quad,
+      };
+    }
+  }
+
+  const quad = (): Array<{ x: number; y: number }> => [
+    { x: 10, y: 10 },
+    { x: 630, y: 10 },
+    { x: 630, y: 790 },
+    { x: 10, y: 790 },
+  ];
+
+  function rewrapProcessedJson(): string {
+    return JSON.stringify({
+      status: 'processed',
+      width: 400,
+      height: 500,
+      mode: 'original',
+      corners: quad(),
+      confidence: 1.0,
+    });
+  }
+
+  it('posts kind rewrap with transferred bytes + quad and resolves bytes/dims', async () => {
+    const worker = new RewrapFakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.rewrapScan(new Uint8Array([1, 2, 3]), quad());
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastRewrap();
+    expect(new Uint8Array(req.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+    expect(req.quad).toEqual(quad());
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: rewrapProcessedJson(),
+      output: new Uint8Array([9, 9]).buffer,
+    });
+    const result = await done;
+    expect(result.bytes !== null && Array.from(result.bytes)).toEqual([9, 9]);
+    expect(result.width).toBe(400);
+    expect(result.height).toBe(500);
+  });
+
+  it('rejects with the envelope code when the glue refuses the quad', async () => {
+    const worker = new RewrapFakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.rewrapScan(new Uint8Array([1, 2, 3]), quad());
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastRewrap();
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: JSON.stringify({
+        status: 'error',
+        code: 'invalid-input',
+        message: 'rewrap quad corner is outside the image bounds',
+      }),
+    });
+    await expect(done).rejects.toMatchObject({ code: 'invalid-input' });
+  });
+
+  it('rejects malformed quads before posting (caller keeps its buffer)', async () => {
+    const worker = new RewrapFakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    await expect(client.rewrapScan(new Uint8Array([1]), [{ x: 0, y: 0 }])).rejects.toMatchObject({
+      code: 'SCAN_BAD_QUAD',
+    });
+    await expect(
+      client.rewrapScan(new Uint8Array([1]), [
+        { x: 10, y: 10 },
+        { x: Number.NaN, y: 10 },
+        { x: 630, y: 790 },
+        { x: 10, y: 790 },
+      ]),
+    ).rejects.toMatchObject({ code: 'SCAN_BAD_QUAD' });
+    expect(worker.posted).toHaveLength(0);
+  });
+
+  it('copies non-exact views so only the job bytes cross', async () => {
+    const worker = new RewrapFakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.rewrapScan(new Uint8Array([0, 1, 2, 3, 4]).subarray(1, 4), quad());
+    worker.deliver({ protocol: 2, kind: 'ready' });
+    const req = worker.lastRewrap();
+    expect(req.bytes.byteLength).toBe(3);
+    expect(new Uint8Array(req.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+    worker.deliver({
+      protocol: 2,
+      kind: 'result',
+      jobId: req.jobId,
+      resultJson: rewrapProcessedJson(),
+      output: new Uint8Array([1]).buffer,
+    });
+    const result = await done;
+    expect(result.width).toBe(400);
+  });
+
+  it('rejects pending rewraps on worker fatal', async () => {
+    const worker = new RewrapFakeWorker();
+    const client = new ScanWorkerClient(() => worker as unknown as Worker);
+    const done = client.rewrapScan(new Uint8Array([1, 2, 3]), quad());
+    worker.deliver({ protocol: 2, kind: 'fatal', jobId: null, message: 'wasm exploded' });
+    await expect(done).rejects.toMatchObject({ code: 'worker-fatal' });
+  });
+});
+
 describe('ScanWorkerClient hardening (IPC)', () => {
   it('ignores legacy status messages without hanging and counts them as dropped', async () => {
     const worker = new FakeWorker();

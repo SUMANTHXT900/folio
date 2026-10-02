@@ -195,6 +195,55 @@ async function bodyText(page) {
   return page.evaluate(() => document.body.innerText);
 }
 
+/**
+ * Crop-verify flow: a processed capture lands on the verify screen
+ * first — wait for it, count the corner handles, optionally exercise
+ * the drag + keyboard mechanics deterministically (synthetic pointer /
+ * keyboard events, no CDP-mouse flakiness), confirm, and wait for the
+ * existing review panel. Returns the handle count and whether the
+ * mechanics ran.
+ */
+async function confirmCropVerify(page, { exercise = false } = {}) {
+  await page.waitForFunction(() => document.querySelector('[data-crop-verify]') !== null, {
+    timeout: 120000,
+  });
+  const handles = await page.evaluate(() => document.querySelectorAll('[data-crop-handle]').length);
+  let interacted = false;
+  if (exercise && handles === 4) {
+    interacted = await page.evaluate(() => {
+      const tl = document.querySelector('[data-crop-handle="tl"]');
+      const tr = document.querySelector('[data-crop-handle="tr"]');
+      if (tl === null || tr === null) return false;
+      // Drag the top-left handle a small step (pointer path).
+      const r = tl.getBoundingClientRect();
+      const startX = r.x + r.width / 2;
+      const startY = r.y + r.height / 2;
+      tl.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: startY }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', {
+          bubbles: true,
+          clientX: startX + 20,
+          clientY: startY + 12,
+        }),
+      );
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      // Nudge the top-right handle with the keyboard (slider path).
+      tr.focus();
+      tr.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
+      return document.activeElement === tr;
+    });
+  }
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')].find((b) => b.textContent === 'Confirm crop')?.click();
+  });
+  await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
+    timeout: 120000,
+  });
+  return { handles, interacted };
+}
+
 async function main() {
   fs.mkdirSync(path.join(__dirname, 'after'), { recursive: true });
   // Downloads are captured in-page (see installDownloadCapture) — no OS
@@ -958,15 +1007,19 @@ async function main() {
       );
     };
     await scanWithCamera();
-    // Document mode (default): capture → processed review → accept.
+    // Document mode (default): capture → crop-verify (4 handles) → confirm → processed review → accept.
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
-      timeout: 120000,
-    });
+    const verify = await confirmCropVerify(page, { exercise: true });
+    check(
+      'images crop-verify shows 4 draggable corner handles',
+      verify.handles === 4,
+      `${verify.handles} handles`,
+    );
+    check('images crop handles respond to drag + keyboard', verify.interacted);
     check('images scan produces a processed review', true);
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
@@ -1048,9 +1101,7 @@ async function main() {
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
-      timeout: 120000,
-    });
+    await confirmCropVerify(page);
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
     });
@@ -1186,9 +1237,7 @@ async function main() {
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Scan ready'), {
-      timeout: 120000,
-    });
+    await confirmCropVerify(page);
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Use scan')?.click();
     });

@@ -7,6 +7,9 @@
  *   never touched after posting) and resolves a terminal `ScanResult`.
  *   `detectOnly` requests stop after detection (status `detected`, no
  *   output bytes); the shutter always runs the full pipeline.
+ * - `rewrapScan()` re-warps the original capture with a caller quad
+ *   (crop review) and resolves `{bytes, width, height}`; glue refusals
+ *   reject with the envelope's code.
  * - Generation safety (§5): every client owns a monotonic `epoch`,
  *   bumped by `terminate()`. Results from older epochs are DISCARDED —
  *   a stale scan can never create/update a page, replace a preview, or
@@ -53,6 +56,14 @@ export interface ScanResult {
   wallMs: number;
 }
 
+/** Re-warped capture (crop review): JPEG bytes plus output dimensions. */
+export interface ScanRewrapResult {
+  /** Re-warped JPEG bytes. Fresh buffer, owned by caller. */
+  bytes: Uint8Array;
+  width: number;
+  height: number;
+}
+
 interface Pending {
   resolve: (r: ScanResult) => void;
   reject: (e: Error) => void;
@@ -61,6 +72,18 @@ interface Pending {
   mode: ScanModeName;
   detectOnly: boolean;
   settled: boolean;
+  rewrap: false;
+}
+
+interface PendingRewrap {
+  resolve: (r: ScanRewrapResult) => void;
+  reject: (e: Error) => void;
+  startedAt: number;
+  epoch: number;
+  mode: ScanModeName;
+  detectOnly: boolean;
+  settled: boolean;
+  rewrap: true;
 }
 
 export interface ScanWorkerFactory {
@@ -94,6 +117,28 @@ function terminalError(
 }
 
 /**
+ * Guards a caller-supplied rewrap quad: exactly four finite {x, y}
+ * points. Rejected client-side BEFORE transfer so the caller keeps its
+ * buffer; the glue re-validates authoritatively (bounds, convexity).
+ */
+function isRewrapQuad(quad: unknown): quad is ScanCorner[] {
+  return (
+    Array.isArray(quad) &&
+    quad.length === 4 &&
+    quad.every((entry: unknown) => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const point = entry as { x?: unknown; y?: unknown };
+      return (
+        typeof point.x === 'number' &&
+        typeof point.y === 'number' &&
+        Number.isFinite(point.x) &&
+        Number.isFinite(point.y)
+      );
+    })
+  );
+}
+
+/**
  * Reads detection corners from an envelope. The WASM glue emits
  * `[[x, y], …]` pairs; `{x, y}` objects are accepted too (test doubles
  * and older fixtures). Anything that is not four readable points → null.
@@ -122,7 +167,7 @@ export class ScanWorkerClient {
   private failReason: string | null = null;
   private jobCounter = 0;
   private epoch = 0;
-  private pending = new Map<string, Pending>();
+  private pending = new Map<string, Pending | PendingRewrap>();
   /**
    * Silently-dropped worker messages (malformed framing, legacy `status`,
    * unknown/settled results, stale epochs). Diagnostic only — no UI reads
@@ -199,6 +244,7 @@ export class ScanWorkerClient {
         mode,
         detectOnly,
         settled: false,
+        rewrap: false,
       };
       this.pending.set(jobId, job);
       this.ensureWorker();
@@ -208,7 +254,9 @@ export class ScanWorkerClient {
         if (this.failReason !== null) {
           current.settled = true;
           this.pending.delete(jobId);
-          current.resolve(terminalError(jobId, mode, 'init-failed', this.failReason));
+          if (!current.rewrap) {
+            current.resolve(terminalError(jobId, mode, 'init-failed', this.failReason));
+          }
           return;
         }
         // Transfer: ownership moves to the worker; the caller must never
@@ -232,6 +280,83 @@ export class ScanWorkerClient {
             detectOnly: job.detectOnly,
           },
           [buffer],
+        );
+      });
+    });
+  }
+
+  /**
+   * Re-warps the ORIGINAL full-res capture with a caller-supplied quad
+   * (crop review). `quad` is four points in FULL-RES capture pixel
+   * coordinates — the space of `ScanResult.corners` (edit in place, pass
+   * back unchanged; no scaling).
+   *
+   * The input buffer is TRANSFERRED (neutered) like `process()`; the
+   * quad crosses as plain data. Resolves `{bytes, width, height}` on the
+   * glue's `processed` envelope; REJECTS when the glue refuses the quad
+   * (the rejection carries the envelope's code) or the worker fails.
+   * Quad shape problems are rejected BEFORE transfer so the caller keeps
+   * its buffer.
+   */
+  rewrapScan(original: Uint8Array, quad: ScanCorner[]): Promise<ScanRewrapResult> {
+    if (!isRewrapQuad(quad)) {
+      return Promise.reject(
+        Object.assign(new Error('scan rewrap rejected: quad must be four finite {x, y} points'), {
+          code: 'SCAN_BAD_QUAD',
+        }),
+      );
+    }
+    const jobId = `scan-${(this.jobCounter += 1)}`;
+    const epoch = this.epoch;
+    const startedAt = performance.now();
+    return new Promise<ScanRewrapResult>((resolve, reject) => {
+      const job: PendingRewrap = {
+        resolve,
+        reject,
+        startedAt,
+        epoch,
+        mode: 'original',
+        detectOnly: false,
+        settled: false,
+        rewrap: true,
+      };
+      this.pending.set(jobId, job);
+      this.ensureWorker();
+      this.whenReady(() => {
+        const current = this.pending.get(jobId);
+        if (current === undefined || current.settled) return;
+        if (this.failReason !== null) {
+          current.settled = true;
+          this.pending.delete(jobId);
+          current.reject(
+            Object.assign(
+              new Error(`scan rewrap ${jobId} failed: worker init failed (${this.failReason})`),
+              { code: 'init-failed' },
+            ),
+          );
+          return;
+        }
+        // Transfer: ownership moves to the worker; the caller must never
+        // touch `original` (or its buffer) after this line. Exact-range
+        // guard (mirrors `process()`): views over a larger buffer are
+        // copied to their exact range first so only the job's own bytes
+        // ever cross.
+        const exact =
+          original.byteOffset === 0 && original.byteLength === original.buffer.byteLength;
+        const bytes = (
+          exact
+            ? original.buffer
+            : original.buffer.slice(original.byteOffset, original.byteOffset + original.byteLength)
+        ) as ArrayBuffer;
+        this.worker?.postMessage(
+          {
+            protocol: SCAN_PROTOCOL_VERSION,
+            kind: 'rewrap',
+            jobId,
+            bytes,
+            quad: quad.map((point) => ({ x: point.x, y: point.y })),
+          },
+          [bytes],
         );
       });
     });
@@ -317,6 +442,10 @@ export class ScanWorkerClient {
     }
     job.settled = true;
     this.pending.delete(msg.jobId);
+    if (job.rewrap) {
+      this.finishRewrap(job, msg);
+      return;
+    }
     let parsed: {
       status?: string;
       width?: number;
@@ -399,6 +528,48 @@ export class ScanWorkerClient {
     });
   }
 
+  /**
+   * Settles a rewrap job from the existing result envelope. `processed`
+   * (with output bytes) resolves `{bytes, width, height}`; anything else
+   * — glue `error` envelopes, byte-less results, unreadable JSON —
+   * rejects with the envelope's code (never a `ScanResult` shape).
+   */
+  private finishRewrap(
+    job: PendingRewrap,
+    msg: Extract<ScanWorkerToMain, { kind: 'result' }>,
+  ): void {
+    let parsed: {
+      status?: string;
+      width?: number;
+      height?: number;
+      code?: string;
+      message?: string;
+    };
+    try {
+      parsed = JSON.parse(msg.resultJson) as typeof parsed;
+    } catch {
+      job.reject(
+        Object.assign(new Error(`scan rewrap ${msg.jobId} returned unreadable JSON`), {
+          code: 'bad-envelope',
+        }),
+      );
+      return;
+    }
+    if (parsed.status === 'processed' && msg.output !== undefined) {
+      job.resolve({
+        bytes: new Uint8Array(msg.output),
+        width: typeof parsed.width === 'number' ? parsed.width : 0,
+        height: typeof parsed.height === 'number' ? parsed.height : 0,
+      });
+      return;
+    }
+    const code = typeof parsed.code === 'string' ? parsed.code : 'unknown';
+    const message = typeof parsed.message === 'string' ? parsed.message : 'scan rewrap failed';
+    job.reject(
+      Object.assign(new Error(`scan rewrap ${msg.jobId} failed (${code}): ${message}`), { code }),
+    );
+  }
+
   private onFatal(jobId: string | null, message: string): void {
     // Fatal poisons this worker instance: fail pending jobs, drop the
     // worker so the next job recreates cleanly (never a broken worker).
@@ -414,7 +585,15 @@ export class ScanWorkerClient {
       if (job.settled) continue;
       job.settled = true;
       if (jobId === null || id === jobId) {
-        job.resolve(terminalError(id, job.mode, 'worker-fatal', message));
+        if (job.rewrap) {
+          job.reject(
+            Object.assign(new Error(`scan rewrap ${id} failed (worker fatal): ${message}`), {
+              code: 'worker-fatal',
+            }),
+          );
+        } else {
+          job.resolve(terminalError(id, job.mode, 'worker-fatal', message));
+        }
       } else {
         job.reject(
           Object.assign(new Error(`scan job ${id} aborted (worker fatal)`), {

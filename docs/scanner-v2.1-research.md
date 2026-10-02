@@ -232,8 +232,10 @@ stays opt-in, never default, never automatic.
 Researched and written by Hermes agent. Four parallel investigators traced
 code paths in `scan/src/detect.rs` + `scan/src/geometry.rs` against a field
 report: white pages on dark/uniform backgrounds detect only intermittently,
-well below the 70–80% hit rate the product needs. Research only — no
-implementation, no direction chosen.
+well below the 70–80% hit rate the product needs. Partially implemented
+2026-10-02 (D29: quad scoring, grayscale-Canny fallback, 5–8-gon acceptance,
+manual crop-verify with rewarp; see `docs/BUGS.md` F-21) — field hit-rate
+validation still open.
 
 ### Symptom
 
