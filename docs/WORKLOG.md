@@ -431,3 +431,4 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Scan 53/53, fmt/clippy clean; typecheck/lint/prettier clean; frontend 386/386 (35 files); scan WASM rebuilt; production build clean; canonical E2E **59/59 + 4 SKIP** (incl. 2 new crop-verify checks; corpus-absent skips as usual).
 - **Docs.** D29 (crop-verify + recall upgrades); F-21 status → mitigations implemented, field validation pending (stays Active — no real-device hit-rate evidence yet); this WORKLOG entry.
 - **Remaining.** Real-device hit-rate validation per §11 discriminator; illumination pre-step, Readable gray, multi-frame fusion, Rust sharpness gate (Phase 2, unapproved).
+- **Deploy.** Crop-verify build shipped to Cloudflare Pages `folio-pdf` branch `dev` (alias `https://dev-folio-pdf.pages.dev`).
