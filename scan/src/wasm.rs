@@ -216,6 +216,14 @@ fn rewarp_document(
     // Same geometric gate detection passed (convexity, angles, area).
     validate_quad(&ordered, f64::from(w), f64::from(h))?;
     // Identical warp→JPEG step as the shutter's Original path.
+    //
+    // Resolution fidelity: the FULL capture bytes were decoded above at
+    // native size and the warp runs at the quad's own native resolution
+    // (`warp::output_dims` caps at 2500 but never downscales a region
+    // below its own pixel count). No ≤800px verify-preview path exists
+    // in this crate — that downscale lives app-side and only feeds the
+    // debounced preview URL, never accepted pages — and the long-edge
+    // cap is applied exactly once, here.
     let (bytes, out_w, out_h) = warp_to_jpeg(rgb.as_raw(), w, h, &ordered, MAX_OUTPUT_LONG_EDGE)?;
     let corners = ordered
         .corners()

@@ -30,6 +30,12 @@ use crate::warp::{encode_jpeg, output_dims, warp_quad, warp_to_jpeg, SCAN_JPEG_Q
 
 /// Output long-edge cap (px). BENCHMARK CONSTRAINT for M1 (correction 5):
 /// tune after measuring real quality/memory, do not hard-code forever.
+///
+/// Applied exactly once per scan (shutter and crop-review rewarp paths)
+/// via [`crate::warp::output_dims`], which derives output size from the
+/// quad's own pixel dimensions and only ever shrinks — a small crop
+/// region keeps its native resolution (never downscaled toward the cap,
+/// never upscaled).
 pub const MAX_OUTPUT_LONG_EDGE: u32 = 2500;
 
 /// One scan job: owned bytes in, owned outputs out. No I/O, no globals.

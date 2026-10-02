@@ -10,8 +10,36 @@ use image::ImageEncoder;
 use crate::error::{ScanError, ScanErrorKind};
 use crate::geometry::{apply_homography, homography, invert_homography, Point, Quad};
 
-/// JPEG quality for scan output (matches the capture pipeline).
-pub const SCAN_JPEG_QUALITY: u8 = 92;
+/// JPEG quality for the scan re-encode (the SECOND JPEG generation of
+/// every scanned page).
+///
+/// JPEG-generation chain per scan (why 95/95):
+///
+/// ```text
+/// capture canvas clamp ≤2500px, JPEG q0.95   → generation 1 (app side)
+/// scan decode → warp → SCAN_JPEG_QUALITY 95  → generation 2 (here)
+/// images_to_pdf DCT-passthrough embed        → byte-identical (keep!)
+/// ```
+///
+/// Both generations land on glyph edges, where DCT ringing compounds:
+/// generation 2 re-encodes pixels that generation 1 already softened, so
+/// the two encodes must be tuned TOGETHER — 95/95. Bumping only one side
+/// leaves the other generation's mush visible; 95 sits near the JPEG
+/// quality knee where text-edge ringing drops sharply for a modest byte
+/// cost. The capture encode mirrors this constant at q0.95 (the canvas
+/// clamp encode on the app side); if one side ever moves, move both and
+/// rewrite this chain.
+///
+/// Cost (D17): scan output ≈ input JPEG size, so quality bumps grow the
+/// embedded page (and thus the PDF) modestly — an accepted trade for
+/// text fidelity, not a silent regression.
+///
+/// Chroma: the `image` crate's JPEG encoder is fixed 4:4:4 (no chroma
+/// subsampling — all components are encoded with 1×1 sampling factors,
+/// one 8×8 block each per MCU), which is exactly what text wants; there
+/// is no subsampling knob to turn. The browser-side capture JPEG is
+/// typically 4:2:0 (capture-side fact, not controllable here).
+pub const SCAN_JPEG_QUALITY: u8 = 95;
 
 /// Output dimensions from quad geometry: mean edge lengths scaled so the
 /// long edge respects `max_long_edge`. Never upscales beyond the source
@@ -129,6 +157,41 @@ mod tests {
         v
     }
 
+    /// Paints a solid rectangle into an RGB buffer (bounds-clipped).
+    fn bar(rgb: &mut [u8], w: u32, h: u32, rect: [u32; 4], v: u8) {
+        let [x0, y0, bw, bh] = rect;
+        for y in y0..(y0 + bh).min(h) {
+            for x in x0..(x0 + bw).min(w) {
+                let o = (y as usize * w as usize + x as usize) * 3;
+                rgb[o] = v;
+                rgb[o + 1] = v;
+                rgb[o + 2] = v;
+            }
+        }
+    }
+
+    /// Text-ish fixture: dense crisp glyph-block stems on white — the
+    /// DCT stress case behind the quality bump (the two-generation chain
+    /// compounds ringing on 2–5 px stems, i.e. type at reading size).
+    fn textish(w: u32, h: u32) -> Vec<u8> {
+        let mut rgb = vec![255u8; w as usize * h as usize * 3];
+        for (row, ly) in (20..h.saturating_sub(40)).step_by(44).enumerate() {
+            let mut x = 16;
+            let mut cell = 0usize;
+            while x + 24 < w {
+                let stem = 3 + (x + ly) % 3;
+                bar(&mut rgb, w, h, [x, ly, stem, 26], 20);
+                bar(&mut rgb, w, h, [x, ly + 11, 16, 3], 20);
+                if (cell + row).is_multiple_of(3) {
+                    bar(&mut rgb, w, h, [x + 12, ly + 4, stem, 22], 20);
+                }
+                x += 22;
+                cell += 1;
+            }
+        }
+        rgb
+    }
+
     #[test]
     fn identity_quad_reproduces_pixels() {
         let rgb = solid(16, 12, [11, 200, 30]);
@@ -214,6 +277,148 @@ mod tests {
         );
         // No upscale: small quads keep native size.
         assert_eq!(output_dims(&small, 2500), (200, 100));
+    }
+
+    #[test]
+    fn small_crop_keeps_native_resolution_under_cap() {
+        // Crop-review pin: an 800×1000 region of a 2500px capture must
+        // come out at the region's OWN pixel count — no downscale toward
+        // the cap (that is what mushed small crops' text), no fake
+        // upscale. The 2500 cap only ever shrinks regions whose native
+        // long edge exceeds it.
+        let (w, h) = (2500, 1250);
+        let rgb = solid(w, h, [250, 250, 250]);
+        let q = Quad::new(
+            Point::new(500.0, 100.0),
+            Point::new(1300.0, 100.0),
+            Point::new(1300.0, 1100.0),
+            Point::new(500.0, 1100.0),
+        );
+        assert_eq!(output_dims(&q, 2500), (800, 1000));
+        let (jpeg, out_w, out_h) = warp_to_jpeg(&rgb, w, h, &q, 2500).expect("warps");
+        assert_eq!((out_w, out_h), (800, 1000));
+        let back = image::load_from_memory(&jpeg).expect("decodes");
+        assert_eq!((back.width(), back.height()), (800, 1000));
+    }
+
+    #[test]
+    fn integer_offset_crop_reproduces_source_pixels_exactly() {
+        // Half-pixel convention pin (scale 1): output pixel (x, y) must
+        // sample the source pixel at (x+10, y) EXACTLY. An off-by-half in
+        // the `src ± 0.5` edge↔pixel-index convention would blend each
+        // column pair and fail this.
+        let (w, h) = (40, 40);
+        let mut rgb = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let o = (y as usize * w as usize + x as usize) * 3;
+                rgb[o] = (x * 4) as u8;
+                rgb[o + 1] = (y * 4) as u8;
+                rgb[o + 2] = 200;
+            }
+        }
+        let q = Quad::new(
+            Point::new(10.0, 0.0),
+            Point::new(30.0, 0.0),
+            Point::new(30.0, 40.0),
+            Point::new(10.0, 40.0),
+        );
+        let out = warp_quad(&rgb, w, h, &q, 20, 40).expect("warps");
+        for y in 0..40usize {
+            for x in 0..20usize {
+                let o = (y * 20 + x) * 3;
+                let s = (y * 40 + (x + 10)) * 3;
+                assert_eq!(&out[o..o + 3], &rgb[s..s + 3], "x={x} y={y}");
+            }
+        }
+    }
+
+    #[test]
+    fn half_pixel_offset_averages_adjacent_source_pixels() {
+        // The companion pin: a quad shifted +0.5 px must land each output
+        // column exactly BETWEEN two source columns (the rounded mean),
+        // not on either one. Dropping (or doubling) the `src.x - 0.5`
+        // correction snaps samples onto a single column and fails here.
+        let (w, h) = (40, 40);
+        let mut rgb = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let o = (y as usize * w as usize + x as usize) * 3;
+                rgb[o] = (x * 4) as u8;
+                rgb[o + 1] = (y * 4) as u8;
+                rgb[o + 2] = 200;
+            }
+        }
+        let q = Quad::new(
+            Point::new(10.5, 0.0),
+            Point::new(30.5, 0.0),
+            Point::new(30.5, 40.0),
+            Point::new(10.5, 40.0),
+        );
+        let out = warp_quad(&rgb, w, h, &q, 20, 40).expect("warps");
+        for y in 0..40usize {
+            for x in 0..20usize {
+                let o = (y * 20 + x) * 3;
+                let s0 = (y * 40 + (x + 10)) * 3;
+                let s1 = (y * 40 + (x + 11)) * 3;
+                for c in 0..3 {
+                    // Mean of two values 4 apart: always an integer, so
+                    // no half-way rounding boundary to flake on.
+                    let mean = ((u32::from(rgb[s0 + c]) + u32::from(rgb[s1 + c])) / 2) as u8;
+                    assert_eq!(out[o + c], mean, "x={x} y={y} c={c}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scan_jpeg_quality_is_95_by_two_generation_policy() {
+        // Policy pin: generation 2 of the JPEG chain. See the constant's
+        // comment for the 95/95 rationale. Changing this must be a
+        // conscious decision (and must move the capture encode with it).
+        assert_eq!(SCAN_JPEG_QUALITY, 95);
+    }
+
+    #[test]
+    fn quality_95_growth_over_92_is_modest_and_sharper() {
+        // D17 measurement pin on a text-ish fixture: q95 bytes stay
+        // close to q92 (modest PDF growth — accepted), while decoded
+        // error against the source fixture drops (less DCT ringing on
+        // glyph stems — the point of the bump). Sizes/errors print for
+        // `cargo test -- --nocapture` reporting.
+        let (w, h) = (900, 1200);
+        let src = textish(w, h);
+        let q92 = encode_jpeg(&src, w, h, 92).expect("encodes");
+        let q95 = encode_jpeg(&src, w, h, SCAN_JPEG_QUALITY).expect("encodes");
+        println!("text-ish {w}x{h}: q92={}B q95={}B", q92.len(), q95.len());
+        assert!(q95.len() >= q92.len(), "q95 must not shrink below q92");
+        assert!(
+            q95.len() * 2 <= q92.len() * 3,
+            "q95 growth must stay modest (q92={} q95={})",
+            q92.len(),
+            q95.len()
+        );
+        let mad = |jpeg: &[u8]| -> f64 {
+            let back = image::load_from_memory(jpeg).expect("decodes").into_rgb8();
+            let (sum, n) =
+                back.pixels()
+                    .zip(src.chunks_exact(3))
+                    .fold((0u64, 0u64), |(sum, n), (px, s)| {
+                        let d =
+                            px.0.iter()
+                                .zip(s)
+                                .map(|(a, b)| u64::from(*a).abs_diff(u64::from(*b)))
+                                .sum::<u64>();
+                        (sum + d, n + 3)
+                    });
+            sum as f64 / n as f64
+        };
+        let (e92, e95) = (mad(&q92), mad(&q95));
+        println!("mean abs error vs source: q92={e92:.4} q95={e95:.4}");
+        assert!(
+            e95 <= e92,
+            "q95 must not be softer than q92 (q92={e92} q95={e95})"
+        );
     }
 
     #[test]

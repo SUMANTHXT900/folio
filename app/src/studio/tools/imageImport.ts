@@ -11,7 +11,8 @@
  *
  * JPEGs already inside the pixel budget keep their ORIGINAL bytes —
  * no unnecessary recompression, no quality loss. Oversized images are
- * re-encoded once at the existing capture quality (~q0.92). PNGs are
+ * re-encoded once at the shared generation-1 quality (q0.95; the scan
+ * re-encode is q95 too — see `scan/src/warp.rs` `SCAN_JPEG_QUALITY`). PNGs are
  * ALWAYS converted to JPEG (white-filled, budget-clamped): the engine
  * embeds PNGs as uncompressed raw RGB, so a retained 2 MB screenshot
  * would become ~15 MB in the PDF (real-phone report: 100 MB+ outputs
@@ -28,8 +29,11 @@
 /** Working long edge for imported images (engineering constant). */
 export const MAX_IMPORT_LONG_EDGE = 2500;
 
-/** JPEG quality for normalized imports (matches capture path). */
-export const IMPORT_JPEG_QUALITY = 0.92;
+/** Generation-1 JPEG quality (import normalization + scan captures).
+ *  0.95 keeps text legible through the scan chain's second generation
+ *  (`scan/src/warp.rs` re-encodes at q95); +~16% bytes on re-encoded
+ *  files only, which D17 DCT-passthrough turns into PDF size ≈ JPEG size. */
+export const IMPORT_JPEG_QUALITY = 0.95;
 
 export interface ImageDimensions {
   width: number;

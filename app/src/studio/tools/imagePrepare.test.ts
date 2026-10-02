@@ -134,7 +134,7 @@ describe('browserImageRenderer JPEG-out (5-2)', () => {
     return { canvas, ctx, calls };
   }
 
-  it('white-fills before drawing and encodes JPEG at q0.92', async () => {
+  it('white-fills before drawing and encodes JPEG at q0.95', async () => {
     const { canvas, ctx, calls } = stubCanvas();
     vi.spyOn(document, 'createElement').mockReturnValue(canvas as unknown as HTMLElement);
     const close = vi.fn();
@@ -156,7 +156,7 @@ describe('browserImageRenderer JPEG-out (5-2)', () => {
     const drawAt = calls.indexOf('drawImage');
     expect(fillAt).toBeGreaterThanOrEqual(0);
     expect(drawAt).toBeGreaterThan(fillAt);
-    expect(calls).toContain('toBlob:image/jpeg:0.92');
+    expect(calls).toContain('toBlob:image/jpeg:0.95');
     expect(close).toHaveBeenCalledTimes(1);
   });
 });

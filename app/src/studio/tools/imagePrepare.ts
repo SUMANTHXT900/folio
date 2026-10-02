@@ -5,7 +5,8 @@
  * - Unrotated pages take the zero-copy direct path: raw file bytes are
  *   forwarded untouched (engine EXIF/DPI handling applies as before).
  * - Rotated pages are decoded to a canvas, rotated, and re-encoded as
- *   JPEG (white-filled, q0.92) REGARDLESS of source format. PNG sources
+ *   JPEG (white-filled, q0.95 — same generation-1 quality as capture/import)
+ *   REGARDLESS of source format. PNG sources
  *   must not stay PNG here: the engine embeds PNGs as uncompressed raw
  *   RGB, so a rotated screenshot would balloon ~8× versus its JPEG
  *   encoding (5-2). The engine sniffs content magic (not extensions) to
@@ -81,7 +82,7 @@ export const browserImageRenderer: ImageRenderer = {
       ctx.translate(canvas.width / 2, canvas.height / 2);
       ctx.rotate((degrees * Math.PI) / 180);
       ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, 0.92));
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, 0.95));
       canvas.width = 0;
       canvas.height = 0;
       if (blob === null) throw new Error('Image re-encode failed during rotation.');

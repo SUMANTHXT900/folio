@@ -1,24 +1,38 @@
 /**
- * Scan processor hook: capture → worker → review state machine for the
- * document scanner (M3).
+ * Scan processor hook: capture → worker → REVIEW QUEUE for the document
+ * scanner.
+ *
+ * Capture mode is interruption-free by design (real-user complaint,
+ * 2026-10-02): the shutter enqueues a capture, one background detect
+ * job runs ("brief processing"), and the capture lands in the queue as a
+ * File handle + detect metadata + one preview URL — no modal, no
+ * per-capture review panel, no crop editor inline under the viewfinder.
+ * The queue is reviewed later, ONE page at a time, in the full-screen
+ * review queue (see `CropEditor.tsx`): "Use crop" (full-res rewrap →
+ * commit processed page), "Use original" (commit as photo), "Discard"
+ * (drop). Unreviewed entries at any scanner exit commit as originals.
  *
  * Owns NO pixels in React state — only handles, URLs, and result
- * metadata. One `ScanWorkerClient` per hook instance (lazy WASM load on
- * first processing request — or earlier via `warm()` at camera start,
- * so init overlaps viewfinder startup instead of the first live tick —
+ * metadata. The queue never holds decoded bytes: processed output bytes
+ * are dropped after metadata extraction; every committed page is rebuilt
+ * from the retained original File (rewrap) or committed as that File.
+ * One `ScanWorkerClient` per hook instance (lazy WASM load on first
+ * processing request — or earlier via `warm()` at camera start, so init
+ * overlaps viewfinder startup instead of the first live tick / shutter —
  * terminated on reset/unmount).
  *
  * Generation safety: every async continuation checks the session
- * generation. `reset()` (Done / unmount / camera switch) bumps it and
- * terminates the worker — stale results are dropped before they can
- * create pages, replace previews, or resurrect sessions. Rapid captures
- * discard the previous pending review (latest wins).
+ * generation (and an alive flag on unmount). `reset()` (Done / unmount /
+ * camera switch with `keepQueue`) bumps it and terminates the worker —
+ * stale results are dropped before they can create entries, replace
+ * previews, or resurrect sessions. Rapid captures queue EVERY capture in
+ * order (never latest-wins: the queue is the review backlog).
  *
  * Live detection: `requestLive()` sends the LATEST frame only through
  * the detect-only path (status `detected`, no warp/encode, no bytes);
- * calls while a live request, capture scan, or review is active are
- * skipped (no queue of stale frames). Live corners are guidance ONLY —
- * the shutter always runs a fresh full-resolution detection.
+ * calls while a live request is in flight are skipped (no queue of stale
+ * frames). Live corners are guidance ONLY — the shutter always runs a
+ * fresh full-resolution detection.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -26,7 +40,6 @@ import {
   ScanWorkerClient,
   type ScanCorner,
   type ScanRewrapResult,
-  type ScanResult,
   type ScanWorkerFactory,
 } from './scanWorkerClient';
 
@@ -53,12 +66,45 @@ const WARMUP_PNG = new Uint8Array([
   0xae, 0x42, 0x60, 0x82,
 ]);
 
-export interface PendingReview {
-  /** Original full-res capture (retained for Use original / retry). */
+/**
+ * Detect metadata for a queued capture. Deliberately slimmer than
+ * `ScanResult`: NO output bytes (memory discipline — the queue holds
+ * File handles + metadata only) and the width/height are the FULL-RES
+ * CAPTURE pixel dims (the quad coordinate space for rewrap), never the
+ * worker's warp-output dims.
+ */
+export interface ScanEntryMeta {
+  /** Pipeline verdict for the capture (`detected` is live-only). */
+  status: 'processed' | 'original' | 'error';
+  /** Full-res capture pixel dims — the quad coordinate space. */
+  width: number;
+  height: number;
+  /** Auto-detected corners in capture pixels (processed only). */
+  corners: ScanCorner[] | null;
+}
+
+/** One unreviewed capture in the review queue. */
+export interface ScanQueueEntry {
+  id: number;
+  /** Original full-res capture (File handle — never decoded into state). */
   original: File;
-  /** Review preview URL (processed bytes, or original on fallback/error). */
+  /** Object URL of the original photo (strip thumb + queue page). */
   previewUrl: string;
-  result: ScanResult;
+  meta: ScanEntryMeta;
+}
+
+/** A queue decision resolved into a page-collection commit. */
+export interface ScanCommit {
+  file: File;
+  /** Pre-scan capture to retain (cropped commits only). */
+  original: File | null;
+  name: string;
+}
+
+/** "Use crop" outcome: `applied` is false when the rewrap failed and the photo committed instead. */
+export interface CropOutcome {
+  commit: ScanCommit;
+  applied: boolean;
 }
 
 /**
@@ -66,7 +112,8 @@ export interface PendingReview {
  * `client.rewrapScan(original, quad)` re-warps the full-res capture with
  * an operator-adjusted quad in full-res capture pixel coords and resolves
  * `{bytes, width, height}`; it rejects when the glue refuses the quad.
- * Both verify call sites treat rejection as "keep the auto result".
+ * Both call sites treat rejection as "commit the photo" (never a lost
+ * page).
  */
 type RewrapScanFn = (original: Uint8Array, quad: ScanCorner[]) => Promise<ScanRewrapResult>;
 
@@ -75,11 +122,11 @@ function rewrapOf(client: ScanWorkerClient): RewrapScanFn {
 }
 
 /**
- * Preview budget: debounced verify previews are downscaled to ≤800px on
- * the long edge; full resolution crosses the worker only on Confirm.
+ * Preview budget: debounced queue previews are downscaled to ≤800px on
+ * the long edge; full resolution crosses the worker only on "Use crop".
  */
 const VERIFY_PREVIEW_LONG_EDGE = 800;
-/** Confirm never hangs the verify screen: a slow rewarp falls back to the auto result. */
+/** "Use crop" never hangs the queue: a slow rewarp falls back to the photo. */
 const REWRAP_TIMEOUT_MS = 30000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -93,12 +140,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 /**
  * Builds the debounced preview payload: downscales `original` on a
  * canvas to the preview budget and maps the full-res quad into the
- * downscaled space. Returns null when decode/encode is unavailable —
- * the preview is best-effort, the overlay stays authoritative.
+ * downscaled space. `dims` is the capture pixel space (the quad space —
+ * NOT the worker's warp-output dims). Returns null when decode/encode is
+ * unavailable — the preview is best-effort, the overlay stays
+ * authoritative.
  */
 async function downscaleForPreview(
   original: File,
-  result: ScanResult,
+  dims: { width: number; height: number },
   quad: ScanCorner[],
 ): Promise<{ bytes: Uint8Array; quad: ScanCorner[] } | null> {
   if (typeof createImageBitmap !== 'function') return null;
@@ -111,11 +160,11 @@ async function downscaleForPreview(
     const scale = Math.min(1, VERIFY_PREVIEW_LONG_EDGE / Math.max(srcW, srcH));
     const dstW = Math.max(1, Math.round(srcW * scale));
     const dstH = Math.max(1, Math.round(srcH * scale));
-    // Quad space is the capture pixel space (result.width/height); the
-    // decoded bitmap is the same frame, mapped defensively in case the
-    // glue ever reports dims from a different stage.
-    const toBitmapX = result.width > 0 ? srcW / result.width : 1;
-    const toBitmapY = result.height > 0 ? srcH / result.height : 1;
+    // Quad space is the capture pixel space; the decoded bitmap is the
+    // same frame, mapped defensively in case dims ever report a
+    // different stage.
+    const toBitmapX = dims.width > 0 ? srcW / dims.width : 1;
+    const toBitmapY = dims.height > 0 ? srcH / dims.height : 1;
     const canvas = document.createElement('canvas');
     canvas.width = dstW;
     canvas.height = dstH;
@@ -143,39 +192,38 @@ async function downscaleForPreview(
   }
 }
 
-export interface AcceptedScan {
-  file: File;
-  /** Pre-scan capture to retain (processed accepts only). */
-  original: File | null;
-  name: string;
-}
-
 export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const clientRef = useRef<ScanWorkerClient | null>(null);
   const genRef = useRef(0);
+  const aliveRef = useRef(true);
   const livePendingRef = useRef(false);
   const warmedGenRef = useRef(-1);
   const [processing, setProcessing] = useState(false);
-  const [pending, setPending] = useState<PendingReview | null>(null);
+  const processingJobsRef = useRef(0);
+  const [queued, setQueued] = useState<ScanQueueEntry[]>([]);
+  // The queue's imperative source of truth: mutations happen in event
+  // handlers and async continuations, and follow-up calls (commit →
+  // advance → exit drain) run BEFORE React re-renders. A render-lagged
+  // ref mirror would make `drainQueue()` re-commit an entry that
+  // `useOriginal` had already committed (E2E-caught double page). So
+  // every mutation updates the ref SYNCHRONOUSLY and state mirrors it
+  // for rendering. Never mutated inside a state updater (StrictMode
+  // double-invokes those).
+  const queuedRef = useRef<ScanQueueEntry[]>([]);
+  const commitQueued = useCallback((next: ScanQueueEntry[]) => {
+    queuedRef.current = next;
+    setQueued(next);
+  }, []);
   const [liveDetected, setLiveDetected] = useState(false);
-  const pendingRef = useRef<PendingReview | null>(null);
-  pendingRef.current = pending;
+  const nextIdRef = useRef(1);
 
-  // Crop-verify (Agent C surface): a processed capture opens the verify
-  // screen FIRST (original photo + adjustable quad overlay). Confirm
-  // re-warps at full resolution and drops into the existing review;
-  // Cancel keeps the auto result untouched. Fallback (`original`) and
-  // error reviews never open verify — their paths are unchanged.
-  const [verifyOpen, setVerifyOpen] = useState(false);
-  const [verifyPreviewUrl, setVerifyPreviewUrl] = useState<string | null>(null);
-  const [verifyPreviewPending, setVerifyPreviewPending] = useState(false);
-  const [rewrapping, setRewrapping] = useState(false);
-  const verifyOpenRef = useRef(false);
-  verifyOpenRef.current = verifyOpen;
-  const verifyPreviewUrlRef = useRef<string | null>(null);
-  verifyPreviewUrlRef.current = verifyPreviewUrl;
-  // Latest-wins token for debounced previews: superseded responses never
-  // install (mirrors the review latest-wins discipline).
+  // Debounced crop preview (queue-page scoped): latest-wins token, one
+  // preview URL at a time, invalidated on page advance / commit / exit.
+  const [cropPreviewUrl, setCropPreviewUrl] = useState<string | null>(null);
+  const [cropPreviewPending, setCropPreviewPending] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const cropPreviewUrlRef = useRef<string | null>(null);
+  cropPreviewUrlRef.current = cropPreviewUrl;
   const previewTokenRef = useRef(0);
 
   const client = (): ScanWorkerClient => {
@@ -186,51 +234,71 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     return clientRef.current;
   };
 
-  const revokePending = useCallback((review: PendingReview | null) => {
-    if (review?.previewUrl) URL.revokeObjectURL(review.previewUrl);
-  }, []);
-
-  /** Releases the debounced preview URL (verify-session scoped). */
-  const revokeVerifyPreview = useCallback(() => {
-    if (verifyPreviewUrlRef.current !== null) {
-      URL.revokeObjectURL(verifyPreviewUrlRef.current);
-      verifyPreviewUrlRef.current = null;
-      setVerifyPreviewUrl(null);
-    }
-  }, []);
-
-  /** Leaves verify: invalidates in-flight previews, drops flags, frees the preview URL. Pending untouched. */
-  const closeVerify = useCallback(() => {
+  /** Releases the debounced preview URL (queue-page scoped). */
+  const revokeCropPreview = useCallback(() => {
     previewTokenRef.current += 1;
-    setVerifyPreviewPending(false);
-    setRewrapping(false);
-    setVerifyOpen(false);
-    revokeVerifyPreview();
-  }, [revokeVerifyPreview]);
-
-  /** Invalidates the session: stale results dropped, worker terminated. */
-  const reset = useCallback(() => {
-    genRef.current += 1;
-    livePendingRef.current = false;
-    warmedGenRef.current = -1;
-    revokePending(pendingRef.current);
-    setPending(null);
-    setProcessing(false);
-    setLiveDetected(false);
-    closeVerify();
-    try {
-      clientRef.current?.terminate();
-    } catch {
-      // Best effort.
+    setCropPreviewPending(false);
+    if (cropPreviewUrlRef.current !== null) {
+      URL.revokeObjectURL(cropPreviewUrlRef.current);
+      cropPreviewUrlRef.current = null;
+      setCropPreviewUrl(null);
     }
-    clientRef.current = null;
-  }, [closeVerify, revokePending]);
+  }, []);
 
-  useEffect(() => {
-    return () => {
+  /** Removes one entry and revokes its preview URL (advance/discard). */
+  const removeEntry = useCallback(
+    (id: number) => {
+      const entry = queuedRef.current.find((e) => e.id === id);
+      if (entry !== undefined) URL.revokeObjectURL(entry.previewUrl);
+      commitQueued(queuedRef.current.filter((e) => e.id !== id));
+      revokeCropPreview();
+    },
+    [commitQueued, revokeCropPreview],
+  );
+
+  /** Drops every entry (queue exit / full reset), revoking all preview URLs. */
+  const clearQueue = useCallback(() => {
+    for (const entry of queuedRef.current) URL.revokeObjectURL(entry.previewUrl);
+    commitQueued([]);
+    revokeCropPreview();
+  }, [commitQueued, revokeCropPreview]);
+
+  /**
+   * Invalidates the session: stale results dropped, worker terminated.
+   * `keepQueue` preserves already-queued captures across a camera switch
+   * (the shots survive the hardware restart; only in-flight jobs die).
+   */
+  const reset = useCallback(
+    (opts?: { keepQueue?: boolean }) => {
       genRef.current += 1;
-      revokePending(pendingRef.current);
-      revokeVerifyPreview();
+      livePendingRef.current = false;
+      warmedGenRef.current = -1;
+      processingJobsRef.current = 0;
+      setProcessing(false);
+      setApplying(false);
+      setLiveDetected(false);
+      if (opts?.keepQueue !== true) clearQueue();
+      else revokeCropPreview();
+      try {
+        clientRef.current?.terminate();
+      } catch {
+        // Best effort.
+      }
+      clientRef.current = null;
+    },
+    [clearQueue, revokeCropPreview],
+  );
+
+  // Alive flag: guards post-unmount continuations. It MUST be restored
+  // on mount — React StrictMode double-invokes effects (mount → cleanup
+  // → mount), so a cleanup-only flag would stay dead forever and every
+  // queued capture would be silently dropped (real bug, E2E-caught).
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      genRef.current += 1;
+      clearQueue();
       try {
         clientRef.current?.terminate();
       } catch {
@@ -238,100 +306,217 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
       }
       clientRef.current = null;
     };
-  }, [revokePending, revokeVerifyPreview]);
+  }, [clearQueue]);
 
   /**
-   * Sends a full-res capture for processing. Previous pending review is
-   * discarded (latest wins). Resolves into review state — never directly
-   * into the page collection.
+   * Shutter path: queues a capture immediately (File handle + thumb)
+   * while ONE background detect job fills in the metadata ("brief
+   * processing"). Output bytes are dropped after metadata extraction —
+   * the queue never holds pixels. Generation- and alive-guarded: a
+   * result arriving after reset/unmount never creates an entry.
    */
-  const processCapture = useCallback(
-    (original: File) => {
+  const enqueueCapture = useCallback(
+    (original: File, dims: { width: number; height: number }) => {
       const gen = genRef.current;
-      revokePending(pendingRef.current);
-      setPending(null);
-      // A new capture supersedes any verify session (latest wins).
-      closeVerify();
-      setLiveDetected(false);
+      // Capture-order id assigned at shutter time: even if detect jobs
+      // resolve out of order, the queue (and strip) stay in shooting order.
+      const id = nextIdRef.current++;
+      processingJobsRef.current += 1;
       setProcessing(true);
+      const install = (meta: ScanEntryMeta) => {
+        commitQueued(
+          [
+            ...queuedRef.current,
+            { id, original, previewUrl: URL.createObjectURL(original), meta },
+          ].sort((a, b) => a.id - b.id),
+        );
+      };
       void (async () => {
         try {
           const bytes = new Uint8Array(await original.arrayBuffer());
           const result = await client().process(bytes, CORE_MODE);
-          if (genRef.current !== gen) return; // Stale: drop silently.
-          const previewBlob =
-            result.status === 'processed' && result.bytes !== null
-              ? new Blob([result.bytes as unknown as BlobPart], { type: 'image/jpeg' })
-              : original;
-          setPending({ original, previewUrl: URL.createObjectURL(previewBlob), result });
-          // Processed captures verify FIRST (dims guard the contain
-          // mapping); fallback/error reviews keep their existing paths.
-          // The verify screen owns the original-photo URL itself
-          // (mount-scoped, revoked on unmount) — no hook URL here, so
-          // the review accept/discard accounting is unchanged.
-          if (result.status === 'processed' && result.width > 0 && result.height > 0) {
-            setVerifyOpen(true);
-          }
-        } catch {
-          if (genRef.current !== gen) return;
-          setPending({
-            original,
-            previewUrl: URL.createObjectURL(original),
-            result: {
-              status: 'error',
-              jobId: 'local',
-              width: 0,
-              height: 0,
-              mode: CORE_MODE,
-              corners: null,
-              confidence: 0,
-              reason: null,
-              code: 'scan-failed',
-              message: 'Scan processing failed.',
-              bytes: null,
-              wallMs: 0,
-            },
+          if (!aliveRef.current || genRef.current !== gen) return; // Stale: drop silently.
+          install({
+            status:
+              result.status === 'processed' || result.status === 'original'
+                ? result.status
+                : 'error',
+            // Quad space is the CAPTURE pixel space (the caller's
+            // dims). The worker reports warp-OUTPUT dims on
+            // processed results — never seed the quad from those.
+            width: dims.width > 0 ? dims.width : result.width,
+            height: dims.height > 0 ? dims.height : result.height,
+            corners: result.corners,
           });
+        } catch {
+          // Worker failure: the capture still queues as a croppable
+          // photo (error metadata → 90% inset seed), never a lost shot.
+          if (!aliveRef.current || genRef.current !== gen) return;
+          install({ status: 'error', width: dims.width, height: dims.height, corners: null });
         } finally {
-          if (genRef.current === gen) setProcessing(false);
+          processingJobsRef.current -= 1;
+          if (aliveRef.current && genRef.current === gen && processingJobsRef.current <= 0) {
+            setProcessing(false);
+          }
         }
       })();
     },
-    [closeVerify, revokePending],
+    [commitQueued],
   );
-
-  /** Accepts the review: returns files for the page collection. */
-  const accept = useCallback(
-    (useProcessed: boolean): AcceptedScan | null => {
-      const review = pendingRef.current;
-      if (review === null) return null;
-      revokePending(review);
-      setPending(null);
-      closeVerify();
-      if (useProcessed && review.result.status === 'processed' && review.result.bytes !== null) {
-        return {
-          file: new File([review.result.bytes as unknown as BlobPart], review.original.name, {
-            type: 'image/jpeg',
-          }),
-          original: review.original,
-          name: review.original.name,
-        };
-      }
-      return { file: review.original, original: null, name: review.original.name };
-    },
-    [closeVerify, revokePending],
-  );
-
-  /** Discards the pending review (Retake): accepted pages untouched. */
-  const discard = useCallback(() => {
-    revokePending(pendingRef.current);
-    setPending(null);
-    closeVerify();
-  }, [closeVerify, revokePending]);
 
   /**
-   * Latest-frame live detection tick. Skipped while a live request, a
-   * capture scan, or a review is active — never queued.
+   * "Use crop": re-warps the FULL-RES original with the operator quad
+   * and commits the processed page (original retained per scanStore
+   * rules). Any failure — worker error, glue refusal, timeout — commits
+   * the photo instead (never a lost page) with `applied: false`.
+   * Generation-guarded like every other continuation.
+   */
+  const useCrop = useCallback(
+    async (id: number, quad: ScanCorner[]): Promise<CropOutcome | null> => {
+      const entry = queuedRef.current.find((e) => e.id === id);
+      if (entry === undefined || quad.length !== 4) return null;
+      const worker = clientRef.current;
+      if (worker === null) {
+        // Worker gone (reset raced the action): commit the photo.
+        removeEntry(id);
+        return {
+          commit: { file: entry.original, original: null, name: entry.original.name },
+          applied: false,
+        };
+      }
+      const rewrap = rewrapOf(worker);
+      const gen = genRef.current;
+      revokeCropPreview();
+      setApplying(true);
+      try {
+        // Fresh exact-range bytes: transfer neuters the buffer, so the
+        // retained original File is re-read (never a shared view).
+        const bytes = new Uint8Array(await entry.original.arrayBuffer());
+        if (genRef.current !== gen) return null;
+        const quadCopy = quad.map((p) => ({ x: p.x, y: p.y }));
+        const out = await withTimeout(rewrap(bytes, quadCopy), REWRAP_TIMEOUT_MS);
+        if (genRef.current !== gen) return null;
+        removeEntry(id);
+        return {
+          commit: {
+            file: new File([out.bytes as unknown as BlobPart], entry.original.name, {
+              type: 'image/jpeg',
+            }),
+            original: entry.original,
+            name: entry.original.name,
+          },
+          applied: true,
+        };
+      } catch {
+        if (genRef.current !== gen) return null;
+        removeEntry(id);
+        return {
+          commit: { file: entry.original, original: null, name: entry.original.name },
+          applied: false,
+        };
+      } finally {
+        setApplying(false);
+      }
+    },
+    [removeEntry, revokeCropPreview],
+  );
+
+  /**
+   * "Use original": commits the capture as a photo (nothing retained —
+   * the page IS the original) and advances.
+   */
+  const useOriginal = useCallback(
+    (id: number): ScanCommit | null => {
+      const entry = queuedRef.current.find((e) => e.id === id);
+      if (entry === undefined) return null;
+      removeEntry(id);
+      return { file: entry.original, original: null, name: entry.original.name };
+    },
+    [removeEntry],
+  );
+
+  /** "Discard": drops the capture and advances. */
+  const discardEntry = useCallback(
+    (id: number): void => {
+      removeEntry(id);
+    },
+    [removeEntry],
+  );
+
+  /**
+   * Queue exit (back arrow / scanner leave): every unreviewed entry
+   * commits as its original photo, in capture order. Synchronous by
+   * construction — captures are already budget-clamped JPEGs (see
+   * `captureTargetDims`), so the import normalization skip path always
+   * applied to them. Preview URLs are revoked; entries are gone.
+   */
+  const drainQueue = useCallback((): ScanCommit[] => {
+    const commits = queuedRef.current.map((e) => ({
+      file: e.original,
+      original: null,
+      name: e.original.name,
+    }));
+    clearQueue();
+    return commits;
+  }, [clearQueue]);
+
+  /**
+   * Debounced crop preview (CropEditor release / 300ms idle): re-warps a
+   * ≤800px downscale of the original with the adjusted quad and shows
+   * the result beside the overlay. Best-effort and latest-wins: failures
+   * or superseded responses leave the overlay authoritative. Full
+   * resolution crosses the worker only on "Use crop".
+   */
+  const requestCropPreview = useCallback((id: number, quad: ScanCorner[]) => {
+    const entry = queuedRef.current.find((e) => e.id === id);
+    if (entry === undefined || quad.length !== 4) return;
+    const worker = clientRef.current;
+    // No worker (reset raced the debounce): no preview, overlay only.
+    if (worker === null) return;
+    const rewrap = rewrapOf(worker);
+    const token = (previewTokenRef.current += 1);
+    const gen = genRef.current;
+    setCropPreviewPending(true);
+    void (async () => {
+      try {
+        const scaled = await downscaleForPreview(entry.original, entry.meta, quad);
+        if (
+          scaled === null ||
+          previewTokenRef.current !== token ||
+          genRef.current !== gen ||
+          !queuedRef.current.some((e) => e.id === id)
+        ) {
+          return;
+        }
+        const out = await rewrap(scaled.bytes, scaled.quad);
+        if (
+          previewTokenRef.current !== token ||
+          genRef.current !== gen ||
+          !queuedRef.current.some((e) => e.id === id)
+        ) {
+          return;
+        }
+        const url = URL.createObjectURL(
+          new Blob([out.bytes as unknown as BlobPart], { type: 'image/jpeg' }),
+        );
+        const prev = cropPreviewUrlRef.current;
+        cropPreviewUrlRef.current = url;
+        setCropPreviewUrl(url);
+        if (prev !== null) URL.revokeObjectURL(prev);
+      } catch {
+        // Preview is best-effort: the overlay stays authoritative.
+      } finally {
+        if (previewTokenRef.current === token && genRef.current === gen) {
+          setCropPreviewPending(false);
+        }
+      }
+    })();
+  }, []);
+
+  /**
+   * Latest-frame live detection tick. Skipped while a live request is in
+   * flight — never queued. Capture jobs do NOT block live ticks (the
+   * queue absorbs captures; guidance keeps flowing).
    */
   const requestLive = useCallback((frame: Blob) => {
     if (livePendingRef.current) return;
@@ -360,7 +545,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
    * like every other continuation (a reset before completion drops the
    * result), errors swallowed (warmup never surfaces UI state), and one
    * shot per session generation (repeat calls are no-ops). Touches no
-   * review state: `processing` stays false, `pending` stays null.
+   * queue state.
    */
   const warm = useCallback(() => {
     const gen = genRef.current;
@@ -380,145 +565,21 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     })();
   }, []);
 
-  /**
-   * Debounced verify preview (CropEditor release / 300ms idle): re-warps
-   * a ≤800px downscale of the original with the adjusted quad and shows
-   * the result beside the overlay. Best-effort and latest-wins: failures
-   * or superseded responses leave the overlay authoritative. Full
-   * resolution crosses the worker only on Confirm.
-   */
-  const requestVerifyPreview = useCallback((quad: ScanCorner[]) => {
-    const review = pendingRef.current;
-    if (review === null || review.result.status !== 'processed' || quad.length !== 4) return;
-    if (!verifyOpenRef.current) return;
-    const worker = clientRef.current;
-    // No worker (reset raced the debounce): no preview, overlay only.
-    if (worker === null) return;
-    const rewrap = rewrapOf(worker);
-    const token = (previewTokenRef.current += 1);
-    const gen = genRef.current;
-    setVerifyPreviewPending(true);
-    void (async () => {
-      try {
-        const scaled = await downscaleForPreview(review.original, review.result, quad);
-        if (
-          scaled === null ||
-          previewTokenRef.current !== token ||
-          genRef.current !== gen ||
-          !verifyOpenRef.current
-        ) {
-          return;
-        }
-        const out = await rewrap(scaled.bytes, scaled.quad);
-        if (previewTokenRef.current !== token || genRef.current !== gen || !verifyOpenRef.current) {
-          return;
-        }
-        const url = URL.createObjectURL(
-          new Blob([out.bytes as unknown as BlobPart], { type: 'image/jpeg' }),
-        );
-        const prev = verifyPreviewUrlRef.current;
-        verifyPreviewUrlRef.current = url;
-        setVerifyPreviewUrl(url);
-        if (prev !== null) URL.revokeObjectURL(prev);
-      } catch {
-        // Preview is best-effort: the overlay stays authoritative.
-      } finally {
-        if (previewTokenRef.current === token && genRef.current === gen) {
-          setVerifyPreviewPending(false);
-        }
-      }
-    })();
-  }, []);
-
-  /**
-   * Verify Cancel/Back: returns to the existing review panel with the
-   * auto result untouched (Cancel is disabled while Confirm is in
-   * flight, so no race with the rewarp continuation).
-   */
-  const cancelVerify = useCallback(() => {
-    previewTokenRef.current += 1;
-    setVerifyPreviewPending(false);
-    revokeVerifyPreview();
-    setVerifyOpen(false);
-  }, [revokeVerifyPreview]);
-
-  /**
-   * Verify Confirm: re-warps the FULL-RES original with the adjusted
-   * quad and replaces the pending processed bytes, then drops into the
-   * existing review panel (unchanged semantics). Any failure — worker
-   * error, glue refusal, timeout — keeps the untouched auto result and
-   * still lands on the review. Generation-guarded like every other
-   * continuation.
-   */
-  const confirmVerify = useCallback(
-    (quad: ScanCorner[]) => {
-      const review = pendingRef.current;
-      if (review === null || review.result.status !== 'processed' || quad.length !== 4) return;
-      const worker = clientRef.current;
-      if (worker === null) {
-        // Worker gone (reset raced Confirm): keep the auto result.
-        cancelVerify();
-        return;
-      }
-      const rewrap = rewrapOf(worker);
-      const gen = genRef.current;
-      previewTokenRef.current += 1;
-      setVerifyPreviewPending(false);
-      setRewrapping(true);
-      void (async () => {
-        try {
-          // Fresh exact-range bytes: transfer neuters the buffer, so the
-          // retained original File is re-read (never a shared view).
-          const bytes = new Uint8Array(await review.original.arrayBuffer());
-          if (genRef.current !== gen) return;
-          const quadCopy = quad.map((p) => ({ x: p.x, y: p.y }));
-          const out = await withTimeout(rewrap(bytes, quadCopy), REWRAP_TIMEOUT_MS);
-          if (genRef.current !== gen) return;
-          const current = pendingRef.current;
-          if (current === null) return;
-          const url = URL.createObjectURL(
-            new Blob([out.bytes as unknown as BlobPart], { type: 'image/jpeg' }),
-          );
-          URL.revokeObjectURL(current.previewUrl);
-          setPending({
-            original: current.original,
-            previewUrl: url,
-            result: {
-              ...current.result,
-              bytes: out.bytes,
-              width: out.width,
-              height: out.height,
-              corners: quadCopy,
-            },
-          });
-        } catch {
-          // Rewarp failure keeps the auto result — verify still closes
-          // and the existing review shows what detection produced.
-        } finally {
-          // Stale (reset/discarded mid-flight): cleanup already ran.
-          if (genRef.current === gen) closeVerify();
-        }
-      })();
-    },
-    [cancelVerify, closeVerify],
-  );
-
   return {
     processing,
-    pending,
+    queued,
     liveDetected,
-    processCapture,
-    accept,
-    discard,
+    enqueueCapture,
+    useCrop,
+    useOriginal,
+    discardEntry,
+    drainQueue,
+    cropPreviewUrl,
+    cropPreviewPending,
+    applying,
+    requestCropPreview,
     requestLive,
     reset,
     warm,
-    verifyOpen,
-    verifyPreviewUrl,
-    verifyPreviewPending,
-    rewrapping,
-    requestVerifyPreview,
-    confirmVerify,
-    cancelVerify,
   };
 }

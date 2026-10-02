@@ -13,6 +13,14 @@
  * Lifecycle: one `MediaStream` per session, opened on mount, stopped on
  * Done/close/unmount. No frames retained — only captured Files.
  *
+ * Capture flow (2026-10-02 UX restructure): the shutter QUEUES a
+ * capture silently (brief background detect, thumb in the session
+ * strip) and the camera stays live — NO modal, NO per-capture review,
+ * NO crop editor inline under the viewfinder. Every queued capture is
+ * reviewed later, one page at a time, in the full-screen review queue
+ * (`ScanReviewQueue`), reached via the "Pages (N)" CTA; unreviewed
+ * entries at any exit commit as originals.
+ *
  * State machine (local, explicit — no ambiguous "stream exists but dead"
  * states): `starting` → `live` → (`disconnected` | `preview-blocked` |
  * `failed`), with `live` re-entered via Try again. Every async
@@ -41,11 +49,10 @@ import {
   isPngFile,
   MAX_IMPORT_LONG_EDGE,
   planNormalization,
-  prepareImportFile,
 } from './imageImport';
 import { useContainBox } from './scanViewport';
-import { CropEditor } from './scan/CropEditor';
-import { useScanProcessor } from './scan/useScanProcessor';
+import { ScanReviewQueue, type CropQuad } from './scan/CropEditor';
+import { useScanProcessor, type ScanCommit } from './scan/useScanProcessor';
 
 /** Import state for the scanner's image-picker flow. */
 interface ImportState {
@@ -438,9 +445,12 @@ export function CameraCapture({
 
   // Open on mount / facing change; stop + invalidate on unmount.
   // `start` is the documented trigger for both callbacks above.
-  // (Declarations live above `start`, q.v.)
+  // (Declarations live above `start`, q.v.) A camera switch PRESERVES
+  // queued captures (`keepQueue`) — flipping to the selfie camera must
+  // never drop shots; only in-flight jobs die. The hook's own unmount
+  // cleanup revokes whatever is left.
   useEffect(() => {
-    resetScan();
+    resetScan({ keepQueue: true });
     void start(facing, deviceId);
     return () => {
       genRef.current += 1;
@@ -448,7 +458,7 @@ export function CameraCapture({
       stopStream(streamRef.current);
       streamRef.current = null;
       trackRef.current = null;
-      resetScan();
+      resetScan({ keepQueue: true });
       if (focusTimer.current !== null) {
         window.clearTimeout(focusTimer.current);
         focusTimer.current = null;
@@ -561,15 +571,22 @@ export function CameraCapture({
     stopStream(streamRef.current);
     streamRef.current = null;
     trackRef.current = null;
+    // Unreviewed captures survive the exit: they commit as originals
+    // (the photos were taken — shots are never dropped silently).
+    for (const commit of scan.drainQueue()) onScanAccept(commit);
     resetScan();
     onDone();
   };
 
-  // Escape closes the scanner (same as Back): an obvious, keyboard-accessible
-  // exit that never strands the user in a full-screen camera.
+  // Escape exits the review queue first (unreviewed entries commit as
+  // originals), then closes the scanner (same as Back): an obvious,
+  // keyboard-accessible exit that never strands the user in a
+  // full-screen camera — or in a full-screen queue.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') leave();
+      if (e.key !== 'Escape') return;
+      if (reviewRef.current !== null) exitReview();
+      else leave();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -643,20 +660,24 @@ export function CameraCapture({
 
   /**
    * Shutter: captures the frame ALREADY clamped to the 2500px budget
-   * (5-6, see `captureTargetDims`), then either hands it straight
-   * to the collection (Original mode — v1.9 path, no worker) or sends it
-   * to the scan worker for processing + review.
+   * (5-6, see `captureTargetDims`), then queues it for the review
+   * queue (`useScanProcessor.enqueueCapture`) — the queue entry carries
+   * the capture dims as the quad coordinate space.
    *
    * The JPEG encode runs in `imageEncode.worker.ts` (P2 item 11) when
    * available: the frame is snapshotted via `createImageBitmap` (the
    * video keeps playing underneath) and the bitmap is transferred. Any
    * worker failure falls back to the original main-thread canvas path
    * below — the live video element still holds the frame, so the retry
-   * re-reads it with identical pixels, quality (q0.92), and mirroring.
+   * re-reads it with identical pixels, quality (q0.95), and mirroring.
    * Both paths encode the BUDGET-CLAMPED size, never full sensor
    * resolution: a 12MP sensor frame becomes a ≤2500px JPEG either way.
    */
-  const captureFrame = async (): Promise<File | null> => {
+  const captureFrame = async (): Promise<{
+    file: File;
+    width: number;
+    height: number;
+  } | null> => {
     const video = videoRef.current;
     if (!video || video.videoWidth === 0 || capturing) return null;
     setCapturing(true);
@@ -688,7 +709,11 @@ export function CameraCapture({
       }
       counterRef.current += 1;
       const name = `scan-${String(counterRef.current).padStart(3, '0')}.jpg`;
-      return new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' });
+      return {
+        file: new File([bytes as unknown as BlobPart], name, { type: 'image/jpeg' }),
+        width,
+        height,
+      };
     } catch (error) {
       setFailure(error instanceof Error ? error.message : 'Capture failed.');
       return null;
@@ -698,57 +723,110 @@ export function CameraCapture({
   };
 
   const capture = async () => {
-    const file = await captureFrame();
-    if (file === null) return;
+    const shot = await captureFrame();
+    if (shot === null) return;
     setFlash((f) => f + 1);
-    scan.processCapture(file);
+    // Queued silently: the thumb lands in the session strip once the
+    // brief background detect job reports — NO modal, NO review panel,
+    // NO crop editor per capture. The camera stays live (rapid-fire
+    // shooting is the point).
+    scan.enqueueCapture(shot.file, { width: shot.width, height: shot.height });
   };
 
-  const acceptReview = (useProcessed: boolean) => {
-    const accepted = scan.accept(useProcessed);
-    if (accepted === null) return;
-    onScanAccept(accepted);
+  // -- Review queue (THE review step) ----------------------------------
+  // Every capture queues silently and is reviewed later, ONE page at a
+  // time, in the full-screen `ScanReviewQueue` (photo large + quad
+  // overlay seeded from auto corners, 90% inset for fallback captures —
+  // EVERY photo is croppable). The queue snapshots the queued ids when
+  // opened ("Page i of N" is stable); per page: Use crop (full-res
+  // rewrap → commit processed page → advance), Use original (commit as
+  // photo → advance), Discard (drop → advance). After the last page →
+  // the existing page-collection view. Back arrow exits the queue with
+  // every unreviewed entry committed as an original (transient note).
+
+  const [review, setReview] = useState<{ ids: number[]; index: number } | null>(null);
+  const reviewRef = useRef(review);
+  reviewRef.current = review;
+  const queuedEntries = scan.queued;
+  const pageCount = sessionPages.length + queuedEntries.length;
+  // Session strip = committed session pages + queued captures (queue
+  // thumbs reuse the entry preview URL — revoked on advance/discard/
+  // exit). Newest last, brass ring on the newest.
+  const stripPages = [
+    ...sessionPages,
+    ...queuedEntries.map((e) => ({
+      id: `q${e.id}`,
+      previewUrl: e.previewUrl,
+      name: e.original.name,
+    })),
+  ];
+
+  const currentEntry =
+    review === null ? null : (queuedEntries.find((e) => e.id === review.ids[review.index]) ?? null);
+
+  const openReview = () => {
+    if (queuedEntries.length > 0) {
+      setReview({ ids: queuedEntries.map((e) => e.id), index: 0 });
+    } else {
+      leave();
+    }
   };
 
-  /**
-   * Fallback auto-accept: when detection finds no reliable boundary, the
-   * photo the user just framed IS the page — interrupting every capture
-   * with a "Use original / Discard" decision is pure nagging (real-device
-   * feedback: most captures fall back). The file is committed to the
-   * collection and announced non-blockingly. Undo/session removal still
-   * applies. Processed and error reviews keep their explicit panels.
-   *
-   * Normalization is usually SKIPPED, not repeated (5-4): captures are
-   * already budget-clamped JPEGs (5-6), and the scan result carries the
-   * input dimensions — so the budget decision reuses those dims with
-   * zero decodes. Only PNGs / oversized frames pay for `prepareImportFile`.
-   */
-  const autoAcceptGen = useRef(0);
-  useEffect(() => {
-    const pending = scan.pending;
-    if (pending === null || pending.result.status !== 'original') return;
-    const gen = (autoAcceptGen.current += 1);
-    void (async () => {
-      let file = pending.original;
-      let name = pending.original.name;
-      const known = { width: pending.result.width, height: pending.result.height };
-      const skip =
-        known.width > 0 && known.height > 0 && canSkipNormalization(known, pending.original);
-      if (!skip) {
-        try {
-          const prepared = await prepareImportFile(pending.original);
-          file = prepared.file as File;
-          name = prepared.name;
-        } catch {
-          // Normalization is best-effort: true original on failure.
-        }
-      }
-      if (autoAcceptGen.current !== gen) return; // Superseded/discarded.
-      onScanAccept({ file, original: null, name });
-      scan.discard();
-      setImportNote('Added as photo — no boundary found.');
-    })();
-  }, [scan.pending]);
+  const advanceReview = () => {
+    const r = reviewRef.current;
+    if (r === null) return;
+    if (r.index + 1 < r.ids.length) {
+      setReview({ ids: r.ids, index: r.index + 1 });
+    } else {
+      // After the last page → the existing page-collection view.
+      setReview(null);
+      leave();
+    }
+  };
+
+  /** Queue back arrow: exit the queue; unreviewed entries commit as originals. */
+  const exitReview = () => {
+    setReview(null);
+    const unreviewed = scan.queued;
+    const drained = scan.drainQueue();
+    for (const commit of drained) onScanAccept(commit);
+    if (unreviewed.length > 0) {
+      setImportNote(
+        unreviewed.every((e) => e.meta.status === 'original')
+          ? 'Added as photo — no boundary found.'
+          : 'Added as photo.',
+      );
+    }
+  };
+
+  const handleUseCrop = async (id: number, quad: CropQuad) => {
+    const outcome = await scan.useCrop(
+      id,
+      quad.map((p) => ({ x: p.x, y: p.y })),
+    );
+    if (outcome === null) return; // Superseded (reset): nothing to commit.
+    onScanAccept(outcome.commit);
+    if (!outcome.applied) setImportNote("Couldn't apply the crop — added as photo.");
+    advanceReview();
+  };
+
+  const handleUseOriginal = (id: number) => {
+    const commit: ScanCommit | null = scan.useOriginal(id);
+    if (commit !== null) onScanAccept(commit);
+    advanceReview();
+  };
+
+  const handleDiscard = (id: number) => {
+    scan.discardEntry(id);
+    advanceReview();
+  };
+
+  // No auto-close effect on a missing entry: `useCrop`'s entry removal
+  // and the advance land in separate React batches, and an effect
+  // watching both would run once with the stale pairing ("entry gone,
+  // review still on page i"). If the entry under review ever disappears
+  // outside the three actions, the surface renders nothing and the next
+  // "Pages (N)" tap re-snapshots the queue.
 
   /**
    * Low-res live tick (~160px, best-effort): guidance only. Skipped
@@ -770,13 +848,7 @@ export function CameraCapture({
     if (status !== 'live') return;
     const id = window.setInterval(() => {
       const video = videoRef.current;
-      if (
-        video === null ||
-        video.videoWidth === 0 ||
-        scan.processing ||
-        scan.pending !== null ||
-        document.hidden
-      ) {
+      if (video === null || video.videoWidth === 0 || scan.processing || document.hidden) {
         return;
       }
       if (liveBusyRef.current) return; // Previous tick still encoding.
@@ -809,7 +881,7 @@ export function CameraCapture({
     }, 500);
     return () => window.clearInterval(id);
     // Stable primitives only: the scan object identity changes per render.
-  }, [status, scan.processing, scan.pending, scan.requestLive]);
+  }, [status, scan.processing, scan.requestLive]);
 
   const ratio = aspect.w / aspect.h;
   const viewport = useContainBox<HTMLDivElement>(ratio);
@@ -914,9 +986,9 @@ export function CameraCapture({
           </button>
           <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
             <span className="hidden min-[430px]:inline">Scan document</span>
-            {sessionPages.length > 0 && (
+            {pageCount > 0 && (
               <span className="rounded-full bg-forest-500/15 px-2 py-0.5 text-xs text-forest-600 dark:text-forest-300 min-[430px]:ml-2">
-                {sessionPages.length} captured
+                {pageCount} captured
               </span>
             )}
           </p>
@@ -955,16 +1027,19 @@ export function CameraCapture({
             <span className="hidden min-[400px]:inline">Import</span>
           </button>
           {/* Primary CTA once pages exist: the user must always know how to
-              reach the page list (where Build PDF / rearrange live). */}
-          {sessionPages.length > 0 && (
+              reach the page list (where Build PDF / rearrange live). With
+              unreviewed captures queued, this opens the review queue first
+              (one page at a time); without a queue it exits straight to the
+              page-collection view. */}
+          {pageCount > 0 && (
             <button
-              onClick={leave}
+              onClick={openReview}
               aria-label="Finish scanning and view pages"
               className="flex min-h-[44px] shrink-0 items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
             >
               {/* Short label on narrow phones so the bar never wraps. */}
-              <span className="hidden min-[400px]:inline">View pages ({sessionPages.length})</span>
-              <span className="min-[400px]:hidden">Pages ({sessionPages.length})</span>
+              <span className="hidden min-[400px]:inline">View pages ({pageCount})</span>
+              <span className="min-[400px]:hidden">Pages ({pageCount})</span>
               <svg
                 width="13"
                 height="13"
@@ -1163,7 +1238,9 @@ export function CameraCapture({
                       : 'bg-ink-900/70 text-paper-50'
                   }`}
                 >
-                  {scan.liveDetected ? 'Document detected ✓' : 'Frame the page in the guide'}
+                  {scan.liveDetected
+                    ? 'Document detected — capture when ready'
+                    : 'Fit page inside guide, leave a small margin'}
                 </motion.p>
                 {/* Shutter-confirmation blink: one-shot opacity-only flash,
                   remounted per capture via `flash`. No geometry, no loop. */}
@@ -1197,97 +1274,10 @@ export function CameraCapture({
 
             {/* Screen-reader mirror of the in-viewport detection pill. */}
             <span className="sr-only" role="status">
-              {scan.liveDetected ? 'Document detected — capture when ready' : 'Framing guide'}
+              {scan.liveDetected
+                ? 'Document detected — capture when ready'
+                : 'Fit page inside guide, leave a small margin'}
             </span>
-
-            {/* Crop-verify: processed captures land here FIRST — the
-              original photo with an adjustable quad overlay. Confirm
-              re-warps at full resolution into the existing review below;
-              Cancel keeps the untouched auto result. Fallback captures
-              never reach this screen (they auto-accept as photos). */}
-            {scan.verifyOpen &&
-              scan.pending !== null &&
-              scan.pending.result.status === 'processed' && (
-                <CropEditor
-                  originalFile={scan.pending.original}
-                  imageWidth={scan.pending.result.width}
-                  imageHeight={scan.pending.result.height}
-                  initialCorners={scan.pending.result.corners}
-                  previewUrl={scan.verifyPreviewUrl}
-                  previewPending={scan.verifyPreviewPending}
-                  confirming={scan.rewrapping}
-                  onPreviewRequest={scan.requestVerifyPreview}
-                  onConfirm={scan.confirmVerify}
-                  onCancel={scan.cancelVerify}
-                />
-              )}
-
-            {/* Review: pending scan decision. Session state only — nothing
-              enters the page collection until Accept. Compact so the
-              viewport keeps maximum height while deciding. Hidden while
-              the crop-verify screen owns the decision. */}
-            {scan.pending !== null && !scan.verifyOpen && (
-              <div className="rounded-2xl border border-brass-400/40 bg-paper-50 p-2.5 dark:bg-ink-800/60">
-                <div className="flex gap-2.5">
-                  <img
-                    src={scan.pending.previewUrl}
-                    alt={
-                      scan.pending.result.status === 'processed'
-                        ? `Processed scan preview: ${scan.pending.original.name}`
-                        : `Original capture preview: ${scan.pending.original.name}`
-                    }
-                    className="h-20 w-14 shrink-0 rounded-lg border border-paper-300 object-contain dark:border-ink-700"
-                  />
-                  <div className="min-w-0 flex-1">
-                    {scan.pending.result.status === 'processed' && (
-                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                        Scan ready — perspective-corrected
-                      </p>
-                    )}
-                    {scan.pending.result.status === 'error' && (
-                      <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
-                        Scanner unavailable
-                      </p>
-                    )}
-                    <p className="mt-1 text-xs text-ink-400 dark:text-ink-300">
-                      {scan.pending.result.status === 'processed' &&
-                        'The corrected scan is shown. The original photo is kept for fallback.'}
-                      {scan.pending.result.status === 'error' &&
-                        'Use the original photo, or retry the scan.'}
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {scan.pending.result.status === 'processed' && (
-                    <>
-                      <Button onClick={() => acceptReview(true)}>Use scan</Button>
-                      <Button variant="ghost" onClick={() => acceptReview(false)}>
-                        Use original
-                      </Button>
-                    </>
-                  )}
-                  {scan.pending.result.status === 'error' && (
-                    <>
-                      <Button
-                        variant="primary"
-                        onClick={() => {
-                          const current = scan.pending;
-                          if (current !== null) scan.processCapture(current.original);
-                        }}
-                      >
-                        Retry
-                      </Button>
-                      <Button variant="ghost" onClick={() => acceptReview(false)}>
-                        Use original
-                      </Button>
-                    </>
-                  )}
-                  <Button variant="ghost" onClick={() => scan.discard()}>
-                    Discard
-                  </Button>
-                </div>
-              </div>
-            )}
 
             {/* Camera dock: three equal cells (torch · Capture · Undo) so the
               shutter sits truly centered. Torch renders ONLY when the active
@@ -1329,8 +1319,8 @@ export function CameraCapture({
               <div className="flex flex-col items-center gap-1 sm:order-3 sm:mx-3">
                 <button
                   onClick={() => void capture()}
-                  disabled={capturing || scan.processing || scan.pending !== null}
-                  aria-label={capturing || scan.processing ? 'Capturing page' : 'Capture page'}
+                  disabled={capturing}
+                  aria-label={capturing ? 'Capturing page' : 'Capture page'}
                   className="flex h-16 w-16 items-center justify-center rounded-full border-4 border-paper-300 bg-paper-100 transition-transform hover:scale-105 active:scale-95 disabled:opacity-50 dark:border-ink-600 dark:bg-ink-800"
                 >
                   <span
@@ -1343,11 +1333,22 @@ export function CameraCapture({
                 <span className="text-[11px] font-medium text-ink-500 dark:text-ink-300">
                   Capture
                 </span>
+                {/* Steadiness hint (H-D research): the shutter has no
+                  sharpness gate, so say what helps — hold the phone
+                  still, then shoot. */}
+                <span className="text-[11px] text-ink-400 dark:text-ink-300">Hold steady</span>
               </div>
               <div className="flex justify-end sm:order-4">
                 <button
-                  onClick={onRetake}
-                  disabled={sessionPages.length === 0}
+                  onClick={() => {
+                    // Undo the LAST capture: a queued shot drops from the
+                    // queue (never committed); otherwise the last
+                    // committed session page.
+                    const last = scan.queued[scan.queued.length - 1];
+                    if (last !== undefined) scan.discardEntry(last.id);
+                    else onRetake();
+                  }}
+                  disabled={sessionPages.length === 0 && scan.queued.length === 0}
                   aria-label="Undo last capture"
                   title="Discard the last capture"
                   className="flex h-11 min-w-11 items-center justify-center rounded-xl border border-paper-300 px-3 text-xs text-ink-500 transition-colors hover:border-brass-400/40 disabled:opacity-30 dark:border-ink-700 dark:text-ink-300"
@@ -1363,20 +1364,22 @@ export function CameraCapture({
             )}
 
             {/* Session strip: previews only, newest last with a brass ring.
+              Shows committed session pages AND queued captures (a queued
+              shot is visible the moment its brief detect job lands).
               Lives at the very bottom (below the dock) with horizontal
               scroll only, so captured pages never squeeze the viewport.
               Compact cells + no extra safe-area padding (the root already
               carries it) keep the viewport stable once pages exist. */}
-            {sessionPages.length > 0 && (
+            {stripPages.length > 0 && (
               <div
                 className="flex gap-1.5 overflow-x-auto landscape:gap-1"
                 aria-label="Pages captured this session"
               >
-                {sessionPages.map((thumb, i) => (
+                {stripPages.map((thumb, i) => (
                   <div
                     key={thumb.id}
                     className={`relative h-12 w-9 shrink-0 overflow-hidden rounded-lg border bg-ink-950 sm:h-16 sm:w-12 ${
-                      i === sessionPages.length - 1
+                      i === stripPages.length - 1
                         ? 'border-brass-400 ring-2 ring-brass-400/40'
                         : 'border-paper-300 dark:border-ink-700'
                     }`}
@@ -1432,6 +1435,29 @@ export function CameraCapture({
           </div>
         )}
       </div>
+      {/* Review queue: the review step, full-screen and one page at a
+        time. The surface portals itself to document.body (viewport-true,
+        ABOVE the scanner root) and is never wrapped in AnimatePresence
+        (known codebase footgun — it swallows direct portal children). */}
+      {review !== null && currentEntry !== null && (
+        <ScanReviewQueue
+          entryId={currentEntry.id}
+          pageIndex={review.index + 1}
+          pageCount={review.ids.length}
+          photoUrl={currentEntry.previewUrl}
+          imageWidth={currentEntry.meta.width}
+          imageHeight={currentEntry.meta.height}
+          initialCorners={currentEntry.meta.corners}
+          cropPreviewUrl={scan.cropPreviewUrl}
+          cropPreviewPending={scan.cropPreviewPending}
+          applying={scan.applying}
+          onPreviewRequest={(quad) => scan.requestCropPreview(currentEntry.id, quad)}
+          onUseCrop={(quad) => void handleUseCrop(currentEntry.id, quad)}
+          onUseOriginal={() => handleUseOriginal(currentEntry.id)}
+          onDiscard={() => handleDiscard(currentEntry.id)}
+          onBack={exitReview}
+        />
+      )}
     </>,
     document.body,
   );

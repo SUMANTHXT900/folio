@@ -27,7 +27,7 @@ record it in `docs/ROADMAP.md` + `docs/DECISIONS.md` per `AGENTS.md`.
   `validate_quad` + 0.5 edge-support gate, largest-wins, spine-split
   horizontal merge) → `warp_quad` (output capped `MAX_OUTPUT_LONG_EDGE=2500`)
   → `enhance::apply_mode` (Original passthrough / Grayscale Rec.601 in place /
-  B&W local-mean adaptive via u64 integral image) → JPEG q92 (`warp.rs:SCAN_JPEG_QUALITY`).
+  B&W local-mean adaptive via u64 integral image) → JPEG q95 (`warp.rs:SCAN_JPEG_QUALITY`).
 - App (`app/src/studio/tools/scan/` + `CameraCapture.tsx`): dedicated scan
   worker, versioned protocol (v2: `detectOnly` request flag + `detected`
   result status), `ScanWorkerClient` gateway (lazy init, transferable bytes,
@@ -168,7 +168,7 @@ lighting-tolerant local-mean adaptive threshold.
 ## 7. Output enhancement modes
 
 Ground truth: `enhance.rs` has Original / Grayscale / BlackWhite;
-warps→mode→single q92 encode (long edge ≤2500); all scan outputs are
+warps→mode→single q95 encode (long edge ≤2500); all scan outputs are
 baseline JPEGs → all modes stay DCT-passthrough-eligible (PDF ≈ JPEG
 size). Only `CORE_MODE='original'` hardcoding in `useScanProcessor.ts`
 blocks choice. Size ordering for text: clean B&W < grayscale < color;

@@ -78,7 +78,7 @@ describe('prepareImportFile', () => {
     expect(decode).toHaveBeenCalledTimes(1);
     expect(decode).toHaveBeenCalledWith(png);
     expect(resizeToJpeg).toHaveBeenCalledTimes(1);
-    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 1280, height: 960 }, 0.92);
+    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 1280, height: 960 }, 0.95);
     // The decoded bitmap is released exactly once, by the caller.
     expect(close).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledWith(decoded);
@@ -111,7 +111,7 @@ describe('prepareImportFile', () => {
     expect(out.file.type).toBe('image/jpeg');
     expect(decode).toHaveBeenCalledTimes(1);
     expect(resizeToJpeg).toHaveBeenCalledTimes(1);
-    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 2500, height: 1875 }, 0.92);
+    expect(resizeToJpeg).toHaveBeenCalledWith(decoded, { width: 2500, height: 1875 }, 0.95);
     expect(close).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledWith(decoded);
   });

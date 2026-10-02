@@ -13,10 +13,18 @@
 //! `MIN_EDGE_SUPPORT..=1.0`, gated by the same hard support threshold
 //! plus the geometric validation in `geometry` (gates never weakened).
 //!
-//! Recall paths (bounded, failure-only cost): a grayscale-Canny
-//! fallback when the binary path yields nothing (or the Otsu histogram
-//! is non-bimodal), 5–8-gon → quad fitting by turning angle, and a
-//! 3-epsilon RDP sweep kept per-contour-best.
+//! Recall paths (bounded, near-failure-only cost): grayscale-Canny and
+//! local-adaptive threshold rungs behind a shared trigger — empty pool,
+//! non-bimodal Otsu histogram (research §11 H-B), or a weakly-supported
+//! binary winner (a ring broken by shadow or fused pattern blobs passes
+//! the gates corner-cut; only the local-contrast rungs can out-rank it).
+//! Candidates from every rung share the UNCHANGED gates and the rank
+//! decides — Otsu stays the primary rung, recall candidates must
+//! out-rank it, never wholesale-replace it. Plus 5–8-gon → quad fitting
+//! by turning angle, and a 3-epsilon RDP sweep kept per-contour-best.
+//! Every Canny pass runs on a replicate-padded margin with a
+//! frame-closure stroke (H-A) so pages touching the frame still form
+//! closed rings; contour points return in original coordinates.
 
 use std::cmp::Ordering;
 
@@ -58,6 +66,32 @@ const EPSILON_SWEEP_MULTS: [f64; 3] = [1.0, 1.5, 0.7];
 const BIMODAL_MIN_CLASS_FRAC: f64 = 0.05;
 const BIMODAL_MIN_MEAN_SEP: f64 = 20.0;
 const BIMODAL_MIN_EFFECTIVENESS: f64 = 0.15;
+/// Replicate border margin (px, detection scale) prepended before Canny.
+/// Moves Canny's zero frame outside the content and gives strokes cut by
+/// the frame runway past the original border (H-A).
+const BORDER_PAD: i32 = 4;
+/// Illumination-estimate thumbnail long edge (research §6, detect-side).
+const ILLUM_THUMB_LONG_EDGE: u32 = 64;
+/// Clamped background-divide gain (research §6: ≤1.3×) — flattens light
+/// falloff without letting page-vs-background contrast collapse.
+const ILLUM_MAX_GAIN: f64 = 1.3;
+/// Strength of the applied correction (research §6 damped pre-step).
+/// The divide alone converges toward the reference on large uniform
+/// regions — page AND background both move toward the mean when each is
+/// bigger than the estimate scale — collapsing page-vs-background
+/// contrast. Damping keeps most of the original contrast while still
+/// flattening shadow gradients (partial shading removal beats a broken
+/// threshold split).
+const ILLUM_STRENGTH: f64 = 0.5;
+/// Recall-rung trigger (not an acceptance gate): when the binary path's
+/// best candidate is supported below this, its ring is broken — shadow
+/// cut, fused pattern blobs — and the local-contrast rungs get their
+/// chance to out-rank it. Acceptance gates are untouched.
+const RECALL_SUPPORT_TRIGGER: f64 = 0.85;
+/// Local-adaptive rung: a pixel stays white when it reaches its block
+/// mean minus this offset. Absorbs sensor noise in uniform regions so
+/// only real boundaries (page vs surroundings) leave the moat.
+const ADAPTIVE_OFFSET: u32 = 12;
 
 /// A detected document: normalized corners + earned confidence 0–1.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,13 +101,16 @@ pub struct Detection {
 }
 
 /// A quad that passed the unchanged gates, with its rank inputs.
+/// `map_idx` names the support map its support was measured against
+/// (0 = main rung; recall rungs append).
 #[derive(Debug, Clone)]
 struct ScoredCandidate {
     quad: Quad,
     area_frac: f64,
+    support: f64,
     rank: f64,
     confidence: f64,
-    from_fallback: bool,
+    map_idx: u8,
 }
 
 /// Describes raw RGB bytes (`w*h*3`) as a flat sample buffer. Callers
@@ -118,44 +155,79 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
     let small_rgb = imageops::resize(&view, sw, sh, imageops::FilterType::Triangle);
     let gray = imageops::grayscale(&small_rgb);
     let blurred = imageproc::filter::gaussian_blur_f32(&gray, 1.5);
+    // Illumination normalization (research §6 background-divide, applied
+    // to DETECT — not enhance): a tiny blurred thumbnail estimates the
+    // lighting field and every pixel gets the clamped gain `ref/illum`,
+    // flattening light falloff and shadow gradients BEFORE thresholding
+    // so global Otsu splits page-vs-background instead of lit-vs-shadowed.
+    // Buffers are detection-scale or thumbnail-scale only.
+    let normalized = normalize_illumination(&blurred);
     // Otsu binarization: adapts to the photo's own lighting instead of
     // assuming lab-grade contrast. The histogram is built once here;
     // the bimodality guard below reuses it with no second pixel pass.
-    let analysis = otsu_analyze(&blurred);
+    let analysis = otsu_analyze(&normalized);
     let bimodal = analysis.bimodal;
     let binary = analysis.binary;
     // Morphological closing bridges 1–2px gaps (shadow breaks, weak
     // edge segments) so the page boundary forms closed loops.
     let closed = morph_close(&binary, 2);
-    let edges = imageproc::edges::canny(&closed, 40.0, 120.0);
-    let support_map = dilate(&edges, DILATE_RADIUS);
-
-    // Largest contours first: the document is usually among the biggest
-    // shapes; text/texture loops are rejected by area before fitting.
+    // Rung 1: binary → closing → Canny → contours (frame-closed, H-A).
+    let main_pass = edge_pass(&closed, true);
+    let mut maps: Vec<GrayImage> = vec![main_pass.support_map];
     let frame_area = f64::from(sw) * f64::from(sh);
-    let contours = contours_from_edges(&edges);
     let mut candidates =
-        collect_scored_candidates(&contours, &support_map, sw, sh, frame_area, false);
+        collect_scored_candidates(&main_pass.contours, &maps[0], sw, sh, frame_area, 0);
 
-    // Grayscale-Canny fallback (zero cost on the success path): only
-    // when the binary path yields zero candidates, or the Otsu
-    // histogram is non-bimodal (global threshold untrustworthy, e.g.
-    // mid-gray page on mixed checker texture). Runs Canny on the
-    // already-blurred grayscale once more — no full-res copies, all at
-    // detection scale with the buffers already in memory.
-    let mut fallback_map: Option<GrayImage> = None;
-    if candidates.is_empty() || !bimodal {
-        let edges2 = imageproc::edges::canny(&blurred, 40.0, 120.0);
-        let support_map2 = dilate(&edges2, DILATE_RADIUS);
-        let contours2 = contours_from_edges(&edges2);
-        let fallback_cands =
-            collect_scored_candidates(&contours2, &support_map2, sw, sh, frame_area, true);
-        if candidates.is_empty() {
-            candidates = fallback_cands;
-        } else if !fallback_cands.is_empty() {
-            candidates.extend(fallback_cands);
+    // Recall rungs (bounded, near-failure-only cost): when the binary
+    // path yields zero candidates, when the Otsu histogram is
+    // non-bimodal (global threshold untrustworthy — trimodal patterned
+    // sheets, shadow splits), or when its best candidate is weakly
+    // supported: paper in shadow falls to sheet brightness, no global
+    // threshold separates them, and the binary path returns a passing
+    // but corner-cut quad only the local-contrast rungs can out-rank.
+    // All at detection scale with buffers already in memory; candidates
+    // from every rung share the same unchanged gates and the rank
+    // decides — Otsu stays the primary rung and recall candidates must
+    // out-rank it, never wholesale-replace it.
+    let binary_weak = !candidates
+        .iter()
+        .any(|c| c.support >= RECALL_SUPPORT_TRIGGER);
+    if !bimodal || binary_weak {
+        // Rung 2: grayscale-Canny on the already-normalized gray.
+        let gray_pass = edge_pass(&normalized, true);
+        maps.push(gray_pass.support_map);
+        let gray_idx = (maps.len() - 1) as u8;
+        let gray_cands = collect_scored_candidates(
+            &gray_pass.contours,
+            &maps[maps.len() - 1],
+            sw,
+            sh,
+            frame_area,
+            gray_idx,
+        );
+        // Rung 3: local-adaptive threshold → closing → Canny. Research
+        // §11 H-B: adaptive only as a gated secondary path — it erases
+        // boundaries on clean uniform backgrounds, never wholesale.
+        let adaptive = adaptive_binary(&normalized, adaptive_radius(sw, sh), ADAPTIVE_OFFSET);
+        let adaptive_closed = morph_close(&adaptive, 2);
+        let adapt_pass = edge_pass(&adaptive_closed, true);
+        maps.push(adapt_pass.support_map);
+        let adapt_idx = (maps.len() - 1) as u8;
+        let adapt_cands = collect_scored_candidates(
+            &adapt_pass.contours,
+            &maps[maps.len() - 1],
+            sw,
+            sh,
+            frame_area,
+            adapt_idx,
+        );
+        for extra in [gray_cands, adapt_cands] {
+            if candidates.is_empty() {
+                candidates = extra;
+            } else {
+                candidates.extend(extra);
+            }
         }
-        fallback_map = Some(support_map2);
     }
 
     if candidates.is_empty() {
@@ -166,11 +238,7 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
     // Deterministic tie-breaks (rank ε, then area, then corners).
     candidates.sort_by(compare_candidates);
     let winner = candidates[0].clone();
-    let winner_map: &GrayImage = if winner.from_fallback {
-        fallback_map.as_ref().expect("fallback ran when flagged")
-    } else {
-        &support_map
-    };
+    let winner_map: &GrayImage = &maps[winner.map_idx as usize];
     // Open-spread merge: two side-by-side halves (split by a spine/fold)
     // reunite into the outer boundary when their facing edges align.
     // The merged quad re-passes validation + support on the winner's
@@ -210,10 +278,12 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
 /// by a spine/fold) into their outer boundary.
 ///
 /// The left quad's right edge and the right quad's left edge must be
-/// near-vertical, close in x (gap ≤ 15% of the narrower width), and
-/// overlap in y by ≥ 70% of the shorter edge. Returns the merged quad
-/// in normalized corner order; validation + support happen in the
-/// caller, so unrelated neighbors cannot sneak through.
+/// close in x — gutter gap OR slight fold overlap within 15% of the
+/// narrower width (soft folds shade the halves' fitted corners a few px
+/// past the fold core) — and overlap in y by ≥ 70% of the shorter edge.
+/// Returns the merged quad in normalized corner order; validation +
+/// support happen in the caller, so unrelated neighbors (and nested
+/// inner-block quads, whose gap is ~a full width) cannot sneak through.
 fn try_merge_horizontal(a: &Quad, b: &Quad) -> Option<Quad> {
     let (left, right) = if (a.tl.x + a.bl.x) / 2.0 <= (b.tl.x + b.bl.x) / 2.0 {
         (a, b)
@@ -229,7 +299,7 @@ fn try_merge_horizontal(a: &Quad, b: &Quad) -> Option<Quad> {
     let right_w = (right.tr.x - right.tl.x)
         .abs()
         .max((right.br.x - right.bl.x).abs());
-    if gap < 0.0 || gap > 0.15 * left_w.min(right_w).max(1.0) {
+    if gap.abs() > 0.15 * left_w.min(right_w).max(1.0) {
         return None;
     }
     // Vertical overlap of the two facing edges.
@@ -244,6 +314,195 @@ fn try_merge_horizontal(a: &Quad, b: &Quad) -> Option<Quad> {
     }
     let corners = [left.tl, left.bl, right.tr, right.br];
     order_corners(corners).ok()
+}
+
+/// One Canny → contours pass at detection scale, frame-closed (H-A).
+///
+/// The input is replicate-padded by [`BORDER_PAD`] before Canny so the
+/// zero frame sits outside the content and strokes cut by the frame keep
+/// runway past the original border, then a 1px margin stroke is drawn
+/// along the ORIGINAL frame so those cut rings close. Contour points
+/// come back in original coordinates; the support map is the honest
+/// Canny gradient (margin stroke excluded) cropped to the original
+/// extent — frame-coincident quad edges simply earn no support there.
+struct EdgePass {
+    contours: Vec<Vec<Point>>,
+    support_map: GrayImage,
+}
+
+fn edge_pass(input: &GrayImage, frame_closure: bool) -> EdgePass {
+    let pad = if frame_closure { BORDER_PAD } else { 0 };
+    let padded = replicate_pad(input, pad);
+    let edges = imageproc::edges::canny(&padded, 40.0, 120.0);
+    let support_map = crop_gray(&dilate(&edges, DILATE_RADIUS), pad);
+    let mut contour_input = edges;
+    if frame_closure {
+        stroke_frame_margin(&mut contour_input, pad);
+    }
+    let contours = contours_from_edges(&contour_input)
+        .iter()
+        .map(|pts| {
+            pts.iter()
+                .map(|p| Point::new(p.x - f64::from(pad), p.y - f64::from(pad)))
+                .collect()
+        })
+        .collect();
+    EdgePass {
+        contours,
+        support_map,
+    }
+}
+
+/// Replicate-border pad of a detection-scale gray image. `pad = 0`
+/// clones — no special cases downstream.
+fn replicate_pad(src: &GrayImage, pad: i32) -> GrayImage {
+    if pad == 0 {
+        return src.clone();
+    }
+    let (w, h) = (src.width() as i32, src.height() as i32);
+    let (pw, ph) = (w + 2 * pad, h + 2 * pad);
+    let mut out = GrayImage::new(pw as u32, ph as u32);
+    for y in 0..ph {
+        let sy = (y - pad).clamp(0, h - 1);
+        for x in 0..pw {
+            let sx = (x - pad).clamp(0, w - 1);
+            out.put_pixel(x as u32, y as u32, *src.get_pixel(sx as u32, sy as u32));
+        }
+    }
+    out
+}
+
+/// Draws a 1px stroke along the ORIGINAL frame inside the padded edge
+/// map: the synthetic margin that closes boundary rings cut by the
+/// frame (H-A). Its own ring contours are ~100% / ~99.5% frame-area and
+/// are rejected by the unchanged 5–99% area gate, so it can only close
+/// rings — never smuggle in a quad.
+fn stroke_frame_margin(img: &mut GrayImage, pad: i32) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let (x0, y0) = (pad, pad);
+    let (x1, y1) = (w - 1 - pad, h - 1 - pad);
+    if x1 <= x0 + 1 || y1 <= y0 + 1 {
+        return;
+    }
+    for x in x0..=x1 {
+        img.put_pixel(x as u32, y0 as u32, Luma([255u8]));
+        img.put_pixel(x as u32, y1 as u32, Luma([255u8]));
+    }
+    for y in y0..=y1 {
+        img.put_pixel(x0 as u32, y as u32, Luma([255u8]));
+        img.put_pixel(x1 as u32, y as u32, Luma([255u8]));
+    }
+}
+
+/// Center crop back to the original extent (support-map de-padding).
+fn crop_gray(src: &GrayImage, pad: i32) -> GrayImage {
+    if pad == 0 {
+        return src.clone();
+    }
+    let (w, h) = (src.width() as i32, src.height() as i32);
+    let (ow, oh) = (w - 2 * pad, h - 2 * pad);
+    let mut out = GrayImage::new(ow as u32, oh as u32);
+    for y in 0..oh {
+        for x in 0..ow {
+            out.put_pixel(
+                x as u32,
+                y as u32,
+                *src.get_pixel((x + pad) as u32, (y + pad) as u32),
+            );
+        }
+    }
+    out
+}
+
+/// Clamped, DAMPED thumbnail background-divide (research §6, detect-side).
+///
+/// The blurred thumbnail is the illumination estimate: per-pixel
+/// `gain = ref / illum` clamped to `ILLUM_MAX_GAIN` both ways flattens
+/// light falloff and shadow gradients. The clamp alone cannot keep
+/// page-vs-background contrast when both regions are large (the smooth
+/// estimate converges to each region's own mean), so the correction is
+/// applied at [`ILLUM_STRENGTH`] — most of the shading benefit, most of
+/// the contrast preserved. O(N) with one detection-scale output — no
+/// full-resolution copies anywhere.
+fn normalize_illumination(gray: &GrayImage) -> GrayImage {
+    let (w, h) = (gray.width(), gray.height());
+    let scale = ILLUM_THUMB_LONG_EDGE as f64 / u32::max(w, h).max(1) as f64;
+    let scale = scale.min(1.0);
+    let tw = ((w as f64 * scale).round() as u32).clamp(2, w.max(2));
+    let th = ((h as f64 * scale).round() as u32).clamp(2, h.max(2));
+    let thumb = imageops::resize(gray, tw, th, imageops::FilterType::Triangle);
+    let illum_thumb = imageproc::filter::gaussian_blur_f32(&thumb, 3.0);
+    let mut ref_sum = 0.0f64;
+    for px in illum_thumb.pixels() {
+        ref_sum += f64::from(px.0[0]);
+    }
+    let reference = ref_sum / f64::from(tw * th);
+    let illum = imageops::resize(&illum_thumb, w, h, imageops::FilterType::Triangle);
+    let mut out = GrayImage::new(w, h);
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        let est = f64::from(illum.get_pixel(x, y).0[0]).max(1.0);
+        let gain = (reference / est).clamp(1.0 / ILLUM_MAX_GAIN, ILLUM_MAX_GAIN);
+        let damped = 1.0 + ILLUM_STRENGTH * (gain - 1.0);
+        let v = f64::from(gray.get_pixel(x, y).0[0]) * damped;
+        *px = Luma([v.round().clamp(0.0, 255.0) as u8]);
+    }
+    out
+}
+
+/// Local-mean adaptive threshold (recall rung only): white where the
+/// pixel reaches its block mean minus `ADAPTIVE_OFFSET`. Uniform paper
+/// and uniform surroundings both stay white; the boundary leaves a dark
+/// moat that closing + Canny turn into the page ring — the texture-
+/// independent split global Otsu cannot make on trimodal histograms.
+/// Integer-exact via an integral image (detection-scale, transient).
+fn adaptive_binary(gray: &GrayImage, block_radius: i32, offset: u32) -> GrayImage {
+    let (w, h) = (gray.width() as i32, gray.height() as i32);
+    let stride = (w + 1) as usize;
+    let mut integral = vec![0u32; stride * (h as usize + 1)];
+    for y in 0..h {
+        let mut row_sum = 0u32;
+        for x in 0..w {
+            row_sum += u32::from(gray.get_pixel(x as u32, y as u32).0[0]);
+            let above = integral[y as usize * stride + (x + 1) as usize];
+            integral[(y as usize + 1) * stride + (x + 1) as usize] = above + row_sum;
+        }
+    }
+    // Integral border: anything outside the image sums to zero, so
+    // `at(-1, *)` / `at(*, -1)` is the standard zero row/column.
+    let at = |x: i32, y: i32| -> u32 {
+        if x < 0 || y < 0 {
+            0
+        } else {
+            integral[(y as usize + 1) * stride + (x + 1) as usize]
+        }
+    };
+    let mut out = GrayImage::new(gray.width(), gray.height());
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = (x - block_radius).max(0);
+            let y0 = (y - block_radius).max(0);
+            let x1 = (x + block_radius).min(w - 1);
+            let y1 = (y + block_radius).min(h - 1);
+            // Box sum via the integral image (inclusive edges).
+            let sum = u64::from(at(x1, y1)) + u64::from(at(x0 - 1, y0 - 1))
+                - u64::from(at(x0 - 1, y1))
+                - u64::from(at(x1, y0 - 1));
+            let count = u64::from((x1 - x0 + 1) as u32) * u64::from((y1 - y0 + 1) as u32);
+            // v + offset >= mean  ⟺  (v + offset) * count >= sum.
+            let lhs = u64::from(gray.get_pixel(x as u32, y as u32).0[0]) + u64::from(offset);
+            let white = lhs * count >= sum;
+            out.put_pixel(x as u32, y as u32, Luma([if white { 255u8 } else { 0u8 }]));
+        }
+    }
+    out
+}
+
+/// Adaptive block radius scales with the detection frame (≈1/16 of the
+/// short edge) — big enough to see past ink strokes and pattern motifs,
+/// small enough to stay local at live-tick (~160px) scale.
+fn adaptive_radius(sw: u32, sh: u32) -> i32 {
+    let short = i32::try_from(sw.min(sh)).unwrap_or(DETECT_LONG_EDGE as i32);
+    (short / 16).clamp(8, 48)
 }
 
 /// Extracts area-ordered contour point loops from an edge map, with the
@@ -276,13 +535,14 @@ fn contours_from_edges(edges: &GrayImage) -> Vec<Vec<Point>> {
 /// Fits every contour (bounded epsilon sweep, per-contour best) and
 /// keeps quads passing the UNCHANGED gates: `validate_quad` + the
 /// `MIN_EDGE_SUPPORT` support threshold. No gate weakening anywhere.
+/// `map_idx` is stamped onto each candidate for support-map lookup.
 fn collect_scored_candidates(
     contours: &[Vec<Point>],
     support_map: &GrayImage,
     sw: u32,
     sh: u32,
     frame_area: f64,
-    from_fallback: bool,
+    map_idx: u8,
 ) -> Vec<ScoredCandidate> {
     let mut out = Vec::new();
     for pts in contours {
@@ -312,9 +572,10 @@ fn collect_scored_candidates(
             let cand = ScoredCandidate {
                 quad,
                 area_frac,
+                support,
                 rank,
                 confidence,
-                from_fallback,
+                map_idx,
             };
             let better = match &best {
                 None => true,
@@ -1214,6 +1475,45 @@ mod tests {
             Point::new(328.0, 790.0),
         );
         assert!(try_merge_horizontal(&left, &low).is_none());
+        // Nested inner block: its "gap" is ~a full width negative and
+        // must never merge into the page it sits inside.
+        let page = Quad::new(
+            Point::new(90.0, 130.0),
+            Point::new(550.0, 130.0),
+            Point::new(550.0, 670.0),
+            Point::new(90.0, 670.0),
+        );
+        let block = Quad::new(
+            Point::new(300.0, 300.0),
+            Point::new(520.0, 300.0),
+            Point::new(520.0, 500.0),
+            Point::new(300.0, 500.0),
+        );
+        assert!(try_merge_horizontal(&page, &block).is_none());
+    }
+
+    #[test]
+    fn merge_joins_soft_fold_halves_with_overlap() {
+        // Soft folds shade each half's fitted corner a few px past the
+        // fold core, so the fitted halves can overlap slightly at the
+        // gutter. The overlap (small NEGATIVE gap) must still merge.
+        let left = Quad::new(
+            Point::new(90.0, 130.0),
+            Point::new(322.0, 130.0),
+            Point::new(322.0, 670.0),
+            Point::new(90.0, 670.0),
+        );
+        let right = Quad::new(
+            Point::new(316.0, 130.0),
+            Point::new(550.0, 130.0),
+            Point::new(550.0, 670.0),
+            Point::new(316.0, 670.0),
+        );
+        let merged = try_merge_horizontal(&left, &right).expect("overlapping halves merge");
+        assert_eq!(merged.tl, Point::new(90.0, 130.0));
+        assert_eq!(merged.tr, Point::new(550.0, 130.0));
+        assert_eq!(merged.br, Point::new(550.0, 670.0));
+        assert_eq!(merged.bl, Point::new(90.0, 670.0));
     }
 
     #[test]
@@ -1268,6 +1568,33 @@ mod tests {
     }
 
     #[test]
+    fn ranker_prefers_page_over_large_pattern_patch() {
+        // Patterned-vs-page (F-21 bedsheet class): a big light cartoon
+        // patch fits as a clean near-square with strong support. It must
+        // still lose to the page on the unchanged weights — evidence
+        // that no weight retune is needed for this scene class.
+        let patch = Quad::new(
+            Point::new(40.0, 40.0),
+            Point::new(340.0, 40.0),
+            Point::new(340.0, 330.0),
+            Point::new(40.0, 330.0),
+        );
+        let page = Quad::new(
+            Point::new(120.0, 150.0),
+            Point::new(560.0, 118.0),
+            Point::new(580.0, 672.0),
+            Point::new(100.0, 700.0),
+        );
+        let frame = 640.0 * 800.0;
+        let (patch_rank, _) = rank_scores(patch.area() / frame, 0.88, &patch);
+        let (page_rank, _) = rank_scores(page.area() / frame, 0.95, &page);
+        assert!(
+            page_rank > patch_rank,
+            "page {page_rank} must beat patch {patch_rank}"
+        );
+    }
+
+    #[test]
     fn aspect_sanity_is_mild_penalty_only() {
         // A4-ish portrait: 200x283 ≈ 1.414.
         let a4 = Quad::new(
@@ -1309,9 +1636,10 @@ mod tests {
         let a = ScoredCandidate {
             quad: q,
             area_frac: 0.48,
+            support: 0.9,
             rank,
             confidence: conf,
-            from_fallback: false,
+            map_idx: 0,
         };
         let mut b = a.clone();
         // Nudge one corner by 2px: rank ties within ε, area decides.
@@ -1441,7 +1769,7 @@ mod tests {
         let contours = contours_from_edges(&edges);
         assert!(!contours.is_empty(), "frame edges yield contours");
         let cands =
-            collect_scored_candidates(&contours, &support, w, h, f64::from(w) * f64::from(h), true);
+            collect_scored_candidates(&contours, &support, w, h, f64::from(w) * f64::from(h), 1);
         assert!(
             !cands.is_empty(),
             "fallback-style edges yield a passing quad"
@@ -1655,5 +1983,483 @@ mod tests {
         }
         let perim = poly_perimeter(&loop_pts);
         assert!(approx_closed_quad(&loop_pts, RDP_EPSILON_FRAC * perim).is_some());
+    }
+
+    // ---- Field-scene fixtures (F-21 bedsheet wave, 2026-10-03) ----
+    //
+    // Synthetic replicas of the reported field scene and its isolations:
+    // patterned bedsheet (trimodal histogram), open-book soft fold,
+    // handwriting-dense paper, frame-touching page (H-A contact kill).
+
+    /// Deterministic per-pixel noise (no rand dependency in tests).
+    fn noise(x: u32, y: u32) -> u8 {
+        ((x * 7919 + y * 104729) % 23) as u8
+    }
+
+    /// Bounds-checked pixel write (fixture drawing only).
+    fn px_put(img: &mut [u8], w: u32, x: i32, y: i32, rgb: [u8; 3]) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as u32, y as u32);
+        let o = (y as usize * w as usize + x as usize) * 3;
+        if o + 3 <= img.len() {
+            img[o] = rgb[0];
+            img[o + 1] = rgb[1];
+            img[o + 2] = rgb[2];
+        }
+    }
+
+    /// Deterministic 2D hash (fixture texture/dash pattern only).
+    fn hash2(x: i32, y: i32) -> u32 {
+        ((x as u32).wrapping_mul(374_761_393) ^ (y as u32).wrapping_mul(668_265_263))
+            .wrapping_mul(1_274_126_177)
+            >> 8
+    }
+
+    /// Filled disc (cartoon patch / curl blob).
+    fn draw_disc(img: &mut [u8], w: u32, cx: i32, cy: i32, r: i32, rgb: [u8; 3]) {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r * r {
+                    px_put(img, w, cx + dx, cy + dy, rgb);
+                }
+            }
+        }
+    }
+
+    /// Chunky plus+diamond star (bedsheet pattern motif).
+    fn draw_star(img: &mut [u8], w: u32, cx: i32, cy: i32, r: i32, rgb: [u8; 3]) {
+        let t = (r / 4).max(1);
+        for d in -r..=r {
+            for k in -t..=t {
+                px_put(img, w, cx + d, cy + k, rgb);
+                px_put(img, w, cx + k, cy + d, rgb);
+            }
+        }
+        let q = (r as f64 * 0.7) as i32;
+        for dy in -q..=q {
+            for dx in -q..=q {
+                if dx.abs() + dy.abs() <= q {
+                    px_put(img, w, cx + dx, cy + dy, rgb);
+                }
+            }
+        }
+    }
+
+    /// Dashed ink strokes inside a quad — pen-like handwriting density.
+    /// `cov` is the on-stroke fraction along each ruled line. Text keeps
+    /// a small margin from the paper edge (the fixtures model boundary
+    /// interference separately via margin scribbles).
+    fn write_handwriting(
+        img: &mut [u8],
+        w: u32,
+        q: &Quad,
+        ink: [u8; 3],
+        step: u32,
+        thick: u32,
+        cov: u32,
+    ) {
+        let c = q.corners();
+        let y0 = c.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) as i32;
+        let y1 = c.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max) as i32;
+        for y in (y0 + 12..y1 - 8).step_by(step as usize) {
+            for t in 0..thick {
+                for x in 0..w as i32 {
+                    let p = Point::new(f64::from(x) + 0.5, f64::from(y) + f64::from(t) + 0.5);
+                    let inside_margin = point_in_convex(&p, &c)
+                        && (0..4).all(|i| point_line_dist(&p, &c[i], &c[(i + 1) % 4]) > 6.0);
+                    if inside_margin && hash2(x / 5, y) % 100 < cov {
+                        px_put(img, w, x, y + t as i32, ink);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detects_open_notebook_on_patterned_bedsheet() {
+        // Field report 2026-10-03: open notebook (two-page spread, center
+        // gutter, handwritten ink, slightly tilted, curling corners) on a
+        // bright patterned bedsheet — pink/red base with yellow stars AND
+        // light cartoon patches whose luma competes with paper — under a
+        // soft hand/phone shadow. Trimodal histogram (research §11 H-B):
+        // global Otsu must not split lit-vs-shadowed and lose the spread.
+        let (img, w, h, outer) = bedsheet_fixture();
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects spread on patterned sheet");
+        for (got, want) in d.quad.corners().iter().zip(outer.corners().iter()) {
+            assert!(got.dist(want) < 36.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_open_notebook_on_patterned_bedsheet_at_live_scale() {
+        // The field report comes from the LIVE guidance pill, which
+        // detects ~160px camera frames — not the 640x800 lab scale. At
+        // camera-frame scale the gutter, ink and patch detail compress
+        // into a few pixels each and the trimodal split tightens. Same
+        // scene, long edge 192; tolerances scale with it.
+        let (big, bw, bh, outer) = bedsheet_fixture();
+        let (w, h) = (256u32, 320u32);
+        let flat = rgb_samples(&big, bw, bh);
+        let view = flat.as_view::<Rgb<u8>>().expect("view");
+        let small = imageops::resize(&view, w, h, imageops::FilterType::Triangle);
+        let img = small.as_raw().clone();
+        let s = f64::from(w) / f64::from(bw);
+        let scale_p = |p: Point| Point::new(p.x * s, p.y * s);
+        let q = Quad::new(
+            scale_p(outer.tl),
+            scale_p(outer.tr),
+            scale_p(outer.br),
+            scale_p(outer.bl),
+        );
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects spread at live scale");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 10.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    /// The field-report scene (see the test above): returns the RGB
+    /// buffer, dims, and the ground-truth spread quad.
+    fn bedsheet_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (640u32, 800u32);
+        let outer = Quad::new(
+            Point::new(96.0, 150.0),
+            Point::new(556.0, 118.0),
+            Point::new(578.0, 672.0),
+            Point::new(84.0, 700.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        // Pink/red bedsheet base + sensor noise.
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 206u8.saturating_add(n);
+                img[o + 1] = 92u8.saturating_add(n);
+                img[o + 2] = 112u8.saturating_add(n);
+            }
+        }
+        // Yellow stars (luma ~200) scattered on the sheet.
+        for (sx, sy) in [
+            (60, 60),
+            (320, 60),
+            (580, 70),
+            (46, 400),
+            (610, 380),
+            (140, 760),
+            (420, 770),
+            (600, 720),
+        ] {
+            draw_star(&mut img, w, sx, sy, 22, [236, 216, 96]);
+        }
+        // Light cartoon patches (luma ~228) — paper-competitive in Otsu.
+        // Several sit within a few px of the spread edge so bridging and
+        // blob-merging mistakes are exercised too.
+        for (px, py, pr) in [
+            (300, 112, 20),
+            (575, 260, 24),
+            (60, 560, 22),
+            (330, 748, 26),
+            (200, 60, 18),
+            (612, 560, 20),
+        ] {
+            draw_disc(&mut img, w, px, py, pr, [230, 224, 228]);
+        }
+        // The spread: white-ish paper on top of the sheet.
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &outer.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 238u8.saturating_sub(n);
+                    img[o + 1] = 236u8.saturating_sub(n);
+                    img[o + 2] = 231u8.saturating_sub(n);
+                }
+            }
+        }
+        // Soft center gutter: smooth shading valley along the fold line
+        // (top-edge mid to bottom-edge mid), no hard spine bar.
+        let (gx0, gy0) = (326.0f64, 134.0f64);
+        let (gx1, gy1) = (331.0f64, 686.0f64);
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !point_in_convex(&p, &outer.corners()) {
+                    continue;
+                }
+                let t = ((p.y - gy0) / (gy1 - gy0)).clamp(0.0, 1.0);
+                let gx = (gx1 - gx0).mul_add(t, gx0);
+                let d = (p.x - gx).abs();
+                if d < 16.0 {
+                    let shade = (46.0 * (1.0 - d / 16.0)) as u8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = img[o].saturating_sub(shade);
+                    img[o + 1] = img[o + 1].saturating_sub(shade);
+                    img[o + 2] = img[o + 2].saturating_sub(shade);
+                }
+            }
+        }
+        // Handwritten ink across both pages: dense enough to compete
+        // with the paper-vs-background split in the global histogram
+        // (research §11 H-B) without erasing the silhouette.
+        write_handwriting(&mut img, w, &outer, [64, 58, 62], 12, 4, 78);
+        // Curl shading at the bottom corners: a curled corner darkens
+        // the paper inside the silhouette — it does not eat the edge.
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !point_in_convex(&p, &outer.corners()) {
+                    continue;
+                }
+                for (cx, cy, r) in [(96.0, 690.0, 44.0), (566.0, 662.0, 40.0)] {
+                    let d = ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt();
+                    if d < r {
+                        let shade = (26.0 * (1.0 - d / r)) as u8;
+                        let o = (y as usize * w as usize + x as usize) * 3;
+                        img[o] = img[o].saturating_sub(shade);
+                        img[o + 1] = img[o + 1].saturating_sub(shade);
+                        img[o + 2] = img[o + 2].saturating_sub(shade);
+                    }
+                }
+            }
+        }
+        // Soft hand/phone shadow across the lower right of sheet AND
+        // spread: shadowed paper falls to sheet brightness, the H-B
+        // "shadow makes the histogram trimodal" mode where global Otsu
+        // splits lit-vs-shadowed and loses half the page.
+        for y in 0..h {
+            for x in 0..w {
+                let d = 0.6 * f64::from(x) + 0.8 * f64::from(y);
+                let shade = ((d - 540.0) / 220.0).clamp(0.0, 1.0) * 0.35;
+                if shade > 0.0 {
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    for c in &mut img[o..o + 3] {
+                        *c = (f64::from(*c) * (1.0 - shade)).round() as u8;
+                    }
+                }
+            }
+        }
+        (img, w, h, outer)
+    }
+
+    #[test]
+    fn detects_open_spread_with_soft_fold() {
+        // Soft fold (gradual shading valley, no hard spine): Otsu cuts the
+        // valley mid-slope and the binary splits into two page halves.
+        // The halves must reunite into the outer spread boundary even
+        // when their fitted quads overlap slightly at the fold.
+        let (w, h) = (640u32, 800u32);
+        let outer = Quad::new(
+            Point::new(90.0, 130.0),
+            Point::new(550.0, 120.0),
+            Point::new(560.0, 672.0),
+            Point::new(100.0, 682.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 152u8.saturating_sub(n);
+                img[o + 1] = 149u8.saturating_sub(n);
+                img[o + 2] = 146u8.saturating_sub(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !point_in_convex(&p, &outer.corners()) {
+                    continue;
+                }
+                let o = (y as usize * w as usize + x as usize) * 3;
+                let n = noise(x, y) / 6;
+                img[o] = 236u8.saturating_sub(n);
+                img[o + 1] = 234u8.saturating_sub(n);
+                img[o + 2] = 229u8.saturating_sub(n);
+            }
+        }
+        // Smooth cosine shading valley across the fold: paper 236 → 108
+        // at the core → 236 over ±14px. Soft, but dark enough that the
+        // global threshold separates the halves.
+        let (gx0, gx1) = (322.0f64, 330.0f64);
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !point_in_convex(&p, &outer.corners()) {
+                    continue;
+                }
+                let t = ((p.y - 125.0) / (677.0 - 125.0)).clamp(0.0, 1.0);
+                let gx = (gx1 - gx0).mul_add(t, gx0);
+                let d = (p.x - gx).abs();
+                if d < 14.0 {
+                    let k = (std::f64::consts::PI * (1.0 - d / 14.0) / 2.0).cos();
+                    let shade = (128.0 * k) as u8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = img[o].saturating_sub(shade);
+                    img[o + 1] = img[o + 1].saturating_sub(shade);
+                    img[o + 2] = img[o + 2].saturating_sub(shade);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &outer, [70, 66, 68], 22, 3, 40);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects soft-fold spread");
+        // Outer spread found (not one of the halves): full width expected.
+        let width = d.quad.tr.dist(&d.quad.tl);
+        assert!(width > 380.0, "got half page instead of spread: {width}");
+        for (got, want) in d.quad.corners().iter().zip(outer.corners().iter()) {
+            assert!(got.dist(want) < 32.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_handwriting_dense_page() {
+        // Ink competes with the paper-vs-desk split inside the global
+        // histogram (research §11 H-B handwriting mode): ~35% ink
+        // coverage plus margin writing crossing the left edge.
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(130.0, 110.0),
+            Point::new(520.0, 140.0),
+            Point::new(500.0, 700.0),
+            Point::new(110.0, 660.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 118u8.saturating_add(n);
+                img[o + 1] = 116u8.saturating_add(n);
+                img[o + 2] = 112u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 232u8.saturating_sub(n);
+                    img[o + 1] = 230u8.saturating_sub(n);
+                    img[o + 2] = 225u8.saturating_sub(n);
+                }
+            }
+        }
+        // Dense ruled ink + margin scribbles crossing the left edge:
+        // ~35%+ coverage so ink competes with the paper-vs-desk split
+        // inside the global histogram (research §11 H-B handwriting).
+        write_handwriting(&mut img, w, &q, [58, 54, 58], 10, 4, 78);
+        for y in (200..640).step_by(26) {
+            for x in 100..132 {
+                if hash2(x, y / 4) % 100 < 55 {
+                    px_put(&mut img, w, x, y, [58, 54, 58]);
+                    px_put(&mut img, w, x, y + 1, [58, 54, 58]);
+                }
+            }
+        }
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects dense handwriting page");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 30.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_frame_touching_page() {
+        // H-A contact kill: the page's left edge lies ON the frame edge,
+        // so its boundary ring is cut off at x=0 and no closed contour
+        // exists at all. The page is still ≥5% and ≤99% of the frame and
+        // must be found.
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(0.0, 100.0),
+            Point::new(380.0, 100.0),
+            Point::new(380.0, 700.0),
+            Point::new(0.0, 700.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 42u8.saturating_add(n);
+                img[o + 1] = 40u8.saturating_add(n);
+                img[o + 2] = 38u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 234u8.saturating_sub(n);
+                    img[o + 1] = 232u8.saturating_sub(n);
+                    img[o + 2] = 228u8.saturating_sub(n);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &q, [66, 62, 64], 20, 3, 45);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects frame-touching page");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 26.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_frame_touching_page_on_bright_background() {
+        // Polarity flip of the contact case: dark-ish page against a
+        // bright desk, bottom edge flush with the frame. Whichever
+        // polarity is the "white" Otsu class, the cut ring must close.
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(120.0, 140.0),
+            Point::new(540.0, 120.0),
+            Point::new(560.0, 800.0),
+            Point::new(100.0, 800.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 226u8.saturating_sub(n);
+                img[o + 1] = 224u8.saturating_sub(n);
+                img[o + 2] = 218u8.saturating_sub(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 148u8.saturating_sub(n);
+                    img[o + 1] = 146u8.saturating_sub(n);
+                    img[o + 2] = 142u8.saturating_sub(n);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &q, [72, 70, 74], 22, 3, 35);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects bright-side frame-touching page");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 30.0, "{got:?} vs {want:?}");
+        }
     }
 }
