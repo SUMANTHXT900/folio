@@ -4,7 +4,13 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
-No active issues — every recorded issue is resolved below.
+### F-11 — Intermittent white-page detection misses (scanner)
+
+- **Status.** Active, root-caused, not fixed. **Area.** Scanner (`scan/src/detect.rs`, `scan/src/geometry.rs`, capture UX). **Severity.** High (target 70–80% hit rate not met on the core white-page-on-dark-background scene).
+- **Symptoms.** Same scene, different tap timing, different outcome: detection succeeds sometimes, silently falls back to auto-accept-as-photo otherwise. No error surfaces.
+- **Root cause (4 stacked modes, full analysis in `docs/scanner-v2.1-research.md` §11).** H-A: page edges touching the frame never form closed loops (Canny zero border) — contact-triggered kill. H-B: global Otsu collapses on shadows/glare/gradients and Canny-on-binary cannot recover — flips with shadow fraction. H-C: exactly-4 RDP rule + 0.5 support gate discard rounded/curled/spiral/written pages as `None`. H-D: AF/AE hunts up to tap time with no sharpness/steadiness gate.
+- **Fix direction.** Not chosen yet — ranked proposal list in research §11, cheapest first (guidance copy → grayscale-Canny fallback → 5–8-gon acceptance → fallback quad → illumination/scoring/fusion/Adjust-crop).
+- **Verification.** Pending: failing-sample evidence per §11 discriminator + synthetic fixtures (rounded, curl, spiral, shadow-gradient) on the Rust-capable side.
 
 ## Known limitations (by design, not defects)
 

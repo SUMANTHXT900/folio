@@ -415,3 +415,10 @@ Chronological record of meaningful development events. Each entry records object
 
 - Renamed `docs/SCANNER-V2.1-RESEARCH.md` → `docs/scanner-v2.1-research.md` (git mv, history preserved) per request for lowercase handoff naming.
 - Established the reusable convention: future research handoffs live as lowercase `docs/<topic>-research.md` with the same section shape; convention recorded in `AGENTS.md`, template note added to the brief itself. List entry updated, count stays 15 documents.
+
+## 2026-10-02 — White-page detection misses: 4-agent root-cause round + research doc update (Hermes agent)
+
+- **Objective.** Field report: white pages on dark backgrounds detect only intermittently, below the 70–80% hit rate needed.
+- **Work.** Four parallel investigators, read-only: (H-A) frame-edge clipping kills border-touching pages; (H-B) global Otsu collapses on shadows/glare with no Canny-on-binary recovery; (H-C) exactly-4 RDP + 0.5 support cliffs discard real pages; (H-D) AF/AE shutter luck with no quality gates. Separately validated the 2026-10-01 v2.1 brief (5-agent round): all verdicts stand.
+- **Docs.** `docs/scanner-v2.1-research.md` §11 (failure analysis) + §12 (on-device primer), both credited to Hermes agent; new active `docs/BUGS.md` F-11. No ROADMAP/DECISIONS changes — no direction chosen.
+- **Verification.** Docs-only push from the Rust-less side: full suite re-verification stays on the Rust-capable side.

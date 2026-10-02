@@ -226,3 +226,97 @@ stays opt-in, never default, never automatic.
   annoyance rate need on-phone testing with the countdown/cap policy.
 - `test pdfs/` corpus is gitignored/local-only; E2E fake camera
   (runtime Y4M) covers plumbing, not photo realism.
+
+## 11. Field failure analysis: white-page misses (Hermes agent, 2026-10-02)
+
+Researched and written by Hermes agent. Four parallel investigators traced
+code paths in `scan/src/detect.rs` + `scan/src/geometry.rs` against a field
+report: white pages on dark/uniform backgrounds detect only intermittently,
+well below the 70–80% hit rate the product needs. Research only — no
+implementation, no direction chosen.
+
+### Symptom
+
+Same scene, different tap timing, different outcome: detection succeeds
+sometimes, silently falls back to auto-accept-as-photo the rest of the time.
+No error surfaces; the miss is invisible except for the missing crop.
+
+### H-A — Frame-edge clipping (likely)
+
+`find_contours` runs on the Canny edge map (thin strokes), and Canny output
+carries a permanent zero 1px frame (hysteresis seeds interior pixels only).
+A page edge touching or exiting the frame therefore yields open strokes, not
+closed loops: full-span strokes produce zero contours (outer start requires
+`x > 0`), U/C strokes double back into ~0-area loops killed by
+`MIN_CONTOUR_AREA_FRAC`, and near-exact fits die at the 99% area gate
+(`geometry.rs:212`). Kill is contact-triggered, not size-triggered —
+any edge crossing the frame kills regardless of page size. Existing fixtures
+all use ≥80px margins, so this path is untested. Fixes, cheapest first:
+guidance copy ("leave a margin"), full-frame fallback quad at low
+confidence (~20 lines), partial-quad acceptance (~40–60 lines), 99%→99.9%
+for the exact-fit sliver.
+
+### H-B — Global Otsu fragility (most likely)
+
+`detect.rs:90-94` runs global Otsu → close → Canny **on the binary**, so
+Sobel gradients are 0 everywhere except step edges and hysteresis recovery
+is impossible — whatever Otsu destroys stays destroyed. A hand/phone shadow
+makes the histogram trimodal; Otsu's area-weighted split lands between
+shadow-paper and lit-paper when the shadow is large (page half merges with
+desk) and below both when it is small (page survives) — hence intermittent,
+flipping with shadow fraction. Same story for glare (boundary gaps closing
+r=2 cannot bridge), dim gradients (Otsu always returns a number, splitting
+the hill mid-slope), and handwriting-dense pages (ink competes with the
+paper-vs-desk split). Fixes: grayscale-Canny fallback when the binary path
+yields nothing (~15 lines, zero cost on success) + bimodality guard on the
+already-built histogram; §6 illumination pre-step upstream; local-mean
+adaptive only as a gated secondary path (it erases boundaries on clean
+uniform backgrounds — never a wholesale Otsu replacement).
+
+### H-C — Acceptance cliffs (confirmed)
+
+`approx_closed_quad` demands exactly 4 RDP points at a single epsilon
+(`detect.rs:413`) — rounded notebook corners, curl, spiral binding, and
+margin writing touching the boundary all produce 5–8 points and are silently
+discarded. `support < 0.5` likewise returns `None` instead of a weak guess,
+so near-misses are indistinguishable from no-page. Winner is largest-first,
+never re-ranked. Fixes: accept 5–8-gons + fit quad from 4 dominant corners
+(~40–60 lines, highest recall leverage) → epsilon sweep (~10 lines) →
+quad-scoring ranker (§3A) → graded low-confidence returns (needs caller
+work) → edge refinement last (§3B pays off only once corners are roughly
+right).
+
+### H-D — Shutter luck (amplifier, not sole cause)
+
+`requestContinuousModes()` lets AF/AE hunt up to tap time; the shutter grabs
+whatever frame is current with no sharpness/exposure/steadiness gate, then
+runs one fresh full-res detection. Verified: no "fill the frame" copy exists
+(pill says "Frame the page in the guide"), but the inset guide rect invites
+edge-fitting and nothing says "leave a margin" or "hold steady"; manual crop
+does not exist yet so fallback captures skip review entirely. Fixes: copy
+("Fit page inside guide, leave a small margin", "Hold steady — capture when
+ready"), main-thread sharpness + exposure pre-check (telemetry first),
+~500–800ms settle assist after first `liveDetected`, multi-frame fusion
+(§3C), Adjust-crop (§4).
+
+### Evidence still needed to discriminate
+
+Per failing sample: result status + whether the pill showed detected at tap
+time; page coverage % (<50 / 50–70 / 70–90 / edge-touching); blank vs
+written page; lighting + shadow/glare across page; distance, angle,
+handheld vs rested, settle time before tap. Edge-touching + high coverage →
+H-A; shadow/glare present → H-B; notebook/rounded/spiral → H-C; pill
+flicker + low coverage → H-D.
+
+## 12. Primer: how on-device scan filtering works (Hermes agent, 2026-10-02)
+
+No server is involved at any step — the camera frame sits in tab memory and
+everything below is arithmetic on pixels, which is why steps 4–6 fail
+identically on-device or in a datacenter: capture via `getUserMedia` to
+canvas → downscale to ~800px (shapes don't need megapixels) → grayscale +
+blur → threshold into page/background blobs (Otsu or local-mean) → Canny
+edges → contour tracing with area filtering → quad fit + geometric checks →
+homography un-warp with interpolation → lighting normalization → mode filter
+(color passthrough / Rec.601 grayscale / adaptive B&W) → JPEG encode. Heavy
+full-res steps run in a WASM worker (here Rust, ~542KB) so the UI never
+freezes; 800px-scale steps are cheap enough for plain JS.
