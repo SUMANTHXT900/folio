@@ -196,19 +196,38 @@ async function bodyText(page) {
 }
 
 /**
- * Review-queue flow (2026-10-02 scanner UX restructure): every capture
- * queues silently and is reviewed ONE page at a time in the full-screen
- * queue (original photo + quad overlay). These helpers read the queue
- * state, exercise the drag + keyboard mechanics deterministically
- * (synthetic pointer / keyboard events, no CDP-mouse flakiness), and
- * click one per-page decision.
+ * Review-queue flow (capture-first scanner, result-first review): every
+ * capture queues silently and is reviewed ONE page at a time in the
+ * full-screen queue. The hero of the review is the CROPPED RESULT
+ * (preview requested on page entry); "Adjust corners" toggles the photo
+ * + quad editor. These helpers read the queue state, exercise the drag +
+ * keyboard mechanics deterministically (synthetic pointer / keyboard
+ * events, no CDP-mouse flakiness), and click one per-page decision.
  */
 async function reviewQueueState(page) {
   return page.evaluate(() => ({
     open: document.querySelector('[data-scan-queue]') !== null,
     header: document.querySelector('[data-scan-queue] p[role="status"]')?.textContent ?? '',
     handles: document.querySelectorAll('[data-crop-handle]').length,
+    resultShown: document.querySelector('[data-crop-result]') !== null,
+    progress: document.querySelector('[data-review-progress]')?.getAttribute('aria-label') ?? '',
   }));
+}
+
+/** Waits for the result-first preview image to decode (worker rewrap). */
+async function waitForResultPreview(page, timeout = 180000) {
+  await page.waitForFunction(
+    () => {
+      const img = document.querySelector('[data-crop-result-img]');
+      return img !== null && img.naturalWidth > 0;
+    },
+    { timeout },
+  );
+}
+
+/** Opens the review queue through the self-explanatory review CTA. */
+async function clickReviewCta(page) {
+  await page.evaluate(() => document.querySelector('[data-review-cta]')?.click());
 }
 
 /** Drag the top-left handle (pointer path) + arrow-key the top-right (slider path). */
@@ -237,7 +256,7 @@ async function exerciseCropHandles(page) {
   });
 }
 
-/** Clicks one per-page queue decision by its exact label ("Use crop" / "Use original" / "Discard"). */
+/** Clicks one per-page queue decision by its exact label ("Looks good" / "Apply" / "Use original" / "Back to camera" / "Build PDF"). */
 async function clickQueueAction(page, label) {
   await page.evaluate((text) => {
     [...document.querySelectorAll('[data-scan-queue] button')]
@@ -1035,7 +1054,7 @@ async function main() {
         playing: v !== null && v.readyState >= 2 && !v.paused,
         queueOpen: document.querySelector('[data-scan-queue]') !== null,
         reviewUi: [...document.querySelectorAll('button')].some((b) =>
-          ['Use crop', 'Use original', 'Use scan', 'Discard', 'Confirm crop'].includes(
+          ['Looks good', 'Adjust corners', 'Use original', 'Discard'].includes(
             (b.textContent ?? '').trim(),
           ),
         ),
@@ -1055,54 +1074,191 @@ async function main() {
     // Second capture immediately after — shots are never interrupted.
     await capturePage();
     await stripThumbs(2);
-    // "Pages (N)" with unreviewed captures opens the FULL-SCREEN review
-    // queue: one page at a time, photo large, quad overlay seeded from
-    // the auto corners. Header reads "Page 1 of 2".
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.getAttribute('aria-label') === 'Finish scanning and view pages')
-        ?.click();
+    // Self-explanatory CTA with unreviewed captures: "Review N pages".
+    const reviewCta = await page.evaluate(() => {
+      const b = document.querySelector('[data-review-cta]');
+      return b === null ? null : (b.textContent ?? '').replace(/\s+/g, ' ').trim();
     });
+    check(
+      'images review CTA reads Review N pages',
+      reviewCta !== null && /^Review 2 pages/.test(reviewCta),
+      JSON.stringify(reviewCta),
+    );
+    await clickReviewCta(page);
     await page.waitForFunction(() => document.querySelector('[data-scan-queue]') !== null, {
       timeout: 30000,
     });
     await page.waitForFunction(() => document.body.innerText.includes('Page 1 of 2'), {
       timeout: 30000,
     });
-    const queue = await reviewQueueState(page);
+    // Result-first review: the hero is the CROPPED RESULT (not the raw
+    // photo with a quad). The preview is requested the moment the page is
+    // shown; wait for it to decode, then assert the simplified action set
+    // (44px) and that no corner handles render in result mode.
+    await waitForResultPreview(page);
+    const resultFirst = await reviewQueueState(page);
+    const reviewActions = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll('[data-scan-queue] button')];
+      const byText = (text) => buttons.find((b) => (b.textContent ?? '').trim() === text) ?? null;
+      const looksGood = byText('Looks good');
+      const adjust = byText('Adjust corners');
+      const useOriginal = byText('Use original');
+      const discard = buttons.find((b) => b.getAttribute('aria-label') === 'Discard page') ?? null;
+      return {
+        looksGood: looksGood !== null,
+        looksGoodH: looksGood?.getBoundingClientRect().height ?? 0,
+        adjust: adjust !== null,
+        adjustH: adjust?.getBoundingClientRect().height ?? 0,
+        useOriginal: useOriginal !== null,
+        useOriginalH: useOriginal?.getBoundingClientRect().height ?? 0,
+        discard: discard !== null,
+      };
+    });
     check(
-      'images review queue shows Page 1 of 2 with 4 draggable corner handles',
-      queue.open && queue.handles === 4,
-      JSON.stringify(queue),
+      'images review shows the cropped result with simplified actions',
+      resultFirst.open &&
+        resultFirst.resultShown &&
+        reviewActions.looksGood &&
+        reviewActions.adjust &&
+        reviewActions.useOriginal &&
+        reviewActions.discard &&
+        resultFirst.handles === 0,
+      JSON.stringify({ resultFirst, reviewActions }),
     );
-    const interacted = await exerciseCropHandles(page);
-    check('images crop handles respond to drag + keyboard', interacted);
-    // Page 1: "Use crop" (full-res rewrap → commit processed page → advance).
-    await clickQueueAction(page, 'Use crop');
+    check(
+      'images review actions meet the 44px touch target',
+      reviewActions.looksGoodH >= 44 &&
+        reviewActions.adjustH >= 44 &&
+        reviewActions.useOriginalH >= 44,
+      JSON.stringify(reviewActions),
+    );
+    // Page 1: "Looks good" commits the current quad (full-res rewrap) and
+    // advances.
+    await clickQueueAction(page, 'Looks good');
     await page.waitForFunction(() => document.body.innerText.includes('Page 2 of 2'), {
       timeout: 120000,
     });
-    // Page 2: "Use original" (commit as photo → advance). After the last
-    // page the queue closes into the existing page-collection view.
-    await clickQueueAction(page, 'Use original');
+    // Slim per-page progress: one of two reviewed.
+    const progressAfterOne = await page.evaluate(
+      () => document.querySelector('[data-review-progress]')?.getAttribute('aria-label') ?? '',
+    );
+    check(
+      'images review shows per-page progress',
+      progressAfterOne.includes('1 of 2 reviewed'),
+      progressAfterOne,
+    );
+    // Page 2: "Adjust corners" → photo + quad editor (instruction +
+    // handles), drag + keyboard work, "Apply" returns to the result view.
+    // The page may still be preparing; wait for its result view first.
+    await page.waitForFunction(() => document.querySelector('[data-crop-result]') !== null, {
+      timeout: 120000,
+    });
+    await clickQueueAction(page, 'Adjust corners');
+    await page.waitForFunction(() => document.querySelectorAll('[data-crop-handle]').length === 4, {
+      timeout: 30000,
+    });
+    const adjustUi = await page.evaluate(() => ({
+      instruction: document.body.innerText.includes('Drag the corners to fit the page'),
+      resetToAuto: [...document.querySelectorAll('[data-scan-queue] button')].some(
+        (b) => (b.textContent ?? '').trim() === 'Reset to auto',
+      ),
+    }));
+    check(
+      'images adjust mode shows the instruction line and Reset to auto',
+      adjustUi.instruction && adjustUi.resetToAuto,
+      JSON.stringify(adjustUi),
+    );
+    const interacted = await exerciseCropHandles(page);
+    check('images crop handles respond to drag + keyboard', interacted);
+    await clickQueueAction(page, 'Apply');
     await page.waitForFunction(
       () =>
-        document.querySelector('[data-scan-queue]') === null &&
-        document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
+        document.querySelector('[data-crop-result]') !== null &&
+        document.querySelectorAll('[data-crop-handle]').length === 0,
       { timeout: 120000 },
     );
+    await clickQueueAction(page, 'Looks good');
+    // End screen: every page resolved → Build PDF / Back to camera.
+    await page.waitForFunction(() => document.body.innerText.includes('All pages ready'), {
+      timeout: 120000,
+    });
+    const endScreen = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll('[data-scan-queue] button')];
+      return {
+        build: buttons.some((b) => (b.textContent ?? '').trim() === 'Build PDF'),
+        backToCamera: buttons.some((b) => (b.textContent ?? '').trim() === 'Back to camera'),
+      };
+    });
+    check(
+      'images review end screen offers Build PDF and Back to camera',
+      endScreen.build && endScreen.backToCamera,
+      JSON.stringify(endScreen),
+    );
+    // Build shortcut: tapping Build PDF leaves camera mode through the
+    // parent wiring; the Images tool build/naming UI must be reachable.
+    await clickQueueAction(page, 'Build PDF');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-scanner-root]') === null &&
+        document.querySelector('[data-scan-queue]') === null,
+      { timeout: 60000 },
+    );
+    // Wait for either the naming card (auto-build finished) or the
+    // re-enabled Build PDF button (transient build error path). The
+    // predicate must NEVER throw: puppeteer's in-page poller dies silently
+    // on a throwing predicate and the wait then idles to its timeout
+    // (2026-10-03: `b !== null` passed on an `undefined` find() result
+    // while the button read "Building…", killing the poller).
+    const buildEntry = await page
+      .waitForFunction(
+        () => {
+          if (document.querySelector('a[download]') !== null) return 'download';
+          const b = [...document.querySelectorAll('button')].find((x) =>
+            (x.textContent ?? '').startsWith('Build PDF'),
+          );
+          if (b === undefined || b.disabled) return null;
+          return 'button';
+        },
+        { timeout: 120000 },
+      )
+      .then((handle) => handle.jsonValue());
+    if (buildEntry === 'button') {
+      await page.evaluate(() => {
+        [...document.querySelectorAll('button')]
+          .find((b) => (b.textContent ?? '').startsWith('Build PDF'))
+          ?.click();
+      });
+      await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+        timeout: 300000,
+      });
+    }
+    const buildAtEndProbe = await page.evaluate(async () => {
+      const a = document.querySelector('a[download]');
+      if (!a) return null;
+      const res = await fetch(a.href);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return { bytes: buf.length, magic: String.fromCharCode(...buf.slice(0, 5)) };
+    });
+    check(
+      'images Build PDF at review end returns to the Images tool with a real PDF',
+      buildAtEndProbe !== null &&
+        buildAtEndProbe.magic === '%PDF-' &&
+        buildAtEndProbe.bytes > 10000,
+      buildAtEndProbe ? `${buildAtEndProbe.magic} ${buildAtEndProbe.bytes} bytes` : 'missing',
+    );
+    // Both pages committed in capture order (page 1 cropped as-is, page 2
+    // adjusted + cropped).
     let cards = await page.evaluate(() =>
       [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
         (li) => li.getAttribute('aria-label') ?? '',
       ),
     );
     check(
-      'images Use crop and Use original commit both pages in capture order',
+      'images review commits both pages in capture order',
       cards.length === 2 && cards[0].includes('scan-001') && cards[1].includes('scan-002'),
       cards.join(' | '),
     );
-    // The committed page's row preview must decode (rewrapped bytes for
-    // the cropped page, the photo for the original page).
+    // The committed page's row preview must decode (rewrapped bytes).
     const scanPreview = await page.evaluate(() => {
       const img = document.querySelector('ul[aria-label="Pages in PDF order"] > li img');
       return img === null ? null : { naturalWidth: img.naturalWidth, alt: img.alt };
@@ -1112,8 +1268,10 @@ async function main() {
       scanPreview !== null && scanPreview.naturalWidth > 0,
       JSON.stringify(scanPreview),
     );
-    // Scan more (no mode step): collection preserved, third page added
-    // through the same queue flow ("Page 1 of 1" → Use crop).
+    // Scan more (no mode step): collection preserved; the third page goes
+    // through the same result-first queue and is committed with "Use
+    // original" (photo path), then the end screen's "Back to camera"
+    // returns to the live view and the empty-queue CTA leaves to pages.
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
@@ -1147,35 +1305,54 @@ async function main() {
         ).length,
         // Zoom removed (BUGS F-11): no zoom control may ever render.
         zoomControls: document.querySelectorAll('[aria-label*="Camera zoom"]').length,
-        // Primary exit CTA must exist once pages were accepted.
-        hasViewPages: [...document.querySelectorAll('button')].some(
-          (b) => b.getAttribute('aria-label') === 'Finish scanning and view pages',
-        ),
+        // Primary review CTA must exist once pages were accepted.
+        hasReviewCta: document.querySelector('[data-review-cta]') !== null,
       };
     });
     check(
-      'images scanner: Import in bar, no mode selector, no zoom, View pages CTA, centered desktop panel',
+      'images scanner: Import in bar, no mode selector, no zoom, Review CTA, centered desktop panel',
       scannerSurface.hasRoot &&
         scannerSurface.fixed &&
         scannerSurface.boundedPanel &&
         scannerSurface.hasImport &&
         scannerSurface.modeButtons === 0 &&
         scannerSurface.zoomControls === 0 &&
-        scannerSurface.hasViewPages,
+        scannerSurface.hasReviewCta,
       JSON.stringify(scannerSurface),
     );
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.getAttribute('aria-label') === 'Finish scanning and view pages')
-        ?.click();
-    });
+    await clickReviewCta(page);
     await page.waitForFunction(() => document.body.innerText.includes('Page 1 of 1'), {
       timeout: 30000,
     });
-    await clickQueueAction(page, 'Use crop');
+    await waitForResultPreview(page);
+    // "Use original" commits the photo path through the same result-first
+    // queue → end screen.
+    await clickQueueAction(page, 'Use original');
+    await page.waitForFunction(() => document.body.innerText.includes('All pages ready'), {
+      timeout: 120000,
+    });
+    await clickQueueAction(page, 'Back to camera');
     await page.waitForFunction(
       () =>
         document.querySelector('[data-scan-queue]') === null &&
+        document.querySelector('[data-scanner-root]') !== null &&
+        document.querySelector('video') !== null,
+      { timeout: 30000 },
+    );
+    // Queue empty: the CTA falls through to leaving camera mode (`onDone`).
+    const emptyCta = await page.evaluate(() => {
+      const b = document.querySelector('[data-review-cta]');
+      return b === null ? null : (b.textContent ?? '').replace(/\s+/g, ' ').trim();
+    });
+    check(
+      'images review CTA falls through to pages when nothing is queued',
+      emptyCta !== null && /^View 1 page/.test(emptyCta),
+      JSON.stringify(emptyCta),
+    );
+    await clickReviewCta(page);
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-scanner-root]') === null &&
         document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 3,
       { timeout: 120000 },
     );
@@ -1554,7 +1731,9 @@ async function main() {
     const queuedQuietly = await page.evaluate(() => ({
       queueOpen: document.querySelector('[data-scan-queue]') !== null,
       reviewUi: [...document.querySelectorAll('button')].some((b) =>
-        ['Use crop', 'Use original', 'Use scan'].includes((b.textContent ?? '').trim()),
+        ['Looks good', 'Adjust corners', 'Use original', 'Discard'].includes(
+          (b.textContent ?? '').trim(),
+        ),
       ),
     }));
     check(
@@ -1562,14 +1741,25 @@ async function main() {
       !queuedQuietly.queueOpen && !queuedQuietly.reviewUi,
       JSON.stringify(queuedQuietly),
     );
-    // The queue is the crop opportunity: the fallback capture shows the
-    // photo with the 90% inset quad (4 handles) — croppable like any other.
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.getAttribute('aria-label') === 'Finish scanning and view pages')
-        ?.click();
-    });
+    // The queue is the crop opportunity: result-first, then the fallback
+    // capture is croppable via the 90% inset quad (4 handles) in adjust
+    // mode — like any other photo.
+    await clickReviewCta(page);
     await page.waitForFunction(() => document.body.innerText.includes('Page 1 of 1'), {
+      timeout: 30000,
+    });
+    // The page renders result-first once its background prepare settles.
+    await page.waitForFunction(() => document.querySelector('[data-crop-result]') !== null, {
+      timeout: 120000,
+    });
+    const fallbackResult = await reviewQueueState(page);
+    check(
+      'images fallback capture opens result-first in the review queue',
+      fallbackResult.open && fallbackResult.resultShown && fallbackResult.handles === 0,
+      JSON.stringify(fallbackResult),
+    );
+    await clickQueueAction(page, 'Adjust corners');
+    await page.waitForFunction(() => document.querySelectorAll('[data-crop-handle]').length === 4, {
       timeout: 30000,
     });
     const fallbackQueue = await reviewQueueState(page);
@@ -1594,7 +1784,7 @@ async function main() {
     const fallback = await page.evaluate(() => ({
       note: document.body.innerText.includes('Added as photo'),
       blockingReview: [...document.querySelectorAll('button')].some(
-        (b) => b.textContent === 'Use original' || b.textContent === 'Use scan',
+        (b) => b.textContent === 'Looks good' || b.textContent === 'Adjust corners',
       ),
       cards: [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].map(
         (li) => li.getAttribute('aria-label') ?? '',

@@ -1,12 +1,19 @@
 /**
- * Scan processor hook: capture → worker → REVIEW QUEUE for the document
+ * Scan processor hook: capture → REVIEW QUEUE for the document
  * scanner.
  *
- * Capture mode is interruption-free by design (real-user complaint,
- * 2026-10-02): the shutter enqueues a capture, one background detect
- * job runs ("brief processing"), and the capture lands in the queue as a
- * File handle + detect metadata + one preview URL — no modal, no
- * per-capture review panel, no crop editor inline under the viewfinder.
+ * Capture is queue-only (2026-10-02 follow-up user feedback: "let it
+ * take its own time but get accurate results, process in background
+ * while the user captures"). The shutter enqueues a capture INSTANTLY —
+ * capture-order id, original File handle, preview URL of the original,
+ * `state: 'queued'`, dims placeholder — and returns: NO worker call, no
+ * decode, no waiting between shots. A single background drainer then
+ * processes entries ONE at a time, in capture order: `queued` →
+ * `processing` → `ready` (real detect metadata lands with `ready`; a
+ * worker failure settles `ready` with `status: 'error'` + null corners,
+ * so the shot stays a croppable photo — never lost). Captures taken
+ * during a drain queue behind the active job; the camera stays live.
+ *
  * The queue is reviewed later, ONE page at a time, in the full-screen
  * review queue (see `CropEditor.tsx`): "Use crop" (full-res rewrap →
  * commit processed page), "Use original" (commit as photo), "Discard"
@@ -17,21 +24,26 @@
  * are dropped after metadata extraction; every committed page is rebuilt
  * from the retained original File (rewrap) or committed as that File.
  * One `ScanWorkerClient` per hook instance (lazy WASM load on first
- * processing request — or earlier via `warm()` at camera start, so init
- * overlaps viewfinder startup instead of the first live tick / shutter —
- * terminated on reset/unmount).
+ * background drain — or earlier via `warm()` at camera start, so init
+ * overlaps viewfinder startup — terminated on reset/unmount).
  *
  * Generation safety: every async continuation checks the session
  * generation (and an alive flag on unmount). `reset()` (Done / unmount /
- * camera switch with `keepQueue`) bumps it and terminates the worker —
- * stale results are dropped before they can create entries, replace
- * previews, or resurrect sessions. Rapid captures queue EVERY capture in
- * order (never latest-wins: the queue is the review backlog).
+ * camera switch with `keepQueue`) bumps it, invalidates the drainer
+ * token, and terminates the worker — stale results are dropped before
+ * they can settle entries, replace previews, or resurrect sessions. A
+ * `keepQueue` reset returns in-flight entries to `queued` so the fresh
+ * session reprocesses them instead of stranding them mid-`processing` —
+ * rapid captures queue EVERY capture in order (never latest-wins: the
+ * queue is the review backlog).
  *
  * Live detection: `requestLive()` sends the LATEST frame only through
  * the detect-only path (status `detected`, no warp/encode, no bytes);
  * calls while a live request is in flight are skipped (no queue of stale
- * frames). Live corners are guidance ONLY — the shutter always runs a
+ * frames). Live ticks YIELD to capture processing: while any entry is
+ * queued/processing, ticks are skipped so the single worker drains the
+ * capture backlog at full speed; guidance resumes when every entry is
+ * `ready`. Live corners are guidance ONLY — the shutter always runs a
  * fresh full-resolution detection.
  */
 
@@ -90,6 +102,15 @@ export interface ScanQueueEntry {
   original: File;
   /** Object URL of the original photo (strip thumb + queue page). */
   previewUrl: string;
+  /**
+   * Background processing state (frozen contract for the review UI):
+   * `queued` — captured, waiting behind the active job (or the drainer
+   * hasn't picked it up yet); `processing` — its worker job is the ONE
+   * active job; `ready` — settled, `meta` is meaningful NOW. At most one
+   * entry is `processing` at a time; queue order is capture order.
+   */
+  state: 'queued' | 'processing' | 'ready';
+  /** Detect metadata — a dims placeholder until `state === 'ready'`. */
   meta: ScanEntryMeta;
 }
 
@@ -199,7 +220,11 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   const livePendingRef = useRef(false);
   const warmedGenRef = useRef(-1);
   const [processing, setProcessing] = useState(false);
-  const processingJobsRef = useRef(0);
+  // Sequential drainer ownership: `drainingRef` = a loop is active;
+  // `drainSeqRef` = token that invalidates a loop across reset/unmount
+  // (a stale loop may never settle an entry or clear `processing`).
+  const drainingRef = useRef(false);
+  const drainSeqRef = useRef(0);
   const [queued, setQueued] = useState<ScanQueueEntry[]>([]);
   // The queue's imperative source of truth: mutations happen in event
   // handlers and async continuations, and follow-up calls (commit →
@@ -264,29 +289,123 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   }, [commitQueued, revokeCropPreview]);
 
   /**
+   * Sequential background drainer: processes queued captures ONE worker
+   * job at a time, in capture order. `queued → processing` before the
+   * job; the result settles the entry `ready` with real metadata (quad
+   * space = the entry's capture dims, never warp-output dims). Worker
+   * failures settle `ready` with `status: 'error'` + null corners — the
+   * capture stays a croppable photo, never a lost shot. A capture
+   * enqueued mid-drain is picked up by the running loop; concurrent
+   * drains are impossible (token-owned). `reset()`/unmount invalidate
+   * the token, so a stale loop can neither settle entries nor clear
+   * `processing`; every continuation after an await re-checks the
+   * generation + alive guards and returns silently when superseded.
+   */
+  const drainPending = useCallback(async () => {
+    if (drainingRef.current) return;
+    const token = (drainSeqRef.current += 1);
+    drainingRef.current = true;
+    // `processing` === drainer busy (UI progress / live-tick gate).
+    setProcessing(true);
+    try {
+      while (aliveRef.current && drainSeqRef.current === token) {
+        const entry = queuedRef.current.find((e) => e.state === 'queued');
+        if (entry === undefined) break;
+        const gen = genRef.current;
+        commitQueued(
+          queuedRef.current.map((e) =>
+            e.id === entry.id ? { ...e, state: 'processing' as const } : e,
+          ),
+        );
+        let meta: ScanEntryMeta;
+        try {
+          const bytes = new Uint8Array(await entry.original.arrayBuffer());
+          if (!aliveRef.current || genRef.current !== gen) return; // Stale: drop silently.
+          const result = await client().process(bytes, CORE_MODE);
+          if (!aliveRef.current || genRef.current !== gen) return; // Stale: drop silently.
+          meta = {
+            status:
+              result.status === 'processed' || result.status === 'original'
+                ? result.status
+                : 'error',
+            // Quad space is the CAPTURE pixel space (the entry's
+            // placeholder dims). The worker reports warp-OUTPUT dims on
+            // processed results — never seed the quad from those.
+            width: entry.meta.width > 0 ? entry.meta.width : result.width,
+            height: entry.meta.height > 0 ? entry.meta.height : result.height,
+            corners: result.corners,
+          };
+        } catch {
+          // Worker failure: the capture still settles as a croppable
+          // photo (error metadata → 90% inset seed), never a lost shot.
+          if (!aliveRef.current || genRef.current !== gen) return; // Stale: drop silently.
+          meta = {
+            status: 'error',
+            width: entry.meta.width,
+            height: entry.meta.height,
+            corners: null,
+          };
+        }
+        commitQueued(
+          queuedRef.current.map((e) =>
+            e.id === entry.id ? { ...e, state: 'ready' as const, meta } : e,
+          ),
+        );
+      }
+    } finally {
+      // Only the owning (non-invalidated) loop clears the busy flag: a
+      // reset-started drainer must not be stopped by a stale finally.
+      if (drainSeqRef.current === token) {
+        drainingRef.current = false;
+        if (aliveRef.current) setProcessing(false);
+      }
+    }
+  }, [commitQueued]);
+
+  /**
    * Invalidates the session: stale results dropped, worker terminated.
    * `keepQueue` preserves already-queued captures across a camera switch
-   * (the shots survive the hardware restart; only in-flight jobs die).
+   * (the shots survive the hardware restart; in-flight jobs die and
+   * their entries go back to `queued` for the fresh session).
    */
   const reset = useCallback(
     (opts?: { keepQueue?: boolean }) => {
       genRef.current += 1;
       livePendingRef.current = false;
       warmedGenRef.current = -1;
-      processingJobsRef.current = 0;
+      // Invalidate any running drain loop: its continuations belong to
+      // the dead generation and must neither settle entries nor touch
+      // `processing`. The drainer below (keepQueue) owns a fresh token.
+      drainSeqRef.current += 1;
+      drainingRef.current = false;
       setProcessing(false);
       setApplying(false);
       setLiveDetected(false);
-      if (opts?.keepQueue !== true) clearQueue();
-      else revokeCropPreview();
+      if (opts?.keepQueue !== true) {
+        clearQueue();
+      } else {
+        // Camera switch: queued shots survive, in-flight jobs die with
+        // the worker. An entry caught mid-`processing` returns to
+        // `queued` so the fresh session reprocesses it instead of
+        // stranding it forever; `ready` entries are already settled.
+        commitQueued(
+          queuedRef.current.map((e) =>
+            e.state === 'ready' ? e : { ...e, state: 'queued' as const },
+          ),
+        );
+        revokeCropPreview();
+      }
       try {
         clientRef.current?.terminate();
       } catch {
         // Best effort.
       }
       clientRef.current = null;
+      if (opts?.keepQueue === true && queuedRef.current.some((e) => e.state === 'queued')) {
+        void drainPending();
+      }
     },
-    [clearQueue, revokeCropPreview],
+    [clearQueue, commitQueued, drainPending, revokeCropPreview],
   );
 
   // Alive flag: guards post-unmount continuations. It MUST be restored
@@ -298,6 +417,10 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
     return () => {
       aliveRef.current = false;
       genRef.current += 1;
+      // Silently kill the drainer loop: the queue is cleared below, and
+      // the token bump keeps a stale finally from touching state.
+      drainSeqRef.current += 1;
+      drainingRef.current = false;
       clearQueue();
       try {
         clientRef.current?.terminate();
@@ -309,59 +432,41 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   }, [clearQueue]);
 
   /**
-   * Shutter path: queues a capture immediately (File handle + thumb)
-   * while ONE background detect job fills in the metadata ("brief
-   * processing"). Output bytes are dropped after metadata extraction —
-   * the queue never holds pixels. Generation- and alive-guarded: a
-   * result arriving after reset/unmount never creates an entry.
+   * Shutter path — INSTANT. Queues the capture synchronously (capture-
+   * order id, original File handle, preview URL, capture dims
+   * placeholder) and kicks the background drainer; no worker call, no
+   * decode, no waiting ever sits between the shutter and the next shot.
+   * The drainer fills in real metadata later.
    */
   const enqueueCapture = useCallback(
     (original: File, dims: { width: number; height: number }) => {
-      const gen = genRef.current;
-      // Capture-order id assigned at shutter time: even if detect jobs
-      // resolve out of order, the queue (and strip) stay in shooting order.
+      // Capture-order id assigned at shutter time: the queue (and strip)
+      // stay in shooting order regardless of how long each job takes.
       const id = nextIdRef.current++;
-      processingJobsRef.current += 1;
-      setProcessing(true);
-      const install = (meta: ScanEntryMeta) => {
-        commitQueued(
-          [
-            ...queuedRef.current,
-            { id, original, previewUrl: URL.createObjectURL(original), meta },
-          ].sort((a, b) => a.id - b.id),
-        );
-      };
-      void (async () => {
-        try {
-          const bytes = new Uint8Array(await original.arrayBuffer());
-          const result = await client().process(bytes, CORE_MODE);
-          if (!aliveRef.current || genRef.current !== gen) return; // Stale: drop silently.
-          install({
-            status:
-              result.status === 'processed' || result.status === 'original'
-                ? result.status
-                : 'error',
-            // Quad space is the CAPTURE pixel space (the caller's
-            // dims). The worker reports warp-OUTPUT dims on
-            // processed results — never seed the quad from those.
-            width: dims.width > 0 ? dims.width : result.width,
-            height: dims.height > 0 ? dims.height : result.height,
-            corners: result.corners,
-          });
-        } catch {
-          // Worker failure: the capture still queues as a croppable
-          // photo (error metadata → 90% inset seed), never a lost shot.
-          if (!aliveRef.current || genRef.current !== gen) return;
-          install({ status: 'error', width: dims.width, height: dims.height, corners: null });
-        } finally {
-          processingJobsRef.current -= 1;
-          if (aliveRef.current && genRef.current === gen && processingJobsRef.current <= 0) {
-            setProcessing(false);
-          }
-        }
-      })();
+      commitQueued(
+        [
+          ...queuedRef.current,
+          {
+            id,
+            original,
+            previewUrl: URL.createObjectURL(original),
+            state: 'queued' as const,
+            // Placeholder: the dims are already the quad space; `meta`
+            // is meaningful only once `state === 'ready'` (error-shaped
+            // seed so an accidental early read draws the 90% inset
+            // rather than crashing).
+            meta: {
+              status: 'error' as const,
+              width: dims.width,
+              height: dims.height,
+              corners: null,
+            },
+          },
+        ].sort((a, b) => a.id - b.id),
+      );
+      void drainPending();
     },
-    [commitQueued],
+    [commitQueued, drainPending],
   );
 
   /**
@@ -515,11 +620,14 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
 
   /**
    * Latest-frame live detection tick. Skipped while a live request is in
-   * flight — never queued. Capture jobs do NOT block live ticks (the
-   * queue absorbs captures; guidance keeps flowing).
+   * flight — never queued. Capture processing has PRIORITY: while any
+   * entry is queued/processing, ticks are skipped entirely so the single
+   * worker drains the capture backlog at full speed; guidance resumes
+   * once every entry is `ready`. Best-effort by design.
    */
   const requestLive = useCallback((frame: Blob) => {
     if (livePendingRef.current) return;
+    if (queuedRef.current.some((e) => e.state !== 'ready')) return;
     const gen = genRef.current;
     livePendingRef.current = true;
     void (async () => {

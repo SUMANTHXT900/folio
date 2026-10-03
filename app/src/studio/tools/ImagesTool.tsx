@@ -356,6 +356,11 @@ export default function ImagesTool() {
                 setCameraMode(false);
                 setSessionIds([]);
               }}
+              onBuildNow={() => {
+                setCameraMode(false);
+                setSessionIds([]);
+                void onBuild();
+              }}
               sessionPages={sessionPages.map((p) => ({
                 id: p.id,
                 previewUrl: p.previewUrl,

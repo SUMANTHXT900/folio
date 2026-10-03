@@ -61,3 +61,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** The audit benchmark flips the cancel token 50 ms into a heavy `images_to_pdf` run, but the engine observes it ~190–270 ms later (benchmark report): cancellation checkpoints sit between per-image decodes, so one in-flight single-image decode bounds the latency.
 - **Why it matters.** UI cancel budgets must absorb the worst case, not the token-flip time — a 50 ms UI promise is broken by design on photo-scale images.
 - **Rule.** Place cancellation checkpoints at every lane boundary, document the residual bound (one decode), and never promise sub-decode cancel latency. Evidence: `engine/examples/audit_bench_matrix.rs` (`bench_cancel_at_50ms`) + `engine/tests/audit_cancel_midrun.rs`.
+
+## L-11 — A throwing `waitForFunction` predicate kills the poller silently
+
+- **Observation.** Puppeteer runs `waitForFunction` predicates inside an in-page poller loop; when the predicate throws, the loop dies and the wait idles to its full timeout with a `TimeoutError` and no hint of the real cause. The 2026-10-03 scanner E2E hung 120 s on `b !== null && !b.disabled` where `find()` had returned `undefined` (the button legitimately read "Building…" at that moment) — `undefined !== null` passed and the property access threw.
+- **Why it matters.** A silently-dying poller looks exactly like an app hang; the default debugging instinct (blame the app) cost a multi-run bisection before a temporary state-dumping poll revealed the app had built the PDF in ~2 s.
+- **Rule.** `waitForFunction` predicates must be total functions: never dereference a possibly-undefined `find()`/`querySelector` result without an explicit guard (`if (b === undefined || …) return null;`). When a wait times out, first re-run the predicate via `page.evaluate` to surface its exception. Evidence: `app/e2e/studio.e2e.mjs` (build-entry wait).

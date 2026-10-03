@@ -35,7 +35,13 @@ use crate::error::{ScanError, ScanErrorKind};
 use crate::geometry::{order_corners, validate_quad, Point, Quad};
 
 /// Detection working resolution (long edge, px).
-pub const DETECT_LONG_EDGE: u32 = 800;
+///
+/// 1200 (not 800): the capture-path detect now runs in the background
+/// review queue, so it can afford ~2.25× the pixels of the old live-tick
+/// scale for finer boundary/texture separation. Live guidance frames
+/// (long edge ~160–320px) are UNAFFECTED: [`detection_scale`] never
+/// upscales, so small frames still detect at native resolution.
+pub const DETECT_LONG_EDGE: u32 = 1200;
 /// Minimum edge-support fraction to accept a quad.
 pub const MIN_EDGE_SUPPORT: f64 = 0.5;
 /// Ramer–Douglas–Peucker epsilon as a fraction of contour perimeter.
@@ -113,6 +119,15 @@ struct ScoredCandidate {
     map_idx: u8,
 }
 
+/// Working downscale factor for detection: maps the long edge to
+/// [`DETECT_LONG_EDGE`] px and is capped at 1.0 — small images (live
+/// guidance ticks, tiny uploads) are never upscaled. Corners return in
+/// full-resolution coordinates via `p / scale`, so this factor is the
+/// single mapping between detection space and caller space.
+fn detection_scale(w: u32, h: u32) -> f64 {
+    (DETECT_LONG_EDGE as f64 / u32::max(w, h).max(1) as f64).min(1.0)
+}
+
 /// Describes raw RGB bytes (`w*h*3`) as a flat sample buffer. Callers
 /// view it without copying.
 fn rgb_samples(rgb: &[u8], w: u32, h: u32) -> FlatSamples<&[u8]> {
@@ -144,8 +159,7 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
     // Downscaled working copy (grayscale). The RGB bytes are borrowed as
     // an image view — `resize` reads straight from the caller's buffer,
     // so no full-resolution `RgbImage` copy is materialized.
-    let scale = DETECT_LONG_EDGE as f64 / u32::max(w, h).max(1) as f64;
-    let scale = scale.min(1.0);
+    let scale = detection_scale(w, h);
     let sw = ((w as f64 * scale).round() as u32).max(1);
     let sh = ((h as f64 * scale).round() as u32).max(1);
     let flat = rgb_samples(rgb, w, h);
@@ -1423,6 +1437,47 @@ mod tests {
     }
 
     #[test]
+    fn detect_scale_never_upscales_live_frames_and_pins_1200() {
+        // Live guidance ticks (long edge ~160–320px) run at NATIVE size:
+        // 1200/320 > 1 clamps to 1.0, so raising the working edge from
+        // 800 changes nothing for the live path.
+        assert!((detection_scale(240, 320) - 1.0).abs() < 1e-12);
+        assert!((detection_scale(160, 120) - 1.0).abs() < 1e-12);
+        assert!((detection_scale(320, 320) - 1.0).abs() < 1e-12);
+        // A 2500px capture runs at the 1200 working edge with the 0.48
+        // round-trip: p/scale returns capture coordinates.
+        assert_eq!(DETECT_LONG_EDGE, 1200);
+        let s = detection_scale(2500, 1875);
+        assert!((s - 0.48).abs() < 1e-12, "{s}");
+        assert_eq!((2500.0 * s).round() as u32, DETECT_LONG_EDGE);
+        assert_eq!((1875.0 * s).round() as u32, 900);
+    }
+
+    #[test]
+    fn detects_document_on_2500px_capture_with_back_mapped_corners() {
+        // Background-processing capture path: a 2500px full-res frame
+        // detects at the 1200 working edge; returned corners must be
+        // back-mapped (p / scale) into capture coordinates, not left in
+        // detection coordinates.
+        let (w, h) = (1875u32, 2500u32);
+        let q = Quad::new(
+            Point::new(150.0, 220.0),
+            Point::new(1700.0, 180.0),
+            Point::new(1745.0, 2300.0),
+            Point::new(120.0, 2340.0),
+        );
+        let rgb = quad_fixture(w, h, &q);
+        let d = detect_document(&rgb, w, h)
+            .expect("runs")
+            .expect("detects 2500px capture");
+        assert!(d.confidence >= MIN_EDGE_SUPPORT, "{}", d.confidence);
+        // 40px full-res ≈ 19px at the 1200 working edge.
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 40.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
     fn rejects_malformed_input() {
         assert!(detect_document(&[], 0, 0).is_err());
         assert!(detect_document(&[1, 2, 3], 10, 10).is_err());
@@ -2095,31 +2150,45 @@ mod tests {
     }
 
     #[test]
-    fn detects_open_notebook_on_patterned_bedsheet_at_live_scale() {
-        // The field report comes from the LIVE guidance pill, which
-        // detects ~160px camera frames — not the 640x800 lab scale. At
-        // camera-frame scale the gutter, ink and patch detail compress
-        // into a few pixels each and the trimodal split tightens. Same
-        // scene, long edge 192; tolerances scale with it.
+    fn detects_open_notebook_on_patterned_bedsheet_at_live_scales() {
+        // The field report comes from the LIVE guidance path, which
+        // detects ~160px camera frames. At camera-frame scale the
+        // gutter, ink and patch detail compress into a few pixels each
+        // and the trimodal split tightens; 320px is the new live tick
+        // size. Both run at NATIVE resolution (detection never
+        // upscales), so tolerances are absolute at each size.
         let (big, bw, bh, outer) = bedsheet_fixture();
-        let (w, h) = (256u32, 320u32);
         let flat = rgb_samples(&big, bw, bh);
         let view = flat.as_view::<Rgb<u8>>().expect("view");
-        let small = imageops::resize(&view, w, h, imageops::FilterType::Triangle);
-        let img = small.as_raw().clone();
-        let s = f64::from(w) / f64::from(bw);
-        let scale_p = |p: Point| Point::new(p.x * s, p.y * s);
-        let q = Quad::new(
-            scale_p(outer.tl),
-            scale_p(outer.tr),
-            scale_p(outer.br),
-            scale_p(outer.bl),
-        );
-        let d = detect_document(&img, w, h)
-            .expect("runs")
-            .expect("detects spread at live scale");
-        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
-            assert!(got.dist(want) < 10.0, "{got:?} vs {want:?}");
+        let cases = [
+            // 160px long edge: detail-starved (shadowed lower-right
+            // paper sits at pattern luma after the 5x compress). The
+            // live pill only needs "found a page": the baseline returns
+            // a valid quad with three corners on the page and the
+            // shadow side cut short. Pinned as presence + a tolerance
+            // that only rejects gross drift, not the baseline cut.
+            ((128u32, 160u32), 40.0),
+            // 320px: the current/growing live tick size — full corner
+            // accuracy expected.
+            ((256u32, 320u32), 10.0),
+        ];
+        for ((w, h), tol) in cases {
+            let small = imageops::resize(&view, w, h, imageops::FilterType::Triangle);
+            let img = small.as_raw().clone();
+            let s = f64::from(w) / f64::from(bw);
+            let scale_p = |p: Point| Point::new(p.x * s, p.y * s);
+            let q = Quad::new(
+                scale_p(outer.tl),
+                scale_p(outer.tr),
+                scale_p(outer.br),
+                scale_p(outer.bl),
+            );
+            let d = detect_document(&img, w, h)
+                .expect("runs")
+                .expect("detects spread at live scale");
+            for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+                assert!(got.dist(want) < tol, "{w}x{h}: {got:?} vs {want:?}");
+            }
         }
     }
 
@@ -2460,6 +2529,197 @@ mod tests {
             .expect("detects bright-side frame-touching page");
         for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
             assert!(got.dist(want) < 30.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    // ---- Recall-sweep fixtures (2026-10-03, background-detect wave) ----
+    //
+    // The reported scene class (open notebook on a patterned bedsheet)
+    // isolated into the remaining recall weaknesses: high-frequency
+    // pattern edges hugging the page border, the gutter/spine split,
+    // slight rotation, and a page NEAR (not touching) the frame edge.
+
+    #[test]
+    fn detects_page_with_high_frequency_stripes_hugging_border() {
+        // Busy cloth: 3px diagonal stripes whose bright phase (224–252)
+        // reaches past paper luma (~236), so Otsu cannot fully separate
+        // pattern from page and texture blobs fuse into the page ring.
+        // The pattern sits right against the border — a drifted quad
+        // would happily ride a stripe. The page must still win.
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(130.0, 120.0),
+            Point::new(520.0, 100.0),
+            Point::new(545.0, 660.0),
+            Point::new(105.0, 690.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let stripe = ((x + 2 * y) / 3) % 2 == 0;
+                let base = if stripe { 112u8 } else { 224 };
+                let n = (hash2(x as i32, y as i32) % 28) as u8;
+                let v = base.saturating_add(n);
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = v;
+                img[o + 1] = v.saturating_sub(6);
+                img[o + 2] = v.saturating_sub(12);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 236u8.saturating_sub(n);
+                    img[o + 1] = 234u8.saturating_sub(n);
+                    img[o + 2] = 229u8.saturating_sub(n);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &q, [64, 58, 62], 14, 3, 60);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects page on high-frequency stripes");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 24.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_slightly_rotated_notebook_gutter_on_patterned_sheet() {
+        // ~9° rotated spread with a visible gutter line on a patterned
+        // sheet. The gutter splits the Otsu binary into two page halves;
+        // the outer boundary must win (directly or via the spine merge),
+        // never a single half.
+        let (w, h) = (640u32, 800u32);
+        let outer = Quad::new(
+            Point::new(120.0, 96.0),
+            Point::new(556.0, 168.0),
+            Point::new(500.0, 720.0),
+            Point::new(64.0, 648.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        // Patterned sheet: pink base + speckle + stars/patches.
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 202u8.saturating_add(n);
+                img[o + 1] = 92u8.saturating_add(n);
+                img[o + 2] = 110u8.saturating_add(n);
+            }
+        }
+        for (sx, sy) in [(70, 90), (560, 120), (90, 700), (580, 690), (320, 50)] {
+            draw_star(&mut img, w, sx, sy, 22, [236, 216, 96]);
+        }
+        for (px, py, pr) in [(90, 380, 20), (560, 420, 22), (300, 760, 24)] {
+            draw_disc(&mut img, w, px, py, pr, [230, 224, 228]);
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &outer.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 237u8.saturating_sub(n);
+                    img[o + 1] = 235u8.saturating_sub(n);
+                    img[o + 2] = 230u8.saturating_sub(n);
+                }
+            }
+        }
+        // Gutter: dark band along the fold line joining the two edge
+        // midpoints (top mid → bottom mid).
+        let top_mid = Point::new(
+            (outer.tl.x + outer.tr.x) / 2.0,
+            (outer.tl.y + outer.tr.y) / 2.0,
+        );
+        let bot_mid = Point::new(
+            (outer.bl.x + outer.br.x) / 2.0,
+            (outer.bl.y + outer.br.y) / 2.0,
+        );
+        let dx = bot_mid.x - top_mid.x;
+        let dy = bot_mid.y - top_mid.y;
+        let len = dx.hypot(dy).max(1e-9);
+        let nx = -dy / len;
+        let ny = dx / len;
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if !point_in_convex(&p, &outer.corners()) {
+                    continue;
+                }
+                let t = ((p.x - top_mid.x) * dx + (p.y - top_mid.y) * dy) / (len * len);
+                if !(0.0..=1.0).contains(&t) {
+                    continue;
+                }
+                let d = (p.x - top_mid.x) * nx + (p.y - top_mid.y) * ny;
+                if d.abs() < 7.0 {
+                    let shade = (58.0 * (1.0 - d.abs() / 7.0)) as u8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = img[o].saturating_sub(shade);
+                    img[o + 1] = img[o + 1].saturating_sub(shade);
+                    img[o + 2] = img[o + 2].saturating_sub(shade);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &outer, [66, 60, 64], 13, 3, 62);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects rotated spread with gutter");
+        let width = d.quad.tr.dist(&d.quad.tl);
+        assert!(width > 360.0, "got half page instead of spread: {width}");
+        for (got, want) in d.quad.corners().iter().zip(outer.corners().iter()) {
+            assert!(got.dist(want) < 34.0, "{got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn detects_page_near_but_not_touching_frame_edge() {
+        // H-A contact-adjacent: the page's left edge sits 3px inside the
+        // frame and the bottom edge 3px inside — close enough that the
+        // pad+stroke runway and Canny's zero border nearly swallow the
+        // edge, but no contact. The page must be found with corners on
+        // the page, not on the frame.
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(3.0, 100.0),
+            Point::new(430.0, 100.0),
+            Point::new(430.0, 796.0),
+            Point::new(3.0, 796.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 3;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 46u8.saturating_add(n);
+                img[o + 1] = 43u8.saturating_add(n);
+                img[o + 2] = 40u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 6;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 234u8.saturating_sub(n);
+                    img[o + 1] = 232u8.saturating_sub(n);
+                    img[o + 2] = 227u8.saturating_sub(n);
+                }
+            }
+        }
+        write_handwriting(&mut img, w, &q, [66, 62, 64], 20, 3, 45);
+
+        let d = detect_document(&img, w, h)
+            .expect("runs")
+            .expect("detects page near frame edge");
+        for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
+            assert!(got.dist(want) < 14.0, "{got:?} vs {want:?}");
         }
     }
 }

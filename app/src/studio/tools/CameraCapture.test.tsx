@@ -82,6 +82,7 @@ describe('CameraCapture failure states', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -106,6 +107,7 @@ describe('CameraCapture failure states', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -123,6 +125,7 @@ describe('CameraCapture scanner UI', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
+        onBuildNow={noop}
         sessionPages={[
           { id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' },
           { id: 's2', previewUrl: 'blob:s2', name: 'scan-002.jpg' },
@@ -155,6 +158,7 @@ describe('CameraCapture scanner UI', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -173,6 +177,7 @@ describe('CameraCapture responsive HUD', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
       />,
     );
@@ -201,6 +206,7 @@ describe('CameraCapture responsive HUD', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -223,6 +229,7 @@ describe('CameraCapture scanner surface (M3.x)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -274,6 +281,7 @@ describe('CameraCapture scanner surface (M3.x)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -317,6 +325,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -336,6 +345,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -356,6 +366,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -373,6 +384,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -395,6 +407,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -424,6 +437,7 @@ describe('CameraCapture capability controls', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -442,6 +456,7 @@ describe('CameraCapture scanner shell (M3.x follow-up)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -463,13 +478,15 @@ describe('CameraCapture scanner shell (M3.x follow-up)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
+        onBuildNow={noop}
         sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
       />,
     );
     await screen.findByLabelText('Capture page');
-    const cta = screen.getByLabelText('Finish scanning and view pages');
-    expect(cta.textContent).toContain('View pages (1)');
-    fireEvent.click(cta);
+    const cta = document.querySelector('[data-review-cta]');
+    expect(cta).not.toBeNull();
+    expect(cta?.textContent).toContain('View 1 page');
+    fireEvent.click(cta as HTMLElement);
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
@@ -482,6 +499,7 @@ describe('CameraCapture scanner shell (M3.x follow-up)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -518,6 +536,7 @@ describe('CameraCapture lifecycle hardening', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -566,6 +585,7 @@ describe('CameraCapture lifecycle hardening', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -589,6 +609,7 @@ describe('CameraCapture lifecycle hardening', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={onDone}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -621,6 +642,7 @@ describe('CameraCapture lifecycle hardening', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -662,6 +684,7 @@ describe('CameraCapture tab-hidden pause (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -691,6 +714,7 @@ describe('CameraCapture tab-hidden pause (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -711,6 +735,7 @@ describe('CameraCapture tab-hidden pause (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -739,6 +764,7 @@ describe('CameraCapture secure-context branch (AGENT11)', () => {
           onScanAccept={noop}
           onRetake={noop}
           onDone={noop}
+          onBuildNow={noop}
           sessionPages={[]}
         />,
       );
@@ -762,6 +788,7 @@ describe('CameraCapture secure-context branch (AGENT11)', () => {
           onScanAccept={noop}
           onRetake={noop}
           onDone={noop}
+          onBuildNow={noop}
           sessionPages={[]}
         />,
       );
@@ -784,6 +811,7 @@ describe('CameraCapture secure-context branch (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );
@@ -800,6 +828,7 @@ describe('CameraCapture landscape-compact layout (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[{ id: 's1', previewUrl: 'blob:s1', name: 'scan-001.jpg' }]}
       />,
     );
@@ -834,6 +863,7 @@ describe('CameraCapture facing-toggle device semantics (AGENT11)', () => {
         onScanAccept={noop}
         onRetake={noop}
         onDone={noop}
+        onBuildNow={noop}
         sessionPages={[]}
       />,
     );

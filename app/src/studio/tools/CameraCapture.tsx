@@ -13,13 +13,17 @@
  * Lifecycle: one `MediaStream` per session, opened on mount, stopped on
  * Done/close/unmount. No frames retained — only captured Files.
  *
- * Capture flow (2026-10-02 UX restructure): the shutter QUEUES a
- * capture silently (brief background detect, thumb in the session
- * strip) and the camera stays live — NO modal, NO per-capture review,
- * NO crop editor inline under the viewfinder. Every queued capture is
- * reviewed later, one page at a time, in the full-screen review queue
- * (`ScanReviewQueue`), reached via the "Pages (N)" CTA; unreviewed
- * entries at any exit commit as originals.
+ * Capture flow (capture-first, D30): the shutter QUEUES a capture
+ * silently (brief background detect, thumb in the session strip) and the
+ * camera stays live — NO modal, NO per-capture review, NO crop editor
+ * inline under the viewfinder. Every queued capture is reviewed later,
+ * one page at a time, in the full-screen review queue
+ * (`ScanReviewQueue`), reached via the "Review N pages" CTA; unreviewed
+ * entries at any exit commit as originals. The review is RESULT-FIRST
+ * (2026-10-03 UX pass): the hero is the cropped preview, "Looks good"
+ * commits it in one tap, "Adjust corners" opens the photo + quad editor,
+ * and after the last page the end screen builds the PDF right there
+ * (`onBuildNow`) instead of walking back to the Images tool.
  *
  * State machine (local, explicit — no ambiguous "stream exists but dead"
  * states): `starting` → `live` → (`disconnected` | `preview-blocked` |
@@ -234,6 +238,7 @@ export function CameraCapture({
   onImportFiles,
   onRetake,
   onDone,
+  onBuildNow,
   sessionPages,
 }: {
   /** An accepted scan (processed file + optional original to retain). */
@@ -248,6 +253,8 @@ export function CameraCapture({
   onRetake: () => void;
   /** Leaves camera mode (stream stopped first). */
   onDone: () => void;
+  /** Review end "Build PDF": the parent wiring leaves camera mode. */
+  onBuildNow: () => void;
   /** This session's captures (preview URLs only — strip is not a collection). */
   sessionPages: SessionThumb[];
 }) {
@@ -735,20 +742,31 @@ export function CameraCapture({
 
   // -- Review queue (THE review step) ----------------------------------
   // Every capture queues silently and is reviewed later, ONE page at a
-  // time, in the full-screen `ScanReviewQueue` (photo large + quad
-  // overlay seeded from auto corners, 90% inset for fallback captures —
-  // EVERY photo is croppable). The queue snapshots the queued ids when
-  // opened ("Page i of N" is stable); per page: Use crop (full-res
-  // rewrap → commit processed page → advance), Use original (commit as
-  // photo → advance), Discard (drop → advance). After the last page →
-  // the existing page-collection view. Back arrow exits the queue with
-  // every unreviewed entry committed as an original (transient note).
+  // time, in the full-screen `ScanReviewQueue`. Result-first (2026-10-03):
+  // the hero is the CROPPED preview (requested on page entry), "Looks
+  // good" commits the current quad in one tap, "Adjust corners" toggles
+  // the photo + quad editor, "Use original" / trash stay one tap away.
+  // The queue snapshots the queued ids when opened ("Page i of N" is
+  // stable); an entry whose background detect is still running renders
+  // "Preparing this page…" and appears automatically once ready (the
+  // frozen contract gates `meta` on `state === 'ready'`). After the last
+  // page resolves, the end screen builds the PDF directly (`onBuildNow`)
+  // or returns to the camera. Back arrow exits the queue with every
+  // unreviewed entry committed as an original (transient note).
 
   const [review, setReview] = useState<{ ids: number[]; index: number } | null>(null);
   const reviewRef = useRef(review);
   reviewRef.current = review;
   const queuedEntries = scan.queued;
   const pageCount = sessionPages.length + queuedEntries.length;
+  const unreviewedCount = queuedEntries.length;
+  // Self-explanatory CTA: unreviewed captures → "Review N pages"
+  // (opens the review queue); an empty queue → "View N pages" and the
+  // tap falls through to leaving camera mode (`leave` → `onDone`).
+  const reviewCtaLabel =
+    unreviewedCount > 0
+      ? `Review ${unreviewedCount} page${unreviewedCount === 1 ? '' : 's'}`
+      : `View ${pageCount} page${pageCount === 1 ? '' : 's'}`;
   // Session strip = committed session pages + queued captures (queue
   // thumbs reuse the entry preview URL — revoked on advance/discard/
   // exit). Newest last, brass ring on the newest.
@@ -763,6 +781,23 @@ export function CameraCapture({
 
   const currentEntry =
     review === null ? null : (queuedEntries.find((e) => e.id === review.ids[review.index]) ?? null);
+  // Snapshot exhausted → the review end screen (Build PDF shortcut).
+  const reviewComplete =
+    review !== null && review.ids.length > 0 && review.index >= review.ids.length;
+  // `meta` is meaningful ONLY when `state === 'ready'` (frozen contract);
+  // until then the queue renders "Preparing this page…" for this entry.
+  const currentReady = currentEntry !== null && currentEntry.state === 'ready';
+  const entryView =
+    currentEntry === null
+      ? null
+      : {
+          id: currentEntry.id,
+          ready: currentReady,
+          photoUrl: currentEntry.previewUrl,
+          imageWidth: currentReady ? (currentEntry.meta?.width ?? 0) : 0,
+          imageHeight: currentReady ? (currentEntry.meta?.height ?? 0) : 0,
+          initialCorners: currentReady ? (currentEntry.meta?.corners ?? null) : null,
+        };
 
   const openReview = () => {
     if (queuedEntries.length > 0) {
@@ -778,9 +813,9 @@ export function CameraCapture({
     if (r.index + 1 < r.ids.length) {
       setReview({ ids: r.ids, index: r.index + 1 });
     } else {
-      // After the last page → the existing page-collection view.
-      setReview(null);
-      leave();
+      // Last page resolved → the end screen: build the PDF here
+      // (`onBuildNow`) or return to the camera. Never auto-leave.
+      setReview({ ids: r.ids, index: r.ids.length });
     }
   };
 
@@ -791,8 +826,14 @@ export function CameraCapture({
     const drained = scan.drainQueue();
     for (const commit of drained) onScanAccept(commit);
     if (unreviewed.length > 0) {
+      // Status is only meaningful for ready entries (frozen contract):
+      // claim "no boundary found" only when every entry was ready.
+      const readyStatuses = unreviewed.flatMap((e) =>
+        e.state === 'ready' ? [e.meta?.status ?? null] : [],
+      );
       setImportNote(
-        unreviewed.every((e) => e.meta.status === 'original')
+        readyStatuses.length === unreviewed.length &&
+          readyStatuses.every((status) => status === 'original')
           ? 'Added as photo — no boundary found.'
           : 'Added as photo.',
       );
@@ -825,17 +866,20 @@ export function CameraCapture({
   // and the advance land in separate React batches, and an effect
   // watching both would run once with the stale pairing ("entry gone,
   // review still on page i"). If the entry under review ever disappears
-  // outside the three actions, the surface renders nothing and the next
-  // "Pages (N)" tap re-snapshots the queue.
+  // outside the reviewed actions, the surface renders nothing and the
+  // next "Review N pages" tap re-snapshots the queue.
 
   /**
-   * Low-res live tick (~160px, best-effort): guidance only. Skipped
-   * while a capture scan or review is active (latest-frame semantics
-   * live in the hook); live corners are NEVER reused for the final scan.
+   * Low-res live tick (~320px long edge, best-effort): guidance only.
+   * Raised from ~160px (2026-10-03) for a better live hit rate on busy
+   * backgrounds — detection downscales internally, so the extra pixels
+   * buy recall without changing the 500ms cadence. Skipped while a
+   * capture scan or review is active (latest-frame semantics live in the
+   * hook); live corners are NEVER reused for the final scan.
    *
    * One canvas is reused for every tick (5-5): the old code allocated +
    * released a canvas per 500ms tick, churning GC while the viewfinder
-   * runs. The reused canvas stays at tick size (~160px, ~100 KB —
+   * runs. The reused canvas stays at tick size (~320px, ~400 KB —
    * negligible to retain). A `busy` flag skips ticks while the previous
    * `toBlob` is still in flight instead of racing it (a re-sized canvas
    * mid-encode would blank the pending blob) — skipped ticks are pure
@@ -852,7 +896,7 @@ export function CameraCapture({
         return;
       }
       if (liveBusyRef.current) return; // Previous tick still encoding.
-      const scale = 160 / Math.max(video.videoWidth, video.videoHeight);
+      const scale = 320 / Math.max(video.videoWidth, video.videoHeight);
       const tickWidth = Math.max(1, Math.round(video.videoWidth * scale));
       const tickHeight = Math.max(1, Math.round(video.videoHeight * scale));
       let canvas = liveCanvasRef.current;
@@ -957,8 +1001,8 @@ export function CameraCapture({
         }
       >
         {/* CameraTopBar: back | title | import | grid | switch | device.
-          Single row, never wraps: after the first capture the "View
-          pages" CTA appears here, and a wrapping bar would steal ~44px
+          Single row, never wraps: after the first capture the "Review
+          N pages" CTA appears here, and a wrapping bar would steal ~44px
           from the viewfinder (real-phone report). The title truncates
           instead, and the bar scrolls horizontally on very narrow screens
           so every 44px target stays reachable without reflowing the
@@ -1026,20 +1070,18 @@ export function CameraCapture({
             </svg>
             <span className="hidden min-[400px]:inline">Import</span>
           </button>
-          {/* Primary CTA once pages exist: the user must always know how to
-              reach the page list (where Build PDF / rearrange live). With
-              unreviewed captures queued, this opens the review queue first
-              (one page at a time); without a queue it exits straight to the
-              page-collection view. */}
+          {/* Primary CTA once pages exist: with unreviewed captures it
+              reads "Review N pages" and opens the one-page-at-a-time
+              review queue; with an empty queue it reads "View N pages"
+              and exits straight to the page-collection view (`onDone`). */}
           {pageCount > 0 && (
             <button
               onClick={openReview}
-              aria-label="Finish scanning and view pages"
+              data-review-cta
+              aria-label={reviewCtaLabel}
               className="flex min-h-[44px] shrink-0 items-center gap-1 rounded-lg bg-brass-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900 dark:hover:bg-brass-300"
             >
-              {/* Short label on narrow phones so the bar never wraps. */}
-              <span className="hidden min-[400px]:inline">View pages ({pageCount})</span>
-              <span className="min-[400px]:hidden">Pages ({pageCount})</span>
+              {reviewCtaLabel}
               <svg
                 width="13"
                 height="13"
@@ -1438,24 +1480,32 @@ export function CameraCapture({
       {/* Review queue: the review step, full-screen and one page at a
         time. The surface portals itself to document.body (viewport-true,
         ABOVE the scanner root) and is never wrapped in AnimatePresence
-        (known codebase footgun — it swallows direct portal children). */}
-      {review !== null && currentEntry !== null && (
+        (known codebase footgun — it swallows direct portal children).
+        `reviewComplete` keeps the surface up for the Build PDF end
+        screen after the last page resolves. */}
+      {review !== null && (currentEntry !== null || reviewComplete) && (
         <ScanReviewQueue
-          entryId={currentEntry.id}
-          pageIndex={review.index + 1}
+          pageIndex={Math.min(review.index + 1, review.ids.length)}
           pageCount={review.ids.length}
-          photoUrl={currentEntry.previewUrl}
-          imageWidth={currentEntry.meta.width}
-          imageHeight={currentEntry.meta.height}
-          initialCorners={currentEntry.meta.corners}
+          entry={entryView}
+          complete={reviewComplete}
           cropPreviewUrl={scan.cropPreviewUrl}
           cropPreviewPending={scan.cropPreviewPending}
           applying={scan.applying}
-          onPreviewRequest={(quad) => scan.requestCropPreview(currentEntry.id, quad)}
-          onUseCrop={(quad) => void handleUseCrop(currentEntry.id, quad)}
-          onUseOriginal={() => handleUseOriginal(currentEntry.id)}
-          onDiscard={() => handleDiscard(currentEntry.id)}
+          onPreviewRequest={(quad) => {
+            if (currentEntry !== null) scan.requestCropPreview(currentEntry.id, quad);
+          }}
+          onUseCrop={(quad) => {
+            if (currentEntry !== null) void handleUseCrop(currentEntry.id, quad);
+          }}
+          onUseOriginal={() => {
+            if (currentEntry !== null) handleUseOriginal(currentEntry.id);
+          }}
+          onDiscard={() => {
+            if (currentEntry !== null) handleDiscard(currentEntry.id);
+          }}
           onBack={exitReview}
+          onBuildNow={onBuildNow}
         />
       )}
     </>,
