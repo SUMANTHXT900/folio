@@ -451,3 +451,5 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** Scan 71/71, fmt/clippy clean; typecheck/lint/prettier clean; frontend 400/400 (35 files; CameraCapture.test.tsx gained the required `onBuildNow` at all 29 render sites + CTA copy updated); scan WASM rebuilt; production build clean; canonical E2E **69/69 + 4 SKIP** (new: capture queues silently + camera live; Review N pages CTA; result-first page with simplified 44px actions; per-page progress; adjust mode instruction + Reset to auto; handles drag/keyboard; end screen Build PDF/Back to camera; second-session Use original + empty-queue CTA; fallback croppable).
 - **Docs.** D31; F-21 verification extended; L-11; STATUS baselines (scan 71, frontend 400, E2E 69/69).
 - **Remaining.** Deploy; real-device hit-rate validation per research section-11 discriminator (F-21 stays Active).
+
+- **Deploy.** Background-processing build shipped: GitHub `dev` (`c3e4da2`) + Cloudflare Pages `folio-pdf` branch `dev` (`https://dev-folio-pdf.pages.dev`, deployment `4b63d9f6`, bundle `index-DKUdeF2z.js` verified byte-identical to the local build).
