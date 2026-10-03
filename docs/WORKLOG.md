@@ -453,3 +453,12 @@ Chronological record of meaningful development events. Each entry records object
 - **Remaining.** Deploy; real-device hit-rate validation per research section-11 discriminator (F-21 stays Active).
 
 - **Deploy.** Background-processing build shipped: GitHub `dev` (`c3e4da2`) + Cloudflare Pages `folio-pdf` branch `dev` (`https://dev-folio-pdf.pages.dev`, deployment `4b63d9f6`, bundle `index-DKUdeF2z.js` verified byte-identical to the local build).
+
+## 2026-10-04 - E2E suite cost analysis + safe trimming (32s -> 17s, coverage spine intact)
+
+- **Trigger.** Perceived suite slowness. Two read-only analyst agents mapped the suite (section map, redundancy, structural sinks) and the lead instrumented `check()` with per-check deltas + a slowest-checks summary (kept permanently).
+- **Measured truth.** On a quiet machine the full suite ran 32s for 69 checks (slowest check 2.8s). The multi-minute runs observed during development were machine contention (parallel cargo/npm builds) plus two 120s hangs from the fixed L-11 predicate bug - not intrinsic suite cost.
+- **Applied (structural).** `gotoTool` no longer uses `networkidle0` + a fixed 600ms sleep (~14 call sites): it now waits for `main h1` and the hidden file input (tools) via `domcontentloaded` + selectors. Home section sleeps replaced by card-selector wait. `waitForCapturedDownload` poll 250 -> 120ms.
+- **Applied (merges/cuts, analysts-vetted).** 7 home card checks -> 1 aggregate; merge `downloads a real PDF` + `output is a PDF` merged (one probe); metadata + scanner-unavailable `check(..., true)` tautologies converted to real assertions; removed 4 redundant checks: `images drag result keeps both pages` (wait above + later consistency check), fallback `opens result-first` (asserted in the main session), and the third duplicate `scanned pages build a PDF` (same two pages already fully probed at the review-end Build PDF).
+- **Deliberately kept.** Per-tool preview-modal quartets (SplitTool/PageGrid are separate components - a regression in one would not be caught by the other), HUD desktop/phone geometry, smart/custom naming, stale-scan negative assertion, 44px targets, real worker/WASM/download probes. Checks are cheap (0.0-1.7s); the cost was in navigation gating.
+- **Result.** 59/59 + 4 SKIP in **17s** (was 32s), slowest check 1.7s. Net -10 checks: 6 merged (home), 1 merged (merge), 3 removed as exact duplicates; every real-browser signal retained. STATUS baselines updated.

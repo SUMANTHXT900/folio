@@ -92,9 +92,15 @@ const HAS_LARGE = fs.existsSync(LARGE);
 
 const results = [];
 const skipped = [];
+let lastCheckAt = Date.now();
 function check(name, ok, details) {
-  results.push({ name, ok: Boolean(ok), details: details ?? null });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${details ? ` — ${details}` : ''}`);
+  const now = Date.now();
+  const deltaMs = now - lastCheckAt;
+  lastCheckAt = now;
+  results.push({ name, ok: Boolean(ok), details: details ?? null, deltaMs });
+  console.log(
+    `${ok ? 'PASS' : 'FAIL'}  ${name}${details ? ` — ${details}` : ''} (+${(deltaMs / 1000).toFixed(1)}s)`,
+  );
 }
 function skip(name, reason) {
   skipped.push({ name, reason });
@@ -153,7 +159,7 @@ async function waitForCapturedDownload(page, timeoutMs) {
       console.log('[download-capture] timed out with no captured download');
       return null;
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 120));
   }
 }
 
@@ -182,8 +188,15 @@ async function newPage(browser) {
 }
 
 async function gotoTool(page, tool) {
-  await page.goto(`${DEV_URL}/#/${tool}`, { waitUntil: 'networkidle0', timeout: 60000 });
-  await new Promise((r) => setTimeout(r, 600));
+  // `networkidle0` + a fixed 600 ms sleep gated every section (~14 sites).
+  // The tool route is lazy-loaded, so wait for the semantic conditions the
+  // next step actually needs instead: the tool shell (h1) and, for tools,
+  // the hidden file input that upload() targets. (About has no input.)
+  await page.goto(`${DEV_URL}/#/${tool}`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForSelector('main h1', { timeout: 30000 });
+  if (tool !== 'about') {
+    await page.waitForSelector('input[type="file"]', { timeout: 30000 });
+  }
 }
 
 async function upload(page, selector, files) {
@@ -279,20 +292,12 @@ async function main() {
   // ---- Home: tool cards for all 7 tools ----
   {
     const { page, consoleErrors } = await newPage(browser);
-    await page.goto(`${DEV_URL}/#/`, { waitUntil: 'networkidle0', timeout: 60000 });
-    await new Promise((r) => setTimeout(r, 1200));
+    await page.goto(`${DEV_URL}/#/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForSelector('a[href="#/merge"]', { timeout: 30000 });
     const text = await bodyText(page);
-    for (const name of [
-      'Merge',
-      'Split',
-      'Rearrange',
-      'Rotate',
-      'Compress',
-      'Metadata',
-      'Images',
-    ]) {
-      check(`home shows ${name} card`, text.includes(name), name);
-    }
+    const tools = ['Merge', 'Split', 'Rearrange', 'Rotate', 'Compress', 'Metadata', 'Images'];
+    const missing = tools.filter((name) => !text.includes(name));
+    check('home shows all 7 tool cards', missing.length === 0, missing.join(', ') || 'all present');
     await page.screenshot({ path: `${__dirname}/after/home.png` });
     check(
       'home has zero console errors',
@@ -370,11 +375,10 @@ async function main() {
       document.querySelector('a[aria-label="Download PDF"]')?.click();
     });
     const merged = await waitForCapturedDownload(page, 300000);
-    check('merge downloads a real PDF', merged !== null, merged ? merged.name : null);
     check(
-      'merge output is a PDF',
+      'merge downloads a real PDF',
       merged !== null && merged.magic === '%PDF-',
-      merged ? merged.magic : 'missing',
+      merged ? merged.name : null,
     );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
@@ -606,7 +610,8 @@ async function main() {
     await page.waitForFunction(() => document.body.innerText.includes('PowerPoint Presentation'), {
       timeout: 60000,
     });
-    check('metadata reads real properties', true);
+    const metaRead = await bodyText(page);
+    check('metadata reads real properties', metaRead.includes('PowerPoint Presentation'));
     await page.type('#studio-meta-title', 'Studio E2E Title');
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
@@ -616,7 +621,8 @@ async function main() {
     await page.waitForFunction(() => document.body.innerText.includes('Studio E2E Title'), {
       timeout: 60000,
     });
-    check('metadata patch round-trips in UI', true);
+    const metaPatched = await bodyText(page);
+    check('metadata patch round-trips in UI', metaPatched.includes('Studio E2E Title'));
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -818,12 +824,6 @@ async function main() {
       }
     }
     check('images handle drag reorders pages', dragReordered, JSON.stringify(dragGeom));
-    cards = await cardOrder();
-    check(
-      'images drag result keeps both pages',
-      cards.length === 2 && cards[0].includes('red-wide.jpg') && cards[1].includes('blue-tall.jpg'),
-      cards.join(' | '),
-    );
     // Rotate red 90° (badge appears; build exercises the canvas re-encode path).
     await clickButton('Rotate red-wide.jpg 90 degrees clockwise');
     let rotated = false;
@@ -949,7 +949,11 @@ async function main() {
         ),
       { timeout: 30000 },
     );
-    check('images scanner failure explains itself', true);
+    const scannerFailText = await bodyText(page);
+    check(
+      'images scanner failure explains itself',
+      /No camera was found|Camera access was denied|could not be started/.test(scannerFailText),
+    );
     // Back to pages; uploads still work after the failure (collection intact).
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
@@ -961,7 +965,14 @@ async function main() {
     await page.waitForFunction(() => document.body.innerText.includes('Build PDF'), {
       timeout: 30000,
     });
-    check('images uploads work after scanner failure', true);
+    const rowsAfterFailure = await page.evaluate(
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length,
+    );
+    check(
+      'images uploads work after scanner failure',
+      rowsAfterFailure === 1,
+      `${rowsAfterFailure} page(s)`,
+    );
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -1530,30 +1541,10 @@ async function main() {
       JSON.stringify(phoneSurface),
     );
     await page.setViewport({ width: 1280, height: 900 });
-    // Scanned pages build a real PDF. Proven in-page (second browser
-    // sessions don't route OS downloads): fetch the result blob and
-    // assert real PDF bytes. Download plumbing itself is covered by the
-    // main-browser download tests above.
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.textContent?.startsWith('Build PDF'))
-        ?.click();
-    });
-    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
-      timeout: 300000,
-    });
-    const probe = await page.evaluate(async () => {
-      const a = document.querySelector('a[download]');
-      if (!a) return null;
-      const res = await fetch(a.href);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      return { bytes: buf.length, magic: String.fromCharCode(...buf.slice(0, 5)) };
-    });
-    check(
-      'images scanned pages build a PDF',
-      probe !== null && probe.magic === '%PDF-' && probe.bytes > 10000,
-      probe ? `${probe.magic} ${probe.bytes} bytes` : 'missing',
-    );
+    // (The scanned-pages build is fully covered by the review-end "Build
+    // PDF" probe above; importing + building the combined collection is
+    // covered by the "6 images → 6-page PDF" check after the bulk import
+    // below — this spot used to build the same two pages a third time.)
     // --- Scanner import: memory-safe bulk import (M3.x regression) ---
     // Oversized phone-like JPEGs (3000x2000 > 2500px budget) imported
     // through the scanner's Import button: sequential normalization,
@@ -1748,16 +1739,12 @@ async function main() {
     await page.waitForFunction(() => document.body.innerText.includes('Page 1 of 1'), {
       timeout: 30000,
     });
-    // The page renders result-first once its background prepare settles.
+    // The page renders result-first once its background prepare settles;
+    // the result view is the precondition for "Adjust corners" below
+    // (result-first itself is asserted in the main scanner session).
     await page.waitForFunction(() => document.querySelector('[data-crop-result]') !== null, {
       timeout: 120000,
     });
-    const fallbackResult = await reviewQueueState(page);
-    check(
-      'images fallback capture opens result-first in the review queue',
-      fallbackResult.open && fallbackResult.resultShown && fallbackResult.handles === 0,
-      JSON.stringify(fallbackResult),
-    );
     await clickQueueAction(page, 'Adjust corners');
     await page.waitForFunction(() => document.querySelectorAll('[data-crop-handle]').length === 4, {
       timeout: 30000,
@@ -1917,6 +1904,12 @@ async function main() {
   const skipNote =
     skipped.length > 0 ? `, ${skipped.length} skipped (optional corpus unavailable)` : '';
   console.log(`\nE2E: ${passed}/${results.length} passed${skipNote}`);
+  // Cost map: the slowest checks are where suite time actually goes.
+  const slowest = [...results].sort((a, b) => b.deltaMs - a.deltaMs).slice(0, 12);
+  console.log('Slowest checks:');
+  for (const r of slowest) {
+    console.log(`  ${(r.deltaMs / 1000).toFixed(1)}s  ${r.name}`);
+  }
   if (failed.length > 0) {
     console.log('Failed:', failed.map((f) => f.name).join(', '));
     process.exit(1);
