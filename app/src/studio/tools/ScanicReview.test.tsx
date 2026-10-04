@@ -6,7 +6,12 @@
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ScanicReview from './ScanicReview';
+import ScanicReview, {
+  loupePosition,
+  loupeSourceRect,
+  LOUPE_SIZE,
+  LOUPE_ZOOM,
+} from './ScanicReview';
 import type { ScanicReviewProps } from './ScanicReview';
 import type { ScanicCorners } from './scan/index';
 
@@ -481,6 +486,127 @@ describe('ScanicReview', () => {
     )) {
       expect((h as HTMLElement).className).toMatch('min-h-[44px]');
       expect((h as HTMLElement).className).toMatch('min-w-[44px]');
+    }
+  });
+});
+
+describe('ScanicReview handles + loupe', () => {
+  it('handles use thin dotted brass-ring visuals with a center dot (44px hit preserved)', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    for (const key of ['tl', 'tr', 'br', 'bl']) {
+      const h = document.querySelector(`[data-crop-handle="${key}"]`) as HTMLElement;
+      expect(h.getAttribute('role')).toBe('slider');
+      // 44px hit target preserved via the button.
+      expect(h.className).toMatch('min-h-[44px]');
+      expect(h.className).toMatch('min-w-[44px]');
+      const visual = h.querySelector(':scope > span') as HTMLElement | null;
+      expect(visual).not.toBeNull();
+      expect(visual!.className).toMatch('border-dotted');
+      expect(visual!.className).toMatch('border-brass-400');
+      // Small center dot inside the transparent/paper ring.
+      const dot = visual!.querySelector('span') as HTMLElement | null;
+      expect(dot).not.toBeNull();
+      expect(dot!.className).toMatch('bg-brass-400');
+    }
+    for (const edge of ['top', 'right', 'bottom', 'left']) {
+      const h = document.querySelector(`[data-crop-handle-mid="${edge}"]`) as HTMLElement;
+      expect(h.getAttribute('role')).toBe('slider');
+      const visual = h.querySelector(':scope > span') as HTMLElement | null;
+      expect(visual).not.toBeNull();
+      expect(visual!.className).toMatch('border-dotted');
+      expect(visual!.className).toMatch('border-brass-400');
+    }
+    expect(container.querySelector('[data-loupe]')).toBeNull();
+  });
+
+  it('loupe appears on handle pointerdown with crosshair and hides on pointerup', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    mockAdjustRect(container);
+    expect(container.querySelector('[data-loupe]')).toBeNull();
+    const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+    fireEvent.pointerDown(tl, { clientX: 10, clientY: 10, pointerId: 1, buttons: 1 });
+    const loupe = container.querySelector('[data-loupe]');
+    expect(loupe).not.toBeNull();
+    expect(loupe?.querySelector('[data-loupe-crosshair]')).not.toBeNull();
+    // Circular ~120px brass-ring lens.
+    expect((loupe as HTMLElement).style.width).toBe('120px');
+    expect((loupe as HTMLElement).style.height).toBe('120px');
+    expect((loupe as HTMLElement).className).toMatch('rounded-full');
+    fireEvent.pointerUp(tl, { pointerId: 1 });
+    expect(container.querySelector('[data-loupe]')).toBeNull();
+  });
+
+  it('loupe appears on midpoint grab and hides on cancel', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    mockAdjustRect(container);
+    const midTop = document.querySelector('[data-crop-handle-mid="top"]') as HTMLElement;
+    fireEvent.pointerDown(midTop, { clientX: 50, clientY: 10, pointerId: 1, buttons: 1 });
+    expect(container.querySelector('[data-loupe]')).not.toBeNull();
+    expect(container.querySelector('[data-loupe-crosshair]')).not.toBeNull();
+    fireEvent.pointerCancel(midTop);
+    expect(container.querySelector('[data-loupe]')).toBeNull();
+  });
+
+  it('loupe source rect centers exactly on the active corner (2.5x zoom)', () => {
+    // Interior corner: rect center == corner, size == lens/zoom.
+    const r = loupeSourceRect(50, 40, 100, 100);
+    expect(r.sw).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
+    expect(r.sh).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
+    expect(r.sx + r.sw / 2).toBeCloseTo(50, 10);
+    expect(r.sy + r.sh / 2).toBeCloseTo(40, 10);
+    // Edge corner: clamped into the photo, still covering the corner pixel.
+    const edge = loupeSourceRect(0, 0, 100, 100);
+    expect(edge.sx).toBe(0);
+    expect(edge.sy).toBe(0);
+    expect(edge.sw).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
+  });
+
+  it('loupe parks above-left of the point and stays inside the hero frame', () => {
+    const pos = loupePosition(200, 200, 400, 400);
+    expect(pos.left).toBe(200 - LOUPE_SIZE - 16);
+    expect(pos.top).toBe(200 - LOUPE_SIZE - 16);
+    expect(pos.left + LOUPE_SIZE).toBeLessThanOrEqual(400);
+    expect(pos.top + LOUPE_SIZE).toBeLessThanOrEqual(400);
+    // Near the top-left the lens clamps to the frame instead of escaping.
+    const clamped = loupePosition(10, 10, 400, 400);
+    expect(clamped.left).toBe(0);
+    expect(clamped.top).toBe(0);
+  });
+
+  it('keyboard focus shows the loupe and blur hides it', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    mockAdjustRect(container);
+    const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+    fireEvent.focus(tl);
+    expect(container.querySelector('[data-loupe]')).not.toBeNull();
+    expect(container.querySelector('[data-loupe-crosshair]')).not.toBeNull();
+    fireEvent.blur(tl);
+    expect(container.querySelector('[data-loupe]')).toBeNull();
+  });
+
+  it('loupe degrades gracefully when canvas 2d is absent', () => {
+    const proto = HTMLCanvasElement.prototype as unknown as Record<string, unknown>;
+    const original = proto['getContext'];
+    proto['getContext'] = () => null;
+    try {
+      const { container } = render(<ScanicReview {...baseProps()} />);
+      enterAdjust();
+      mockAdjustRect(container);
+      const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+      expect(() =>
+        fireEvent.pointerDown(tl, { clientX: 10, clientY: 10, pointerId: 1, buttons: 1 }),
+      ).not.toThrow();
+      // Lens frame + crosshair still render; no pixels required.
+      expect(container.querySelector('[data-loupe]')).not.toBeNull();
+      expect(container.querySelector('[data-loupe-crosshair]')).not.toBeNull();
+      expect(() => fireEvent.pointerUp(tl, { pointerId: 1 })).not.toThrow();
+      expect(container.querySelector('[data-loupe]')).toBeNull();
+    } finally {
+      proto['getContext'] = original;
     }
   });
 });

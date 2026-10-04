@@ -283,3 +283,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** (1) Portrait capture constraints (1080x1920 back / 720x1280 front) so frames are tall like the phone — root cause of the wide viewfinder, shifting layout, letterbox bars, and handle misalignment (all were downstream of landscape frames); (2) 9:16 tall viewfinder + zero-shift camera layout (reserved strip slot); (3) compact review action bar (primary Looks good + icon row with sr-only labels, textContent contract unchanged); (4) content-box-exact adjust overlay (quad/handles map 1:1 to displayed pixels, never bars) + proportionate handle visuals with 44px hits preserved. Folio theme, no fake controls.
 - **Reason.** User phone screenshots 2026-10-04.
 - **Status.** D38 wave (capture/review/E2E/docs lanes); canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).
+
+## D39 — Loupe + fullscreen finder (user phone feedback 2026-10-04)
+
+- **Decision.** (1) Dotted thin handle visuals (proportionate sizing + 44px hits preserved); (2) grab/focus magnifier loupe (circular 2.5x zoom scope with centered crosshair tracking the active corner, clamps onscreen, canvas-absent degrades gracefully); (3) fullscreen edge-to-edge viewfinder (video fills the surface, chrome floats over scrims — no bars by construction; portrait capture constraints unchanged). Folio theme, 44px targets, no fake controls.
+- **Reason.** User phone feedback 2026-10-04.
+- **Status.** D39 wave (loupe-handles/finder/E2E/docs lanes); canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).

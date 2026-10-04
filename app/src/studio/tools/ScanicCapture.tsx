@@ -540,8 +540,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     (async () => {
       try {
         const front = facing === 'user';
-        // Portrait ideals: phone cameras deliver a tall frame, so the
-        // viewfinder (a 9:16 box) previews what the capture path stores.
+        // Portrait ideals: phone cameras deliver tall frames — the
+        // full-bleed viewfinder cover-crops in preview (standard viewfinder
+        // behavior) while the capture path stores the full tall frame.
         stream = await navigator.mediaDevices.getUserMedia({
           video: front
             ? {
@@ -977,6 +978,57 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? 'Scanning… hold steady'
           : 'Point at the page';
 
+  // Camera-phase flag: the camera is true full-bleed (video fills the
+  // fixed surface edge-to-edge, chrome floats over it); review/done keep
+  // the docked chrome. Single source for both strip variants below.
+  const isCamera = phase === 'camera';
+  // Session strip body — SAME thumbs/labels in both variants (floating
+  // camera filmstrip + docked review/done strip); only the container
+  // positioning differs by phase. Compact thumbs (h-14 w-11) keep 44px
+  // targets in both.
+  const stripBody =
+    queue.length === 0 ? (
+      <p
+        className={
+          isCamera ? 'text-xs text-paper-100/80' : 'text-xs text-ink-400 dark:text-ink-300'
+        }
+      >
+        No pages yet — capture or add images.
+      </p>
+    ) : (
+      queue.map((entry, i) => (
+        <button
+          key={entry.id}
+          type="button"
+          onClick={() => goToReview(i)}
+          aria-label={`Review page ${i + 1}${entry.decision !== 'pending' ? ` (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})` : ''}`}
+          className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
+            current?.id === entry.id && phase === 'review'
+              ? 'border-brass-400'
+              : 'border-paper-200 dark:border-ink-700'
+          }`}
+        >
+          {entry.photoUrl ? (
+            <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
+              {i + 1}
+            </span>
+          )}
+          {entry.status === 'detecting' && (
+            <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
+              …
+            </span>
+          )}
+          {entry.decision !== 'pending' && (
+            <span className="absolute inset-x-0 bottom-0 bg-forest-500/90 py-0.5 text-center text-[9px] font-semibold text-white">
+              ✓
+            </span>
+          )}
+        </button>
+      ))
+    );
+
   // Review phase: the single-page card is owned by `./ScanicReview` (props
   // below stay EXACT); the filmstrip + batch bar underneath are owned here
   // because the review component renders the card only (never duplicates).
@@ -986,17 +1038,41 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       data-detector={DEFAULT_DETECTOR}
       className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 dark:bg-ink-900 dark:text-paper-100"
     >
-      {/* slim top chrome: close · title · flash */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 dark:border-ink-700/70 dark:bg-ink-900/95">
+      {/* Top chrome: floating over the full-bleed video in camera phase
+          (top scrim gradient, pointer-events-none except the controls),
+          docked solid bar otherwise. Buttons/titles go light over video. */}
+      <div
+        className={
+          isCamera
+            ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2 px-3 pb-6 pt-[max(0.5rem,env(safe-area-inset-top))]'
+            : 'flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 dark:border-ink-700/70 dark:bg-ink-900/95'
+        }
+      >
+        {isCamera && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-ink-950/60 to-transparent"
+          />
+        )}
         <button
           type="button"
           aria-label="Close scanner"
           onClick={onExit}
-          className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+          className={
+            isCamera
+              ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 py-2 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
+              : 'inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700'
+          }
         >
           ✕
         </button>
-        <p className="min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+        <p
+          className={
+            isCamera
+              ? 'relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow'
+              : 'min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100'
+          }
+        >
           Scan documents
         </p>
         {torchSupported ? (
@@ -1005,7 +1081,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             aria-label="Toggle torch"
             aria-pressed={torchOn}
             onClick={() => void toggleTorch()}
-            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+            className={
+              isCamera
+                ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 py-2 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
+                : 'inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700'
+            }
           >
             {torchOn ? '🔦' : '💡'}
           </button>
@@ -1014,69 +1094,30 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         )}
       </div>
 
-      {/* session strip — ALWAYS rendered at a FIXED height (h-20) so the
-          first capture never shrinks the viewfinder below it. The empty
-          placeholder occupies the same slot; the slot never collapses. */}
-      <div
-        data-scan-strip
-        className="flex h-20 shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
-      >
-        {queue.length === 0 ? (
-          <p className="text-xs text-ink-400 dark:text-ink-300">
-            No pages yet — capture or add images.
-          </p>
-        ) : (
-          queue.map((entry, i) => (
-            <button
-              key={entry.id}
-              type="button"
-              onClick={() => goToReview(i)}
-              aria-label={`Review page ${i + 1}${entry.decision !== 'pending' ? ` (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})` : ''}`}
-              className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
-                current?.id === entry.id && phase === 'review'
-                  ? 'border-brass-400'
-                  : 'border-paper-200 dark:border-ink-700'
-              }`}
-            >
-              {entry.photoUrl ? (
-                <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
-              ) : (
-                <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
-                  {i + 1}
-                </span>
-              )}
-              {entry.status === 'detecting' && (
-                <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
-                  …
-                </span>
-              )}
-              {entry.decision !== 'pending' && (
-                <span className="absolute inset-x-0 bottom-0 bg-forest-500/90 py-0.5 text-center text-[9px] font-semibold text-white">
-                  ✓
-                </span>
-              )}
-            </button>
-          ))
-        )}
-      </div>
+      {/* Docked session strip for review/done — the camera phase uses the
+          floating filmstrip inside the bottom overlay instead (same thumbs
+          via stripBody above, always rendered so the slot never collapses). */}
+      {!isCamera && (
+        <div
+          data-scan-strip
+          className="flex h-20 shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
+        >
+          {stripBody}
+        </div>
+      )}
 
-      {phase === 'camera' && (
-        // FIXED camera grid: strip (fixed h-20 above) / viewfinder (flex-1,
-        // the ONLY flexible row) / controls (shrink-0, fixed). Enqueueing
-        // pages must not move the viewfinder by a single pixel.
-        <div className="flex min-h-0 flex-1 flex-col">
-          {camState === 'live' || camState === 'requesting' ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-ink-950 p-2">
-              {/* Tall viewfinder: portrait 9:16 box, centered, width-driven so
-                  the ratio is EXACT (height derives from width via
-                  aspect-ratio; `h-full` + aspect together let flex stretch
-                  break the ratio). Capped by 55dvh-equivalent width so the
-                  controls below always fit without scroll. The video covers
-                  the tall box — never a landscape-cropped-wide frame. */}
-              <div
-                data-viewfinder
-                className="relative aspect-[9/16] w-full max-w-[calc(55dvh*9/16)] shrink-0 overflow-hidden rounded-xl bg-black"
-              >
+      {isCamera && (
+        // Full-bleed camera: the viewfinder is an absolute inset-0 layer of
+        // the fixed surface with video object-cover filling it EXACTLY — no
+        // aspect/max-w box, so black bars are impossible by construction.
+        // All chrome (top bar, filmstrip, controls) floats over the video,
+        // so captures can never shift layout by construction. dvh-safe: the
+        // fixed root already tracks the dynamic viewport; bottom chrome pads
+        // for the OS safe-area inset.
+        <>
+          <div className="absolute inset-0 z-0 overflow-hidden bg-ink-950">
+            {camState === 'live' || camState === 'requesting' ? (
+              <div data-viewfinder className="absolute inset-0 overflow-hidden bg-black">
                 <video
                   ref={videoRef}
                   muted
@@ -1086,11 +1127,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
                   className="absolute inset-0 h-full w-full object-cover"
                 />
-                {/* Finder guidance frame: rounded-rect overlay with corner ticks. */}
+                {/* Finder guidance frame: rounded-rect overlay with corner
+                    ticks. Full-screen with top clearance for the floating
+                    top bar + status pill; the bottom scrim stays translucent
+                    so the corner ticks read through at the screen edges. */}
                 <div
                   data-finder-frame
                   aria-hidden
-                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 sm:p-10"
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-24 sm:p-10 sm:pt-28"
                 >
                   <div className="relative h-full w-full rounded-2xl">
                     <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
@@ -1099,14 +1143,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
                   </div>
                 </div>
+                {/* Status pill rides top-center below the floating top bar so
+                    the bottom overlay can never cover it. Dwell text logic
+                    (finderStatus) is unchanged. */}
                 <p
                   data-finder-status
                   role="status"
-                  className="absolute bottom-3 left-1/2 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
+                  className="absolute left-1/2 top-24 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
                 >
                   {finderStatus}
                 </p>
-                <div className="absolute right-2 top-2 flex gap-2">
+                <div className="absolute right-3 top-24 flex gap-2">
                   <button
                     type="button"
                     aria-label="Switch camera"
@@ -1132,158 +1179,172 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   </button>
                 </div>
               </div>
-            </div>
-          ) : (
-            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-ink-950 p-4">
-              {/* No-preview fallback occupies the SAME flex-1 slot so the
-                  controls below never move between camera states. */}
-              <div className="rounded-xl border border-dashed border-paper-300 bg-paper-50 px-4 py-6 text-center dark:border-ink-700 dark:bg-ink-900">
-                <p
-                  data-finder-status
-                  role="status"
-                  className="text-sm text-ink-500 dark:text-ink-300"
-                >
-                  {cameraHelp}
-                </p>
-                {camState === 'denied' && (
-                  <button
-                    type="button"
-                    onClick={() => setRetryNonce((n) => n + 1)}
-                    className="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-ink-950 p-4 pb-72 pt-20">
+                {/* No-preview fallback fills the same full-bleed slot (lifted
+                    above the bottom overlay) so the controls never move
+                    between camera states. */}
+                <div className="rounded-xl border border-dashed border-paper-300 bg-paper-50 px-4 py-6 text-center dark:border-ink-700 dark:bg-ink-900">
+                  <p
+                    data-finder-status
+                    role="status"
+                    className="text-sm text-ink-500 dark:text-ink-300"
                   >
-                    Retry camera
-                  </button>
-                )}
+                    {cameraHelp}
+                  </p>
+                  {camState === 'denied' && (
+                    <button
+                      type="button"
+                      onClick={() => setRetryNonce((n) => n + 1)}
+                      className="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                    >
+                      Retry camera
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          {/* Fixed controls: shrink-0, never scrolls — the viewfinder above
-              absorbs all size pressure (flex-1 min-h-0 + max-h-bounded box). */}
-          <div className="shrink-0 space-y-2 bg-paper-50 px-4 py-3 dark:bg-ink-900">
-            {/* Manual/Auto segmented mode pill */}
-            <div className="flex justify-center">
+          {/* Bottom overlay: floating filmstrip + controls over a bottom
+              scrim (pointer-events-none except the controls). The strip keeps
+              the same [data-scan-strip] thumbs, compact (h-16). The
+              review-CTA slot stays reserved (min-h-[52px]) so the first
+              capture never grows the overlay. */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink-950/70 via-ink-950/30 to-transparent"
+            />
+            <div className="pointer-events-auto relative flex flex-col gap-2 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-10">
               <div
-                data-scan-mode
-                role="group"
-                aria-label="Capture mode"
-                className="inline-flex rounded-full border border-paper-300 p-1 dark:border-ink-700"
+                data-scan-strip
+                className="flex h-16 shrink-0 items-center gap-2 overflow-x-auto py-1"
               >
-                <button
-                  type="button"
-                  aria-pressed={mode === 'manual'}
-                  onClick={() => setMode('manual')}
-                  className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                    mode === 'manual'
-                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
-                      : 'text-ink-500 dark:text-ink-300'
-                  }`}
-                >
-                  Manual
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={mode === 'auto'}
-                  onClick={() => setMode('auto')}
-                  className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                    mode === 'auto'
-                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
-                      : 'text-ink-500 dark:text-ink-300'
-                  }`}
-                >
-                  Auto capture
-                </button>
+                {stripBody}
               </div>
-            </div>
-            {mode === 'auto' && (
-              <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
-                Hold steady over the page — the shutter fires itself.
-              </p>
-            )}
-
-            {/* Bottom cluster: gallery thumb · big shutter · balance spacer */}
-            <div className="flex items-center justify-between gap-4 px-2">
-              <button
-                type="button"
-                data-scan-gallery
-                aria-label={queue.length > 0 ? `Open review, ${queue.length} pages` : 'Open review'}
-                disabled={queue.length === 0}
-                onClick={() => goToReview(queue.length - 1)}
-                className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-paper-300 bg-paper-200 text-ink-400 transition-colors disabled:opacity-40 dark:border-ink-700 dark:bg-ink-700 dark:text-ink-300"
-              >
-                {lastQueued?.photoUrl ? (
-                  <img src={lastQueued.photoUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <span aria-hidden className="text-lg">
-                    ▦
-                  </span>
-                )}
-              </button>
-              {camState === 'live' ? (
-                <button
-                  type="button"
-                  data-scan-capture
-                  aria-label="Capture page"
-                  onClick={manualCapture}
-                  className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
+              {/* Manual/Auto segmented mode pill */}
+              <div className="flex justify-center">
+                <div
+                  data-scan-mode
+                  role="group"
+                  aria-label="Capture mode"
+                  className="inline-flex rounded-full border border-paper-50/25 bg-ink-950/60 p-1 backdrop-blur"
                 >
-                  <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
-                </button>
-              ) : (
-                <span aria-hidden className="h-[76px] w-[76px] shrink-0" />
-              )}
-              <span aria-hidden className="w-14 shrink-0" />
-            </div>
-            {captureError !== null && (
-              <p role="alert" className="text-center text-xs text-red-600 dark:text-red-400">
-                {captureError}
-              </p>
-            )}
-
-            <div className="flex flex-col items-center gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,.jpg,.jpeg,.png"
-                multiple
-                className="hidden"
-                aria-label="Add image files instead"
-                onChange={(e) => {
-                  addFilesInstead(Array.from(e.target.files ?? []));
-                  e.target.value = '';
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-              >
-                Add image files instead
-              </button>
-              <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
-                On-device ML auto-crop — images never leave this device.
-              </p>
-              {/* Review-CTA slot: ALWAYS rendered at a fixed min-height so the
-                  first capture never grows the controls (and never moves the
-                  viewfinder). The button itself stays queue-gated per the
-                  E2E contract. */}
-              <div className="flex min-h-[52px] items-center justify-center">
-                {queue.length > 0 && (
                   <button
                     type="button"
-                    data-review-cta
-                    onClick={() => goToReview()}
-                    className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+                    aria-pressed={mode === 'manual'}
+                    onClick={() => setMode('manual')}
+                    className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                      mode === 'manual' ? 'bg-paper-50 text-ink-900' : 'text-paper-100/75'
+                    }`}
                   >
-                    {pendingCount > 0
-                      ? `Review ${pendingCount} pages`
-                      : `View ${queue.length} pages`}
+                    Manual
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={mode === 'auto'}
+                    onClick={() => setMode('auto')}
+                    className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                      mode === 'auto' ? 'bg-paper-50 text-ink-900' : 'text-paper-100/75'
+                    }`}
+                  >
+                    Auto capture
+                  </button>
+                </div>
+              </div>
+              {mode === 'auto' && (
+                <p className="text-center text-[11px] text-paper-100/75">
+                  Hold steady over the page — the shutter fires itself.
+                </p>
+              )}
+
+              {/* Bottom cluster: gallery thumb · big shutter · balance spacer */}
+              <div className="flex items-center justify-between gap-4 px-2">
+                <button
+                  type="button"
+                  data-scan-gallery
+                  aria-label={
+                    queue.length > 0 ? `Open review, ${queue.length} pages` : 'Open review'
+                  }
+                  disabled={queue.length === 0}
+                  onClick={() => goToReview(queue.length - 1)}
+                  className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-paper-50/25 bg-ink-950/60 text-paper-100 backdrop-blur transition-colors disabled:opacity-40"
+                >
+                  {lastQueued?.photoUrl ? (
+                    <img src={lastQueued.photoUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <span aria-hidden className="text-lg">
+                      ▦
+                    </span>
+                  )}
+                </button>
+                {camState === 'live' ? (
+                  <button
+                    type="button"
+                    data-scan-capture
+                    aria-label="Capture page"
+                    onClick={manualCapture}
+                    className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
+                  >
+                    <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
+                  </button>
+                ) : (
+                  <span aria-hidden className="h-[76px] w-[76px] shrink-0" />
                 )}
+                <span aria-hidden className="w-14 shrink-0" />
+              </div>
+              {captureError !== null && (
+                <p role="alert" className="text-center text-xs text-red-300">
+                  {captureError}
+                </p>
+              )}
+
+              <div className="flex flex-col items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                  multiple
+                  className="hidden"
+                  aria-label="Add image files instead"
+                  onChange={(e) => {
+                    addFilesInstead(Array.from(e.target.files ?? []));
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-50/25 bg-ink-950/60 px-5 py-2.5 text-sm font-medium text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                >
+                  Add image files instead
+                </button>
+                <p className="text-center text-[11px] text-paper-100/70">
+                  On-device ML auto-crop — images never leave this device.
+                </p>
+                {/* Review-CTA slot: ALWAYS reserved at a fixed min-height so
+                    the first capture never grows the overlay (and never moves
+                    anything above it). The button itself stays queue-gated
+                    per the E2E contract. */}
+                <div className="flex min-h-[52px] items-center justify-center">
+                  {queue.length > 0 && (
+                    <button
+                      type="button"
+                      data-review-cta
+                      onClick={() => goToReview()}
+                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-paper-50 px-5 py-2.5 text-sm font-medium text-ink-900 transition-colors hover:bg-paper-200"
+                    >
+                      {pendingCount > 0
+                        ? `Review ${pendingCount} pages`
+                        : `View ${queue.length} pages`}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </>
       )}
 
       {phase === 'review' && current !== null && (

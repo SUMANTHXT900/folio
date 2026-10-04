@@ -170,6 +170,60 @@ function clampPoint(x: number, y: number, w: number, h: number): { x: number; y:
   };
 }
 
+export const LOUPE_SIZE = 120;
+export const LOUPE_ZOOM = 2.5;
+const LOUPE_OFFSET = 16;
+
+/**
+ * Source rect (natural image pixels) for the 2.5x loupe, centered EXACTLY
+ * on the active corner. Accuracy contract: rect center == corner position
+ * (before edge clamping); clamping only shifts the rect to stay in bounds.
+ */
+export function loupeSourceRect(
+  cornerX: number,
+  cornerY: number,
+  imgW: number,
+  imgH: number,
+  loupeSize: number = LOUPE_SIZE,
+  zoom: number = LOUPE_ZOOM,
+): { sx: number; sy: number; sw: number; sh: number } {
+  const safeW = Math.max(1, imgW);
+  const safeH = Math.max(1, imgH);
+  const size = Math.max(1, loupeSize);
+  const z = zoom > 0 ? zoom : 1;
+  const sw = Math.min(safeW, size / z);
+  const sh = Math.min(safeH, size / z);
+  const rawSx = cornerX - sw / 2;
+  const rawSy = cornerY - sh / 2;
+  return {
+    sx: Math.min(Math.max(rawSx, 0), Math.max(0, safeW - sw)),
+    sy: Math.min(Math.max(rawSy, 0), Math.max(0, safeH - sh)),
+    sw,
+    sh,
+  };
+}
+
+/**
+ * Loupe frame position: above-left of the active display point (clear of
+ * the finger), clamped inside the hero frame.
+ */
+export function loupePosition(
+  displayX: number,
+  displayY: number,
+  frameW: number,
+  frameH: number,
+  size: number = LOUPE_SIZE,
+  offset: number = LOUPE_OFFSET,
+): { left: number; top: number } {
+  if (frameW <= 0 || frameH <= 0) return { left: 8, top: 8 };
+  const maxLeft = Math.max(0, frameW - size);
+  const maxTop = Math.max(0, frameH - size);
+  return {
+    left: Math.min(Math.max(displayX - size - offset, 0), maxLeft),
+    top: Math.min(Math.max(displayY - size - offset, 0), maxTop),
+  };
+}
+
 function quadPointsAttr(corners: ScanicCorners): string {
   return (
     `${corners.topLeft.x},${corners.topLeft.y} ` +
@@ -201,6 +255,17 @@ export default function ScanicReview({
   const [useOriginalView, setUseOriginalView] = useState(false);
   const [frameBox, setFrameBox] = useState<{ w: number; h: number } | null>(null);
   const heroRef = useRef<HTMLDivElement>(null);
+  const photoImgRef = useRef<HTMLImageElement>(null);
+  const loupeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const sourceCacheRef = useRef(new Map<string, HTMLImageElement>());
+  const [grabbed, setGrabbed] = useState<{
+    kind: 'corner' | 'mid';
+    key: HandleKey | MidEdge;
+  } | null>(null);
+  const [focusedHandle, setFocusedHandle] = useState<{
+    kind: 'corner' | 'mid';
+    key: HandleKey | MidEdge;
+  } | null>(null);
   const dragKeyRef = useRef<HandleKey | null>(null);
   const midDragRef = useRef<{
     edge: MidEdge;
@@ -214,6 +279,8 @@ export default function ScanicReview({
     setAdjusting(false);
     setDraft(null);
     setUseOriginalView(false);
+    setGrabbed(null);
+    setFocusedHandle(null);
   }, [photoUrl]);
 
   // Measure the adjust frame so the overlay can use content-box-exact rects.
@@ -292,10 +359,14 @@ export default function ScanicReview({
   const enterAdjust = () => {
     setDraft(cloneCorners(corners ?? fullFrameCorners(safeW, safeH)));
     setAdjusting(true);
+    setGrabbed(null);
+    setFocusedHandle(null);
   };
   const cancelAdjust = () => {
     setAdjusting(false);
     setDraft(null);
+    setGrabbed(null);
+    setFocusedHandle(null);
   };
 
   const moveCorner = (key: HandleKey, x: number, y: number) => {
@@ -397,6 +468,8 @@ export default function ScanicReview({
     if (draft !== null) onAdjustApply(cloneCorners(draft));
     setAdjusting(false);
     setDraft(null);
+    setGrabbed(null);
+    setFocusedHandle(null);
     // A fresh warp follows: the processed result is the hero again.
     setUseOriginalView(false);
   };
@@ -449,6 +522,82 @@ export default function ScanicReview({
     };
   };
 
+  // Loupe: visible while any handle is grabbed OR has keyboard focus.
+  const loupeHandle = grabbed ?? focusedHandle;
+  const loupeImagePoint: { x: number; y: number } | null =
+    adjusting && draft !== null && loupeHandle !== null
+      ? loupeHandle.kind === 'corner'
+        ? draft[HANDLE_TO_CORNER[loupeHandle.key as HandleKey]]
+        : midPoint(loupeHandle.key as MidEdge)
+      : null;
+  const loupeDisplayPoint: { x: number; y: number } | null =
+    loupeImagePoint !== null && contentRect !== null
+      ? {
+          x: contentRect.left + (loupeImagePoint.x / safeW) * contentRect.width,
+          y: contentRect.top + (loupeImagePoint.y / safeH) * contentRect.height,
+        }
+      : null;
+  const loupeBox =
+    loupeImagePoint !== null
+      ? frameBox !== null && loupeDisplayPoint !== null
+        ? loupePosition(loupeDisplayPoint.x, loupeDisplayPoint.y, frameBox.w, frameBox.h)
+        : { left: 8, top: 8 }
+      : null;
+
+  // Cache the source bitmap per photoUrl; jsdom-safe (never throws).
+  useEffect(() => {
+    try {
+      if (sourceCacheRef.current.has(photoUrl)) return;
+      if (typeof Image === 'undefined') return;
+      const img = new Image();
+      img.src = photoUrl;
+      sourceCacheRef.current.set(photoUrl, img);
+    } catch {
+      // No-cache fallback: draw directly from the rendered photo element.
+    }
+  }, [photoUrl]);
+
+  // Paint the 2.5x zoom centered EXACTLY on the active corner. Guards make
+  // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
+  useEffect(() => {
+    if (loupeImagePoint === null || loupeHandle === null) return;
+    try {
+      // Resolve pixels first so jsdom (naturalWidth 0) returns before
+      // touching canvas at all — no getContext noise, no crash.
+      const cached = sourceCacheRef.current.get(photoUrl);
+      const rendered = photoImgRef.current;
+      const source =
+        cached !== undefined && cached.complete && cached.naturalWidth > 0 ? cached : rendered;
+      if (source === null || source === undefined) return;
+      const natW = source.naturalWidth ?? 0;
+      const natH = source.naturalHeight ?? 0;
+      if (natW === 0 || natH === 0) return;
+      const canvas = loupeCanvasRef.current;
+      if (canvas === null) return;
+      if (typeof canvas.getContext !== 'function') return;
+      let ctx: CanvasRenderingContext2D | null = null;
+      try {
+        ctx = canvas.getContext('2d');
+      } catch {
+        return;
+      }
+      if (ctx === null || ctx === undefined) return;
+      // Draft corners live in source pixel space (safeW/safeH == natural
+      // size); scale to the bitmap's actual natural size for exact centering.
+      const scaleX = natW / safeW;
+      const scaleY = natH / safeH;
+      const r = loupeSourceRect(loupeImagePoint.x * scaleX, loupeImagePoint.y * scaleY, natW, natH);
+      try {
+        ctx.clearRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+        ctx.drawImage(source, r.sx, r.sy, r.sw, r.sh, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+      } catch {
+        // Canvas without bitmap support (jsdom): keep the lens frame.
+      }
+    } catch {
+      // Never crash the review card for a magnifier failure.
+    }
+  });
+
   return (
     <div className="max-h-[100dvh] space-y-3 overflow-y-auto p-4 sm:p-5">
       <div className="flex items-center gap-2">
@@ -471,6 +620,7 @@ export default function ScanicReview({
           className="relative overflow-hidden rounded-xl bg-ink-950"
         >
           <img
+            ref={photoImgRef}
             src={photoUrl}
             alt="Original photo with adjustable crop outline"
             className="block max-h-[50dvh] w-full object-contain"
@@ -553,10 +703,11 @@ export default function ScanicReview({
                   aria-valuenow={pctX}
                   aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
                   style={handlePosStyle(point.x, point.y)}
-                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
+                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
                   onPointerDown={(e) => {
                     e.preventDefault();
                     dragKeyRef.current = key;
+                    setGrabbed({ kind: 'corner', key });
                     try {
                       e.currentTarget.setPointerCapture(e.pointerId);
                     } catch {
@@ -572,10 +723,22 @@ export default function ScanicReview({
                   }}
                   onPointerUp={() => {
                     dragKeyRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    );
                   }}
                   onPointerCancel={() => {
                     dragKeyRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    );
                   }}
+                  onFocus={() => setFocusedHandle({ kind: 'corner', key })}
+                  onBlur={() =>
+                    setFocusedHandle((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    )
+                  }
                   onKeyDown={(e) => {
                     const delta = e.shiftKey ? 10 : 1;
                     if (e.key === 'ArrowLeft') {
@@ -598,9 +761,15 @@ export default function ScanicReview({
                 >
                   <span
                     aria-hidden
-                    className="rounded-full bg-brass-400"
+                    className="inline-flex items-center justify-center rounded-full border-2 border-dotted border-brass-400 bg-paper-50/25 shadow-soft"
                     style={{ width: handleVisual, height: handleVisual }}
-                  />
+                  >
+                    <span
+                      aria-hidden
+                      className="rounded-full bg-brass-400"
+                      style={{ width: 4, height: 4 }}
+                    />
+                  </span>
                 </button>
               );
             })}
@@ -621,7 +790,7 @@ export default function ScanicReview({
                   aria-valuenow={pctX}
                   aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
                   style={handlePosStyle(mid.x, mid.y)}
-                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
+                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
                   onPointerDown={(e) => {
                     e.preventDefault();
                     if (draft === null) return;
@@ -632,6 +801,7 @@ export default function ScanicReview({
                       startY: p.y,
                       snapshot: cloneCorners(draft),
                     };
+                    setGrabbed({ kind: 'mid', key: edge });
                     try {
                       e.currentTarget.setPointerCapture(e.pointerId);
                     } catch {
@@ -646,10 +816,22 @@ export default function ScanicReview({
                   }}
                   onPointerUp={() => {
                     if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    );
                   }}
                   onPointerCancel={() => {
                     if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    );
                   }}
+                  onFocus={() => setFocusedHandle({ kind: 'mid', key: edge })}
+                  onBlur={() =>
+                    setFocusedHandle((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    )
+                  }
                   onKeyDown={(e) => {
                     const delta = e.shiftKey ? 10 : 1;
                     if (e.key === 'ArrowLeft') {
@@ -672,13 +854,44 @@ export default function ScanicReview({
                 >
                   <span
                     aria-hidden
-                    className="rounded-[3px] bg-brass-400"
+                    className="inline-flex items-center justify-center rounded-[3px] border-2 border-dotted border-brass-400 bg-paper-50/25 shadow-soft"
                     style={{ width: handleVisual, height: handleVisual }}
-                  />
+                  >
+                    <span
+                      aria-hidden
+                      className="rounded-full bg-brass-400"
+                      style={{ width: 4, height: 4 }}
+                    />
+                  </span>
                 </button>
               );
             })}
           </div>
+          {loupeBox !== null && loupeImagePoint !== null && (
+            <div
+              data-loupe
+              aria-hidden="true"
+              className="pointer-events-none absolute z-10 overflow-hidden rounded-full border-2 border-brass-400 bg-ink-950 shadow-soft"
+              style={{
+                left: loupeBox.left,
+                top: loupeBox.top,
+                width: LOUPE_SIZE,
+                height: LOUPE_SIZE,
+              }}
+            >
+              <canvas
+                ref={loupeCanvasRef}
+                width={LOUPE_SIZE}
+                height={LOUPE_SIZE}
+                className="block h-full w-full rounded-full"
+              />
+              <div data-loupe-crosshair className="pointer-events-none absolute inset-0">
+                <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-brass-400/90" />
+                <div className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-brass-400/90" />
+                <div className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-brass-400" />
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div data-crop-result className="relative overflow-hidden rounded-xl bg-ink-950">

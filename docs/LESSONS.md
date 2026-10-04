@@ -127,3 +127,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** A landscape capture on a portrait phone poisons every downstream surface (viewfinder ratio, layout stability, letterbox bars, handle alignment) — all four were downstream of landscape frames.
 - **Why it matters.** Fixing any one surface leaves the poisoned source in place; each downstream fix re-breaks the moment the frame shape changes.
 - **Rule.** Request the frame you display: set portrait ideals at the constraint level so all four surfaces are fixed at the source. Evidence: `docs/DECISIONS.md` D38 (user phone screenshots 2026-10-04).
+
+## L-22 — Fill the viewfinder; loupe the handles
+
+- **Observation.** D39 shipped a fullscreen edge-to-edge viewfinder (video fills the surface, chrome floats over scrims — no bars by construction) and a grab/focus magnifier loupe (circular 2.5x zoom scope with centered crosshair tracking the active corner) while handle visuals stayed dotted-thin with 44px hits preserved.
+- **Why it matters.** A viewfinder must fill its surface — any boxed preview reintroduces bars, ratio math, and shift bugs; full-bleed cover plus floating chrome deletes the whole category. And precision handles need a loupe, not bigger dots.
+- **Rule.** Viewfinders fill their surface (full-bleed cover + floating chrome, never a boxed preview); precise adjust gets a loupe, never enlarged dots. Evidence: `docs/DECISIONS.md` D39 (user phone feedback 2026-10-04).

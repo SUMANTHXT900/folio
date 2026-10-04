@@ -1194,40 +1194,61 @@ async function main() {
           (finderDetail.mirrorPressed === 'true' || finderDetail.mirrorPressed === 'false'),
         JSON.stringify(finderDetail),
       );
-      // Viewfinder geometry contract: portrait 9:16 container + object-cover
-      // video. Candidate prefers the new `[data-viewfinder]` hook, falling
-      // back to the finder-frame inner box (portrait rounded-rect), then the
-      // frame itself, then the video parent — all total (try/catch).
+      // Viewfinder geometry contract (full-bleed overlay): `[data-viewfinder]`
+      // is a FULL-BLEED layer — its rect covers the scanner surface (parent
+      // stage) rect ±2px per edge (no bars), the video is object-cover, and
+      // the video rect covers the viewfinder rect ±2px per edge. Missing
+      // `[data-viewfinder]` fails honestly (no fallback — the hook is the
+      // contract). All total (try/catch).
       const viewfinderBefore = await page.evaluate(() => {
         try {
+          const candidate = document.querySelector('[data-viewfinder]');
           const video = document.querySelector('[data-scanner-root] video');
-          const candidate =
-            document.querySelector('[data-viewfinder]') ??
-            document.querySelector('[data-finder-frame] > div') ??
-            document.querySelector('[data-finder-frame]') ??
-            video?.parentElement ??
-            null;
-          if (!candidate) return null;
+          if (!candidate || !video) return null;
+          const surface = candidate.parentElement;
+          if (!surface) return null;
           const r = candidate.getBoundingClientRect();
+          const s = surface.getBoundingClientRect();
+          const v = video.getBoundingClientRect();
+          const edge = {
+            left: Math.round(r.left - s.left),
+            top: Math.round(r.top - s.top),
+            right: Math.round(s.right - r.right),
+            bottom: Math.round(s.bottom - r.bottom),
+          };
+          const videoEdge = {
+            left: Math.round(v.left - r.left),
+            top: Math.round(v.top - r.top),
+            right: Math.round(r.right - v.right),
+            bottom: Math.round(r.bottom - v.bottom),
+          };
           return {
             w: Math.round(r.width),
             h: Math.round(r.height),
-            ratio: r.width > 0 ? r.height / r.width : 0,
-            objectCover:
-              video !== null && video !== undefined
-                ? getComputedStyle(video).objectFit === 'cover'
-                : false,
+            edge,
+            videoEdge,
+            surfaceW: Math.round(s.width),
+            surfaceH: Math.round(s.height),
+            videoW: Math.round(v.width),
+            videoH: Math.round(v.height),
+            objectCover: getComputedStyle(video).objectFit === 'cover',
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner viewfinder is portrait 9:16 with object-cover video',
+        'scanner viewfinder is full-bleed with object-cover video (no bars)',
         viewfinderBefore !== null &&
-          viewfinderBefore.h > viewfinderBefore.w &&
-          Math.abs(viewfinderBefore.ratio - 16 / 9) / (16 / 9) < 0.15 &&
-          viewfinderBefore.objectCover === true,
+          Math.abs(viewfinderBefore.edge.left) <= 2 &&
+          Math.abs(viewfinderBefore.edge.top) <= 2 &&
+          Math.abs(viewfinderBefore.edge.right) <= 2 &&
+          Math.abs(viewfinderBefore.edge.bottom) <= 2 &&
+          viewfinderBefore.objectCover === true &&
+          Math.abs(viewfinderBefore.videoEdge.left) <= 2 &&
+          Math.abs(viewfinderBefore.videoEdge.top) <= 2 &&
+          Math.abs(viewfinderBefore.videoEdge.right) <= 2 &&
+          Math.abs(viewfinderBefore.videoEdge.bottom) <= 2,
         JSON.stringify(viewfinderBefore),
       );
       // Click in one evaluate, read the flip in a LATER one: React flushes
@@ -2378,6 +2399,293 @@ async function main() {
           adjustLabels.hasRedetect,
         JSON.stringify(adjustLabels),
       );
+      // Handle visual contract: the handle BUTTON is an intentionally
+      // borderless transparent 44px hit target (Tailwind preflight computes
+      // `solid` on it) — the dotted ring is its first-child visual span.
+      // Asserting on the button would pin the wrong node; the ring span is
+      // the user-visible dotted ring. Missing handle fails honestly.
+      const handleRing = await page.evaluate(() => {
+        try {
+          const el = document.querySelector('[data-crop-handle="tl"] > span');
+          if (!el) return null;
+          return { borderStyle: getComputedStyle(el).borderStyle };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner corner handles show dotted ring (border-style:dotted)',
+        handleRing !== null && handleRing.borderStyle === 'dotted',
+        JSON.stringify(handleRing),
+      );
+      // Loupe contract: `[data-loupe]` circular lens with
+      // `[data-loupe-crosshair]` appears while a handle is grabbed
+      // (pointerdown→pointerup) and on keyboard focus; position tracks
+      // the corner as it moves; hidden otherwise. All predicates total
+      // (try/catch, never dereference possibly-null).
+      const loupeAtRest = await page.evaluate(() => {
+        try {
+          const l = document.querySelector('[data-loupe]');
+          if (!l) return { present: false, visible: false };
+          const cs = getComputedStyle(l);
+          const r = l.getBoundingClientRect();
+          const visible = !(
+            cs.display === 'none' ||
+            cs.visibility === 'hidden' ||
+            cs.opacity === '0' ||
+            r.width <= 0 ||
+            r.height <= 0
+          );
+          return { present: true, visible };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner loupe hidden at rest in adjust',
+        loupeAtRest !== null && loupeAtRest.visible === false,
+        JSON.stringify(loupeAtRest),
+      );
+      const loupeGrabStart = await page.evaluate(() => {
+        try {
+          const el = document.querySelector('[data-crop-handle="tl"]');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        } catch {
+          return null;
+        }
+      });
+      let loupeGrabDetail = null;
+      let loupeTracked = false;
+      let loupeReleasedHidden = false;
+      if (loupeGrabStart !== null) {
+        await page.mouse.move(loupeGrabStart.x, loupeGrabStart.y);
+        await page.mouse.down();
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                const l = document.querySelector('[data-loupe]');
+                if (!l) return false;
+                const cs = getComputedStyle(l);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')
+                  return false;
+                const r = l.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return false;
+                return document.querySelector('[data-loupe-crosshair]') !== null;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 10000 },
+          );
+        } catch {
+          /* measured below */
+        }
+        loupeGrabDetail = await page.evaluate(() => {
+          try {
+            const l = document.querySelector('[data-loupe]');
+            if (!l) return null;
+            const r = l.getBoundingClientRect();
+            const cs = getComputedStyle(l);
+            const cross =
+              l.querySelector('[data-loupe-crosshair]') ??
+              document.querySelector('[data-loupe-crosshair]');
+            const crossPresent = cross !== null;
+            const radius = cs.borderRadius ?? '';
+            // Chrome may serialize huge radii in scientific notation
+            // ("3.35544e+07px" for a fully-round lens) — parse the leading
+            // float with its exponent. Any radius ≥ half the min side renders
+            // a circle, so that is the bar (not string shape).
+            const m = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(px|%)/.exec(radius);
+            const round =
+              r.width > 0 &&
+              Math.abs(r.width - r.height) <= 4 &&
+              (/%/.test(radius) ||
+                (m !== null &&
+                  m[2] === 'px' &&
+                  parseFloat(m[1]) >= Math.min(r.width, r.height) / 2 - 4));
+            return {
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              borderRadius: radius.slice(0, 40),
+              crosshairPresent: crossPresent,
+              circular: round,
+            };
+          } catch {
+            return null;
+          }
+        });
+        check(
+          'scanner loupe appears on handle grab with crosshair (circular lens)',
+          loupeGrabDetail !== null &&
+            loupeGrabDetail.crosshairPresent === true &&
+            loupeGrabDetail.circular === true,
+          JSON.stringify(loupeGrabDetail),
+        );
+        // Drag while grabbed: the loupe position must track the corner.
+        const loupePosBefore = loupeGrabDetail
+          ? { x: loupeGrabDetail.x, y: loupeGrabDetail.y }
+          : null;
+        await page.mouse.move(loupeGrabStart.x + 40, loupeGrabStart.y + 30, { steps: 12 });
+        try {
+          await page.waitForFunction(
+            (sx, sy) => {
+              try {
+                const el = document.querySelector('[data-crop-handle="tl"]');
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const cx = r.x + r.width / 2;
+                const cy = r.y + r.height / 2;
+                return Math.hypot(cx - sx, cy - sy) > 3;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 10000 },
+            loupeGrabStart.x,
+            loupeGrabStart.y,
+          );
+        } catch {
+          /* measured below */
+        }
+        const loupePosAfter = await page.evaluate(() => {
+          try {
+            const l = document.querySelector('[data-loupe]');
+            if (!l) return null;
+            const r = l.getBoundingClientRect();
+            return { x: Math.round(r.x), y: Math.round(r.y) };
+          } catch {
+            return null;
+          }
+        });
+        loupeTracked =
+          loupePosBefore !== null &&
+          loupePosAfter !== null &&
+          Math.hypot(loupePosAfter.x - loupePosBefore.x, loupePosAfter.y - loupePosBefore.y) > 3;
+        check(
+          'scanner loupe position tracks the corner while dragging',
+          loupeTracked,
+          JSON.stringify({ before: loupePosBefore, after: loupePosAfter }),
+        );
+        await page.mouse.up();
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                const l = document.querySelector('[data-loupe]');
+                if (!l) return true;
+                const cs = getComputedStyle(l);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')
+                  return true;
+                const r = l.getBoundingClientRect();
+                return r.width <= 0 || r.height <= 0;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 10000 },
+          );
+          loupeReleasedHidden = true;
+        } catch {
+          loupeReleasedHidden = false;
+        }
+        const loupeAfterRelease = await page.evaluate(() => {
+          try {
+            const l = document.querySelector('[data-loupe]');
+            if (!l) return { present: false, visible: false };
+            const cs = getComputedStyle(l);
+            const r = l.getBoundingClientRect();
+            const visible = !(
+              cs.display === 'none' ||
+              cs.visibility === 'hidden' ||
+              cs.opacity === '0' ||
+              r.width <= 0 ||
+              r.height <= 0
+            );
+            return { present: true, visible };
+          } catch {
+            return null;
+          }
+        });
+        loupeReleasedHidden =
+          loupeReleasedHidden && loupeAfterRelease !== null && loupeAfterRelease.visible === false;
+        check(
+          'scanner loupe hides on handle release',
+          loupeReleasedHidden,
+          JSON.stringify(loupeAfterRelease),
+        );
+      } else {
+        check(
+          'scanner loupe appears on handle grab with crosshair (circular lens)',
+          false,
+          'no tl handle',
+        );
+        check('scanner loupe position tracks the corner while dragging', false, 'no tl handle');
+        check('scanner loupe hides on handle release', false, 'no tl handle');
+      }
+      // Keyboard focus on a handle shows the loupe; blur restores rest state
+      // for the drag/keyboard checks below.
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-crop-handle="tr"]')?.focus();
+        } catch {
+          /* noop */
+        }
+      });
+      let loupeFocusVisible = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const l = document.querySelector('[data-loupe]');
+              if (!l) return false;
+              const cs = getComputedStyle(l);
+              if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')
+                return false;
+              const r = l.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10000 },
+        );
+        loupeFocusVisible = true;
+      } catch {
+        loupeFocusVisible = false;
+      }
+      const loupeFocusDetail = await page.evaluate(() => {
+        try {
+          const l = document.querySelector('[data-loupe]');
+          if (!l) return null;
+          const r = l.getBoundingClientRect();
+          return {
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            crosshairPresent: document.querySelector('[data-loupe-crosshair]') !== null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner loupe appears on handle keyboard focus',
+        loupeFocusVisible &&
+          loupeFocusDetail !== null &&
+          loupeFocusDetail.crosshairPresent === true,
+        JSON.stringify(loupeFocusDetail),
+      );
+      await page.evaluate(() => {
+        try {
+          if (document.activeElement !== null) document.activeElement.blur();
+        } catch {
+          /* noop */
+        }
+      });
       // (reactiveSrcBefore was read pre-adjust above — the result strip is
       // unmounted while adjusting, so it is read here no longer.)
       const dragStart = await page.evaluate(() => {
