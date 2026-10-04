@@ -1,7 +1,8 @@
 /**
- * ScanicCapture tests: E2E data-contract attributes, result-FIRST queue flow,
- * commit semantics (warped PNG vs byte-identical original, capture order,
- * `scan-NNN.jpg` naming), the portaled corner editor, and the ML opt-in seam.
+ * ScanicCapture tests: full-screen takeover contract, ML-default detection,
+ * mirror control, finder frame/status, result-FIRST queue flow, commit
+ * semantics (warped PNG vs byte-identical original, capture order,
+ * `scan-NNN.jpg` naming), and the portaled corner editor.
  *
  * `scanic` is doubled (jsdom has no camera, no canvas 2D, no WASM): the
  * doubles stay faithful — DOM handle buttons with `data-corner`, arrow-key
@@ -144,6 +145,34 @@ async function injectAndReview(...files: File[]) {
   await findQ('[data-scan-queue]');
 }
 
+/** Live-camera double: resolves getUserMedia with a stoppable fake stream. */
+function mockLiveCamera() {
+  const stop = vi.fn();
+  const track = {
+    stop,
+    getCapabilities: () => ({}),
+    applyConstraints: vi.fn(async () => undefined),
+  };
+  const stream = {
+    getTracks: () => [track],
+    getVideoTracks: () => [track],
+  } as unknown as MediaStream;
+  Object.defineProperty(navigator, 'mediaDevices', {
+    value: { getUserMedia: vi.fn(async () => stream) },
+    configurable: true,
+  });
+  return { stop, track };
+}
+
+function restoreMediaDevices() {
+  try {
+    // @ts-expect-error test-only teardown
+    delete navigator.mediaDevices;
+  } catch {
+    // jsdom without mediaDevices — nothing to restore.
+  }
+}
+
 let urlCounter = 0;
 
 beforeEach(() => {
@@ -193,8 +222,10 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  restoreMediaDevices();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  document.body.style.overflow = '';
   // @ts-expect-error test-only cleanup of the canvas export stub
   if ('toBlob' in HTMLCanvasElement.prototype) delete HTMLCanvasElement.prototype.toBlob;
 });
@@ -207,14 +238,105 @@ describe('formatScanName', () => {
 });
 
 describe('ScanicCapture shell', () => {
-  it('renders the scanner root with honest no-camera copy and an opt-in ML toggle', () => {
+  it('portals a full-screen takeover root with ML default and no toggle', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
-    expect(q('[data-scanner-root]')).toBeTruthy();
+    const root = q('[data-scanner-root]');
+    expect(root.getAttribute('data-detector')).toBe('ml');
+    expect(root.className).toMatch('fixed');
+    expect(root.className).toMatch('inset-0');
+    expect(root.className).toMatch('z-50');
+    // Portaled to document.body, not nested inline in the RTL container.
+    expect(root.parentElement).toBe(document.body);
     expect(screen.getByText(/No camera is available/)).toBeTruthy();
-    const toggle = q('[data-ml-detector]');
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    // The ML toggle button is dead — ML is the default.
+    expect(document.querySelector('[data-ml-detector]')).toBeNull();
     // Session strip is always rendered, even with no pages.
     expect(q('[data-scan-strip]')).toBeTruthy();
+    // Honest no-camera copy rides the finder status line.
+    expect(q('[data-finder-status]').textContent).toMatch(/No camera is available/);
+  });
+
+  it('locks body scroll while mounted and restores on unmount', () => {
+    const { unmount } = render(
+      <ScanicCapture onCommit={() => undefined} onExit={() => undefined} />,
+    );
+    expect(document.body.style.overflow).toBe('hidden');
+    unmount();
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('renders the shutter only when the camera is live', async () => {
+    // No camera in jsdom by default — no shutter without a live preview.
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    expect(document.querySelector('[data-scan-capture]')).toBeNull();
+    cleanup();
+
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    expect(await findQ('[data-scan-capture]')).toBeTruthy();
+  });
+});
+
+describe('viewfinder', () => {
+  it('shows a full-bleed finder frame with honest Point-at-page status when live', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(q('[data-finder-frame]')).toBeTruthy();
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    const video = document.querySelector(
+      'video[aria-label="Camera preview"]',
+    ) as HTMLVideoElement | null;
+    expect(video).not.toBeNull();
+    expect(video?.className).toMatch('object-cover');
+  });
+
+  it('requests high-res constraints with a continuous-focus effort', async () => {
+    const { track } = mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const getUserMedia = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
+    expect(getUserMedia).toHaveBeenCalled();
+    const constraints = getUserMedia.mock.calls[0][0] as {
+      video: { width?: { ideal: number }; height?: { ideal: number } };
+    };
+    // Back camera defaults to 1080p ideals.
+    expect(constraints.video.width).toEqual({ ideal: 1920 });
+    expect(constraints.video.height).toEqual({ ideal: 1080 });
+    // Continuous focus effort where available (mock accepts anything).
+    expect(track.applyConstraints).toHaveBeenCalled();
+  });
+});
+
+describe('mirror control', () => {
+  it('mirrors the front preview by default and flips via the toggle', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // Back camera is never mirrored, even with the toggle pressed.
+    let video = document.querySelector(
+      'video[aria-label="Camera preview"]',
+    ) as HTMLVideoElement | null;
+    expect(video?.style.transform).toBe('');
+    const toggle = await findQ('[data-mirror-toggle]');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+
+    // Switch to the front camera — preview mirrors by default.
+    fireEvent.click(screen.getByLabelText('Switch camera'));
+    await waitFor(() => {
+      video = document.querySelector(
+        'video[aria-label="Camera preview"]',
+      ) as HTMLVideoElement | null;
+      expect(video?.style.transform).toBe('scaleX(-1)');
+    });
+
+    // Toggle off — preview unmirrors (captures stay unmirrored regardless).
+    fireEvent.click(q('[data-mirror-toggle]'));
+    await waitFor(() => {
+      expect(q('[data-mirror-toggle]').getAttribute('aria-pressed')).toBe('false');
+    });
+    video = document.querySelector('video[aria-label="Camera preview"]') as HTMLVideoElement | null;
+    expect(video?.style.transform).toBe('');
   });
 });
 
@@ -229,7 +351,7 @@ describe('result-FIRST queue', () => {
     expect(screen.getByText('Page 1 of 2')).toBeTruthy();
     expect(q('[data-crop-result]')).toBeTruthy();
     expect(q('[data-crop-result-img]')).toBeTruthy();
-    for (const label of ['Looks good', 'Use original', 'Adjust corners', 'Discard']) {
+    for (const label of ['Looks good', 'Use original', 'Adjust corners', 'Discard', 'Re-detect']) {
       expect(screen.getByText(label, { exact: true })).toBeTruthy();
     }
     expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('0 of 2 reviewed');
@@ -282,6 +404,21 @@ describe('result-FIRST queue', () => {
     fireEvent.click(screen.getByText('Discard', { exact: true }));
     await screen.findByText('Page 1 of 1');
   });
+
+  it('re-runs ML detection via Re-detect', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    await waitFor(() => expect(mockScan).toHaveBeenCalled());
+    const callsBefore = mockScan.mock.calls.length;
+    fireEvent.click(screen.getByText('Re-detect', { exact: true }));
+    await waitFor(() => {
+      expect(mockScan.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    const lastOptions = mockScan.mock.calls[mockScan.mock.calls.length - 1][1] as {
+      detector: string;
+    };
+    expect(lastOptions.detector).toBe('ml');
+  });
 });
 
 describe('corner editor', () => {
@@ -311,6 +448,17 @@ describe('corner editor', () => {
   });
 
   it('disables Reset to auto when there is no detection baseline', async () => {
+    // BOTH detectors miss: the ML attempt finds nothing AND the one
+    // classical fallback finds nothing (null-means-missed policy).
+    mockScan.mockResolvedValueOnce({
+      success: false,
+      message: 'none',
+      output: null,
+      corners: null,
+      contour: null,
+      debug: null,
+      timings: [],
+    });
     mockScan.mockResolvedValueOnce({
       success: false,
       message: 'none',
@@ -328,12 +476,10 @@ describe('corner editor', () => {
   });
 });
 
-describe('ML detector toggle', () => {
-  it('is classical by default and opts into ML per call with the vendored base URL', async () => {
+describe('ML detector default', () => {
+  it('detects ML-first with the vendored base URL and no toggle', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
-    const toggle = q('[data-ml-detector]');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(document.querySelector('[data-ml-detector]')).toBeNull();
     await injectAndReview(photo('a.jpg', [1]));
     await waitFor(() => expect(mockScan).toHaveBeenCalled());
     const options = mockScan.mock.calls[0][1] as {
@@ -343,5 +489,28 @@ describe('ML detector toggle', () => {
     expect(options.detector).toBe('ml');
     expect(options.ml?.assetBaseUrl).toBe(SCANIC_ML_ASSET_BASE_URL);
     expect(SCANIC_ML_ASSET_BASE_URL).toBe('/assets/scanic-ml/');
+  });
+
+  it('falls back to classical when ML succeeds but finds no quad (null-means-missed)', async () => {
+    mockScan.mockResolvedValueOnce({
+      success: false,
+      message: 'no confident document (ml)',
+      confidence: null,
+      score: 0.1,
+      output: null,
+      corners: null,
+      contour: null,
+      debug: null,
+      timings: [],
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    await waitFor(() => expect(mockScan.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const second = mockScan.mock.calls[1][1] as { detector: string };
+    expect(second.detector).toBe('classical');
+    // Classical corners land on the page: adjust is seeded, Reset enabled.
+    fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
+    const reset = await screen.findByText('Reset to auto', { exact: true });
+    expect((reset as HTMLButtonElement).disabled).toBe(false);
   });
 });

@@ -5,7 +5,7 @@
  * Main thread (ScanicClient / useScanicProcessor)
  *   │  ScanicWorkerRequest (ImageData pixels as TRANSFERRED ArrayBuffers)
  *   ▼
- * Web Worker (scanic.worker.ts: scanic classical/ML detection + warp)
+ * Web Worker (scanic.worker.ts: scanic ML-first detection + warp)
  *   │  ScanicWorkerResponse → Promise resolution
  *   ▼
  * Main thread (ImageData rebuilt from the transferred buffer)
@@ -35,13 +35,20 @@ export interface ScanicCorners {
   bottomLeft: ScanicPoint;
 }
 
-/** Detection backend: classical is the default; ML is explicit opt-in. */
+/** Detection backend: ML is the default (D35); classical is the silent fallback. */
 export type ScanicDetectorKind = 'classical' | 'ml';
 
 export interface ScanicDetectionResult {
   success: boolean;
   corners: ScanicCorners | null;
   confidence: number | null;
+  /**
+   * Detector behind this result: the backend that produced `corners` on
+   * success; on failure, the backend that made the final attempt (classical
+   * whenever the ML attempt was followed by the classical fallback). Always
+   * present, so a silent fallback stays reportable.
+   */
+  detector: ScanicDetectorKind;
 }
 
 export interface ScanicDetectRequest {

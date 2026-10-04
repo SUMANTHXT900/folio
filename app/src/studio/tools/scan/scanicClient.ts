@@ -1,15 +1,20 @@
 /**
- * Main-thread client for the scanic scan worker (D34).
+ * Main-thread client for the scanic scan worker (D34/D35).
  *
  * ```text
  * useScanicProcessor / UI
- *   │  detect(image, detector) / extract(image, corners)   (Promise)
+ *   │  detect(image) / redetect(image) / extract(image, corners)   (Promise)
  *   ▼
  * ScanicClient (this file: lazy worker, epoch guards, cancel-by-terminate)
  *   │  postMessage with the ImageData pixels as TRANSFERRED ArrayBuffer
  *   ▼
- * scanic.worker.ts (scanic Scanner init-once, classical/ML + warp)
+ * scanic.worker.ts (scanic Scanner init-once, ML-first + warp)
  * ```
+ *
+ * Runtime status (D34/D35): the shipped UI still calls scanic directly on the
+ * main thread; this client + worker core is the tested swap foundation for
+ * background processing — adopting it must keep the review UI's DOM contract
+ * unchanged.
  *
  * Ownership rules:
  * - `detect()` and `extract()` TRANSFER the image's pixel buffer
@@ -23,6 +28,7 @@
  *   recreates the worker.
  */
 
+import { DEFAULT_DETECTOR, defaultDetector } from './detectorPolicy';
 import {
   SCANIC_WORKER_PROTOCOL_VERSION,
   validateScanicCorners,
@@ -58,9 +64,17 @@ interface PendingScanicRequest {
   epoch: number;
 }
 
+/** Test/platform seams and the ML-first detector resolution for `detect()`. */
 export interface ScanicClientOptions {
   /** Test seam: a factory for worker doubles; defaults to the module worker. */
   createWorker?: () => Worker;
+  /**
+   * Resolves the detector for a `detect()` call made without an explicit
+   * one. Defaults to the ML-first policy: ML, unless a warm preload in this
+   * context already proved ML unavailable (then classical, silently — see
+   * `detectorPolicy.ts`). `redetect()` ignores this seam.
+   */
+  defaultDetector?: () => ScanicDetectorKind;
 }
 
 export class ScanicClient {
@@ -71,9 +85,11 @@ export class ScanicClient {
   private readonly pending = new Map<number, PendingScanicRequest>();
   private droppedCount = 0;
   private readonly createWorker: () => Worker;
+  private readonly defaultDetector: () => ScanicDetectorKind;
 
   constructor(options: ScanicClientOptions = {}) {
     this.createWorker = options.createWorker ?? defaultCreateWorker;
+    this.defaultDetector = options.defaultDetector ?? defaultDetector;
   }
 
   /** Diagnostic count of dropped malformed/stale worker messages (no UI). */
@@ -103,15 +119,16 @@ export class ScanicClient {
   }
 
   /**
-   * Document detection on a full-resolution ImageData. The image's pixel
-   * buffer is transferred (the caller's ImageData is neutered); no bytes
-   * are returned — corners come back in FULL-RESOLUTION input pixels and
+   * Document detection on a full-resolution ImageData, ML-first. With no
+   * explicit detector the policy default applies: ML, unless a warm preload
+   * already proved ML unavailable in this context (then classical, silently).
+   * The worker answers `'ml'` requests with one classical fallback on ANY ML
+   * failure, and the result names the detector behind the corners. The
+   * image's pixel buffer is transferred (the caller's ImageData is
+   * neutered); corners come back in FULL-RESOLUTION input pixels and
    * `confidence` is scanic's own 0–1 confidence (null when unavailable).
    */
-  async detect(
-    image: ImageData,
-    detector: ScanicDetectorKind = 'classical',
-  ): Promise<ScanicDetectionResult> {
+  async detect(image: ImageData, detector?: ScanicDetectorKind): Promise<ScanicDetectionResult> {
     const id = this.nextRequestId();
     const request: ScanicDetectRequest = {
       protocol: SCANIC_WORKER_PROTOCOL_VERSION,
@@ -120,7 +137,7 @@ export class ScanicClient {
       width: image.width,
       height: image.height,
       buffer: toExactBuffer(image),
-      detector,
+      detector: detector ?? this.defaultDetector(),
     };
     const response = await this.dispatch(request, [request.buffer]);
     if (response.kind !== 'detect-result') {
@@ -130,6 +147,18 @@ export class ScanicClient {
       );
     }
     return response.result;
+  }
+
+  /**
+   * Fresh detection for the adjust screen's Re-detect action: forces the ML
+   * attempt, bypassing the cached warm-failure fallback that `detect()` may
+   * have applied. The request itself keeps the worker's ML-then-classical
+   * fallback policy; detection results are never cached, so this is the
+   * explicit re-run. The image's pixel buffer transfers exactly like
+   * `detect()`.
+   */
+  async redetect(image: ImageData): Promise<ScanicDetectionResult> {
+    return this.detect(image, DEFAULT_DETECTOR);
   }
 
   /**
@@ -315,6 +344,21 @@ export class ScanicClient {
       }
     }
   }
+}
+
+/**
+ * Module-level shared client for `redetect()` callers that do not own a
+ * client (the adjust screen's Re-detect button): the backing worker is
+ * created lazily on first use and reused across calls. Same ML-forcing
+ * semantics as `ScanicClient.redetect`; the image's pixel buffer transfers.
+ */
+let sharedClient: ScanicClient | null = null;
+
+export function redetect(image: ImageData): Promise<ScanicDetectionResult> {
+  if (sharedClient === null) {
+    sharedClient = new ScanicClient();
+  }
+  return sharedClient.redetect(image);
 }
 
 /**

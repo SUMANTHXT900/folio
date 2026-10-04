@@ -386,14 +386,13 @@ export default function ImagesTool() {
           )}
         </div>
       )}
+      {/* Full-screen takeover: ScanicCapture portals itself to document.body. */}
       {scannerOpen && (
-        <div className="mt-5">
-          <ScanicCapture
-            startIndex={cameraStartIndex}
-            onCommit={commitCameraPages}
-            onExit={() => setScannerOpen(false)}
-          />
-        </div>
+        <ScanicCapture
+          startIndex={cameraStartIndex}
+          onCommit={commitCameraPages}
+          onExit={() => setScannerOpen(false)}
+        />
       )}
     </div>
   );

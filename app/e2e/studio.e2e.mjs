@@ -1063,34 +1063,144 @@ async function main() {
       const { page, consoleErrors } = await newPage(scanBrowser);
       await gotoTool(page, 'images');
       await scanOpen(page);
-      const scanOpened = await page.evaluate(() => {
+      const scanTakeover = await page.evaluate(() => {
         try {
           const root = document.querySelector('[data-scanner-root]');
-          const shutter = document.querySelector('[data-scan-capture]');
-          const ml = document.querySelector('[data-ml-detector]');
-          if (!root || !shutter || !ml) return null;
-          const text = (ml.textContent ?? '').toLowerCase();
-          const mode = (
-            ml.getAttribute('data-mode') ??
-            ml.getAttribute('data-detector') ??
-            ''
-          ).toLowerCase();
-          const pressed = ml.getAttribute('aria-pressed');
-          const checked = ml.getAttribute('aria-checked');
-          const classical =
-            text.includes('classical') ||
-            mode.includes('classical') ||
-            pressed === 'false' ||
-            checked === 'false';
-          return { classical, text: text.slice(0, 60), mode, pressed, checked };
+          if (!root) return null;
+          const cs = getComputedStyle(root);
+          const r = root.getBoundingClientRect();
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          const area = r.width * r.height;
+          const viewportArea = vw * vh;
+          const coverage = viewportArea > 0 ? area / viewportArea : 0;
+          return {
+            present: true,
+            position: cs.position,
+            fixed: cs.position === 'fixed',
+            rect: {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+            },
+            viewport: { w: vw, h: vh },
+            coverage: Number(coverage.toFixed(3)),
+            bodyOverflow: document.body.style.overflow || getComputedStyle(document.body).overflow,
+            detector: root.getAttribute('data-detector'),
+            legacyTogglePresent: document.querySelector('[data-ml-detector]') !== null,
+            finderFrame: document.querySelector('[data-finder-frame]') !== null,
+            finderStatus:
+              document.querySelector('[data-finder-status]')?.textContent?.trim() ?? null,
+            mirrorToggle: document.querySelector('[data-mirror-toggle]') !== null,
+            mirrorPressed:
+              document.querySelector('[data-mirror-toggle]')?.getAttribute('aria-pressed') ?? null,
+            videoPresent: document.querySelector('[data-scanner-root] video') !== null,
+          };
         } catch {
           return null;
         }
       });
       check(
-        'scanner opens with root + shutter + ML toggle default classical',
-        scanOpened !== null && scanOpened.classical === true,
-        JSON.stringify(scanOpened),
+        'scanner takeover is fullscreen portaled (fixed, covers viewport, locks body scroll)',
+        scanTakeover !== null &&
+          scanTakeover.fixed === true &&
+          scanTakeover.coverage >= 0.95 &&
+          (scanTakeover.bodyOverflow === 'hidden' || scanTakeover.bodyOverflow.includes('hidden')),
+        JSON.stringify(scanTakeover),
+      );
+      check(
+        'scanner defaults to ML detector (data-detector=ml, no legacy toggle)',
+        scanTakeover !== null &&
+          scanTakeover.detector === 'ml' &&
+          scanTakeover.legacyTogglePresent === false,
+        JSON.stringify(
+          scanTakeover
+            ? {
+                detector: scanTakeover.detector,
+                legacyTogglePresent: scanTakeover.legacyTogglePresent,
+              }
+            : null,
+        ),
+      );
+      const finderDetail = await page.evaluate(() => {
+        try {
+          const v = document.querySelector('[data-scanner-root] video');
+          const mirror = document.querySelector('[data-mirror-toggle]');
+          return {
+            video: v !== null,
+            objectCover: v !== null && getComputedStyle(v).objectFit === 'cover',
+            frame: document.querySelector('[data-finder-frame]') !== null,
+            status: document.querySelector('[data-finder-status]')?.textContent?.trim() ?? null,
+            mirror: mirror !== null,
+            mirrorPressed: mirror?.getAttribute('aria-pressed') ?? null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner viewfinder shows live video + finder frame + status + mirror toggle',
+        finderDetail !== null &&
+          finderDetail.video &&
+          finderDetail.frame &&
+          finderDetail.status !== null &&
+          finderDetail.status.length > 0 &&
+          finderDetail.mirror &&
+          (finderDetail.mirrorPressed === 'true' || finderDetail.mirrorPressed === 'false'),
+        JSON.stringify(finderDetail),
+      );
+      // Click in one evaluate, read the flip in a LATER one: React flushes
+      // setState after the click returns, so a same-evaluate read always
+      // sees the stale value (L-12 family — reads as a dead toggle).
+      const mirrorBefore = await page.evaluate(() => {
+        try {
+          return (
+            document.querySelector('[data-mirror-toggle]')?.getAttribute('aria-pressed') ?? null
+          );
+        } catch {
+          return null;
+        }
+      });
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-mirror-toggle]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          (was) => {
+            try {
+              const now = document
+                .querySelector('[data-mirror-toggle]')
+                ?.getAttribute('aria-pressed');
+              return now !== null && now !== was;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10000 },
+          mirrorBefore,
+        );
+      } catch {
+        /* measured below as flipped:false */
+      }
+      const mirrorFlip = await page.evaluate((was) => {
+        try {
+          const after = document
+            .querySelector('[data-mirror-toggle]')
+            ?.getAttribute('aria-pressed');
+          return { before: was, after, flipped: after !== null && after !== was };
+        } catch {
+          return null;
+        }
+      }, mirrorBefore);
+      check(
+        'scanner mirror toggle flips preview mirroring (aria-pressed)',
+        mirrorFlip !== null && mirrorFlip.flipped === true,
+        JSON.stringify(mirrorFlip),
       );
       await scanCaptureOnce(page);
       // The camera-phase strip is `[data-scan-strip]` (thumbs); the
@@ -1160,6 +1270,141 @@ async function main() {
           /* noop */
         }
       });
+      await waitForResultImg(page);
+      let queueReached = false;
+      try {
+        await waitForQueue(page, 2, 30000);
+        queueReached = true;
+      } catch {
+        queueReached = false;
+      }
+      const queuePhase = await page.evaluate(() => {
+        try {
+          const q = document.querySelector('[data-scan-queue]');
+          const strip = document.querySelector('[data-scan-strip]');
+          const liveCapture = document.querySelector('[data-scan-capture]');
+          const text = q?.textContent ?? '';
+          return {
+            queuePresent: q !== null,
+            queueText: text.slice(0, 80),
+            of2: /of 2\b/.test(text),
+            stripPresent: strip !== null,
+            liveCaptureAbsent: liveCapture === null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner review phase shows queue (live capture hidden)',
+        queueReached &&
+          queuePhase !== null &&
+          queuePhase.queuePresent &&
+          queuePhase.of2 &&
+          queuePhase.liveCaptureAbsent,
+        JSON.stringify(queuePhase),
+      );
+      const overlayState = await page.evaluate(() => {
+        try {
+          const overlay = document.querySelector('[data-detect-overlay]');
+          const img = document.querySelector('[data-crop-result-img]');
+          const poly = overlay?.querySelector('polygon') ?? null;
+          const pointsAttr = poly?.getAttribute('points') ?? '';
+          const pts = pointsAttr
+            .trim()
+            .split(/[\s,]+/)
+            .filter((t) => t.length > 0);
+          return {
+            overlayPresent: overlay !== null,
+            imgPresent: img !== null,
+            imgDecoded: img !== null && img.naturalWidth > 0,
+            imgSrcLen: img?.getAttribute('src')?.length ?? 0,
+            polygonPresent: poly !== null,
+            pointsAttr: pointsAttr.slice(0, 120),
+            coordCount: pts.length,
+            pointPairs: pts.length / 2,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner review hero shows photo + quad outline (overlay polygon, 4 points)',
+        overlayState !== null &&
+          overlayState.overlayPresent &&
+          overlayState.imgDecoded &&
+          overlayState.polygonPresent &&
+          overlayState.pointPairs === 4,
+        JSON.stringify(overlayState),
+      );
+      const redetectBefore = await page.evaluate(() => {
+        try {
+          const overlay = document.querySelector('[data-detect-overlay]');
+          const poly = overlay?.querySelector('polygon') ?? null;
+          const status = document.querySelector('[data-finder-status]')?.textContent ?? '';
+          return {
+            points: poly?.getAttribute('points') ?? null,
+            hasButton: document.querySelector('[data-redetect]') !== null,
+            status: status.slice(0, 80),
+          };
+        } catch {
+          return null;
+        }
+      });
+      let redetectSettled = false;
+      let redetectDetail = null;
+      if (redetectBefore !== null && redetectBefore.hasButton) {
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-redetect]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            (prevPoints) => {
+              try {
+                const overlay = document.querySelector('[data-detect-overlay]');
+                const poly = overlay?.querySelector('polygon') ?? null;
+                const body = document.body.innerText ?? '';
+                const detecting = /detecting|re-?detect/i.test(body);
+                if (detecting) return true;
+                if (!poly) return false;
+                return poly.getAttribute('points') !== prevPoints;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+            redetectBefore.points,
+          );
+          redetectSettled = true;
+        } catch {
+          redetectSettled = false;
+        }
+        redetectDetail = await page.evaluate(() => {
+          try {
+            const overlay = document.querySelector('[data-detect-overlay]');
+            const poly = overlay?.querySelector('polygon') ?? null;
+            return {
+              points: poly?.getAttribute('points')?.slice(0, 120) ?? null,
+              overlayPresent: overlay !== null,
+            };
+          } catch {
+            return null;
+          }
+        });
+      }
+      check(
+        'scanner Re-detect refreshes overlay without hanging (30s bound)',
+        redetectBefore !== null &&
+          redetectBefore.hasButton === true &&
+          redetectSettled === true &&
+          redetectDetail !== null &&
+          redetectDetail.overlayPresent === true,
+        JSON.stringify({ before: redetectBefore, settled: redetectSettled, after: redetectDetail }),
+      );
       await waitForResultImg(page);
       const resultFirst = await page.evaluate(() => {
         try {
@@ -1304,6 +1549,34 @@ async function main() {
           adjustState.instruction,
         JSON.stringify(adjustState),
       );
+      const adjustLabels = await page.evaluate(() => {
+        try {
+          const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+          return {
+            labels: labels.slice(0, 20),
+            hasDiscard: labels.includes('Discard'),
+            hasApply: labels.includes('Apply'),
+            hasRedetect: labels.includes('Re-detect'),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner adjust mode offers Discard + Apply + Re-detect',
+        adjustLabels !== null &&
+          adjustLabels.hasDiscard &&
+          adjustLabels.hasApply &&
+          adjustLabels.hasRedetect,
+        JSON.stringify(adjustLabels),
+      );
+      const reactiveSrcBefore = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
       const dragStart = await page.evaluate(() => {
         try {
           const el = document.querySelector('[data-crop-handle="tl"]');
@@ -1391,6 +1664,27 @@ async function main() {
         appliedBack = false;
       }
       check('scanner Apply returns to result', appliedBack);
+      await waitForResultImg(page);
+      const reactiveSrcAfter = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Apply re-renders reactive preview (result-img src changes)',
+        reactiveSrcBefore !== null &&
+          reactiveSrcAfter !== null &&
+          reactiveSrcBefore.length > 0 &&
+          reactiveSrcAfter.length > 0 &&
+          reactiveSrcBefore !== reactiveSrcAfter,
+        JSON.stringify({
+          beforeLen: reactiveSrcBefore?.length ?? 0,
+          afterLen: reactiveSrcAfter?.length ?? 0,
+          changed: reactiveSrcBefore !== reactiveSrcAfter,
+        }),
+      );
       // Use-original is a per-page review action: measure it HERE, while the
       // review buttons are visible. After the next Looks-good (last page) the
       // end screen replaces them and the button is legitimately absent.

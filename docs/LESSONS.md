@@ -80,11 +80,23 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Why it matters.** Green suites measure what they can stage; perception-heavy, device-dependent problems (AF/AE timing, shadows, glare, patterned backgrounds) live outside that staging. Sunk effort in a custom pipeline is not evidence the next round will move the field number.
 - **Rule.** Prefer proven external libraries for perception-heavy problems; keep the fine-grained E2E discipline for what automation can honestly assert, and let real-device hit-rate gates — not suite greenness — decide when a custom pipeline continues. Evidence: `docs/BUGS.md` F-21; `docs/DECISIONS.md` D29–D33.
 
+## L-17 — Ship the detector that works as the default
+
+- **Observation.** D34 shipped classical detection as the default with the ML pipeline behind an explicit opt-in toggle; user-verified field feedback on D34 showed the ML pipeline superior, so D35 made ML the default with classical as silent fallback and deleted the toggle.
+- **Why it matters.** An opt-in toggle for the better pipeline is a dark pattern that guarantees field failure — most users never find the toggle, so the field runs the worse pipeline by default.
+- **Rule.** Ship the detector that works as the default; an opt-in toggle for the better pipeline is a dark pattern that guarantees field failure. Evidence: `docs/DECISIONS.md` D34/D35; `docs/BUGS.md` F-21 (field gate re-armed on scanic).
+
 ## L-16 — Gate E2E waits on the control you will click, in the phase that renders it
 
 - **Observation.** The D34 scanic E2E failed three checks with zero app defects: (1) the suite waited for `[data-scanner-root]` (renders on open) then immediately read/clicked `[data-scan-capture]`, which renders only when the camera is LIVE (~1s later) — the evaluate saw shutter:null and the first capture no-op'd; (2) it waited for `[data-scan-queue]` right after capture, but the queue renders only in review phase — the camera-phase strip is `[data-scan-strip]`; (3) scanic's default keyboard step is 1px and can land sub-pixel, so a whole-pixel post-condition never trips — holding Shift takes the same slider path at the 10px coarse step.
 - **Why it matters.** Each reads exactly like a dead feature (null payload, timeout, moved:false) and each invites an app-side "fix" to satisfy a test artifact. The app was live, queued, and stepping correctly in every case — proven by a plain-DOM probe and by the green rerun with E2E-only changes.
 - **Rule.** Wait for the exact control the next step touches (not its parent surface), and assert phase-scoped selectors only in their phase. Prefer coarse/keyboard steps that clear whole-pixel post-conditions. Evidence: `app/e2e/studio.e2e.mjs` D34 fixes (45/48 → 48/48, zero app-code change).
+
+## L-18 — A dev-only asset failure can masquerade as dead UI (and a null result is not a throw)
+
+- **Observation.** Two stacked causes behind the D35 run's 54/56: (1) Vite's dev middleware 500s any source-code _import_ of a `public/` file, so ORT's runtime dynamic import of the vendored `.mjs` loader painted a fullscreen `vite-error-overlay` in dev only (production serves it statically and never failed). The empty overlay eats trusted-mouse hit-testing while synthetic dispatches sail through — so programmatic clicks passed and only the real-mouse drag died, the exact signature of a broken drag handler. Diagnosed via `elementFromPoint` + the dev-server log, fixed with a 15-line `serve`-only middleware (see `app/vite.config.ts` `scanicMlDevLoader`); production untouched. (2) With ML actually running, it _honestly_ returned no-document on the synthetic Y4M square — and the inline runtime only fell back to classical on throws, never on null. The Y4M square the old suite detected fine went overlay-less with dead edge-clamped handles. Fix: null-means-missed — ML-null runs classical once before settling full-frame, in both the inline path and the (already-correct) worker core; pinned by a dedicated unit test.
+- **Why it matters.** (1) Dev/prod asset asymmetry is invisible to every gate except a real browser: typecheck, lint, unit, and build all stayed green while dev-only ML silently ran classical. (2) Treating "no result" as success short-circuits detector cascades — every fallback policy must trigger on null results, not just exceptions.
+- **Rule.** Vendored runtime-loaded assets need a dev-serving story verified in a real browser (not just a passing build); detector fallbacks trigger on null/empty results exactly like on throws. Evidence: `app/vite.config.ts`, `ScanicCapture.tsx` detectEntry, D35 54/56 → 56/56.
 
 ## L-14 — Vite `server.fs.allow` overrides the default app-root allowance
 

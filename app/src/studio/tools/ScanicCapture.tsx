@@ -1,66 +1,70 @@
 /**
  * ScanicCapture — camera session + result-FIRST review queue for document scanning.
  *
- * Detection + warp run on the main thread through the real `scanic` package
- * (classical Canny pipeline; DocCornerNet ML only when the user opts in per
- * capture, with vendored same-origin assets — see `public/assets/scanic-ml/`).
- * Corner *types* come from the worker agent's barrel (`./scan/index`), the
- * single source of truth; the queue runtime here is intentionally inline
- * (main-thread `scanDocument`/`extractDocument` per capture) so the review UI
- * works standalone — swapping the internals onto `useScanicProcessor` later
- * must keep the DOM contract below byte-for-byte.
+ * Full-screen takeover: the scanner root is portaled to `document.body` as a
+ * `fixed inset-0 z-50` surface (Folio paper/ink theme) with body scroll-lock
+ * while mounted. The camera phase leads with a full-bleed viewfinder — no
+ * scroll needed to find it. The portal is NEVER wrapped in AnimatePresence.
+ *
+ * Detection is ML-first (self-hosted same-origin assets under
+ * `public/assets/scanic-ml/`), classical only as an honest fallback when the
+ * ML detector throws. Corner *types* come from the worker agent's barrel
+ * (`./scan/index`), the single source of truth; the queue runtime here is
+ * intentionally inline (main-thread `scanDocument`/`extractDocument` per
+ * capture) so the review UI works standalone — swapping the internals onto
+ * `useScanicProcessor` later must keep the DOM contract below byte-for-byte.
+ *
+ * Preview vs detection: the <video> preview pixels are NEVER the detection
+ * input — detection runs on the captured still through scanic's own internal
+ * downscale (`scanDocument` scales to detection size itself). Preview
+ * resolution (up to 1080p) only affects what the user sees.
+ *
+ * Mirror invariant: the front-camera preview is CSS-mirrored (`scaleX(-1)`,
+ * industry standard) for a natural selfie feel, but captured frames are
+ * ALWAYS unmirrored — `canvas drawImage(video)` reads raw camera pixels,
+ * never the CSS transform. The back camera is never mirrored.
  *
  * E2E DATA CONTRACT (do not rename):
- * - root `[data-scanner-root]`, shutter `[data-scan-capture]`,
- *   queue `[data-scan-queue]` with header `Page i of N`,
- *   result `[data-crop-result]` + `[data-crop-result-img]`,
- *   handles `[data-crop-handle="tl|tr|br|bl"]` (role=slider, arrow-key
+ * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
+ *   `[data-scan-capture]` (rendered only when live), queue
+ *   `[data-scan-queue]` with header `Page i of N`, result
+ *   `[data-crop-result]` + `[data-crop-result-img]`, handles
+ *   `[data-crop-handle="tl|tr|br|bl"]` (role=slider, arrow-key
  *   steppable via scanic's keyboard mode), review CTA `[data-review-cta]`
  *   (`Review N pages` / `View N pages`), progress `[data-review-progress]`
- *   (aria-label `i of N reviewed`).
+ *   (aria-label `i of N reviewed`), finder `[data-finder-frame]` +
+ *   `[data-finder-status]`, mirror `[data-mirror-toggle]` (aria-pressed).
  * - Queue button labels are EXACT: "Looks good", "Adjust corners", "Apply",
- *   "Use original", "Discard", "Reset to auto", "Build PDF", "Back to camera".
+ *   "Use original", "Discard", "Reset to auto", "Build PDF",
+ *   "Back to camera", "Re-detect".
  *
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
  * PNGs from `extractDocument(..., { output: 'canvas' })`.
  *
- * Corner editor: scanic `createCornerEditor` with a Folio skin (brass accent,
- * ink surface, paper handles). scanic's own toolbar is disabled and replaced
- * by Folio buttons with the exact E2E labels; the editor surface is portaled
- * to `document.body` and is NEVER rendered inside an `AnimatePresence`.
- * `injectStyles` keeps scanic's default (its stylesheet positions the canvas +
- * handles; the skin arrives through `theme` vars + `classNames`) — an inline
- * copy of that MIT stylesheet was deliberately not vendored here.
+ * Corner adjust lives in `./ScanicReview` (dependency-free handles on the
+ * overlay coordinate space, same E2E labels + 44px targets); this file owns
+ * queue/camera/commit only and re-warps on every Apply so previews stay
+ * reactive.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { createCornerEditor, extractDocument, scanDocument } from 'scanic';
-import type { CornerEditor } from 'scanic';
+import { extractDocument, scanDocument } from 'scanic';
 import type { ScanicCorners } from './scan/index';
+import {
+  DEFAULT_DETECTOR,
+  ML_ASSET_BASE_URL as POLICY_ML_ASSET_BASE_URL,
+} from './scan/detectorPolicy';
+import ScanicReview from './ScanicReview';
 
-/** Self-hosted (same-origin) ML detector assets — ML is strictly opt-in. */
-export const SCANIC_ML_ASSET_BASE_URL = '/assets/scanic-ml/';
+/** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
+export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
 
 /** E2E short keys for the four corner handles. */
 export const SCANIC_HANDLE_KEYS = ['tl', 'tr', 'br', 'bl'] as const;
 export type ScanicHandleKey = (typeof SCANIC_HANDLE_KEYS)[number];
-
-type ScanicCornerName = keyof ScanicCorners;
-const HANDLE_FOR_CORNER: Record<ScanicCornerName, ScanicHandleKey> = {
-  topLeft: 'tl',
-  topRight: 'tr',
-  bottomRight: 'br',
-  bottomLeft: 'bl',
-};
-const CORNER_LABEL: Record<ScanicCornerName, string> = {
-  topLeft: 'Top-left corner',
-  topRight: 'Top-right corner',
-  bottomRight: 'Bottom-right corner',
-  bottomLeft: 'Bottom-left corner',
-};
 
 /** `scan-NNN.jpg` collection names (capture order; engine sniffs magic bytes). */
 export function formatScanName(index: number): string {
@@ -147,155 +151,9 @@ function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob | null> {
   });
 }
 
-/**
- * Totally-ordered E2E-safe handle enhancement: scanic renders its own DOM
- * handle buttons (`.scanic-handle`, `data-corner="topLeft"|…`, arrow-key
- * nudge + Enter/Escape built in). This layer adds the Folio/E2E contract
- * attributes on top without touching scanic's behavior.
- */
-function enhanceEditorHandles(
-  host: HTMLElement,
-  corners: ScanicCorners,
-  w: number,
-  h: number,
-): void {
-  const buttons = host.querySelectorAll<HTMLButtonElement>('.scanic-handle');
-  buttons.forEach((btn) => {
-    const name = btn.dataset.corner as ScanicCornerName | undefined;
-    if (name === undefined || HANDLE_FOR_CORNER[name] === undefined) return;
-    const point = corners[name];
-    const pctX = w > 0 ? Math.round((point.x / w) * 100) : 0;
-    const pctY = h > 0 ? Math.round((point.y / h) * 100) : 0;
-    btn.setAttribute('data-crop-handle', HANDLE_FOR_CORNER[name]);
-    btn.setAttribute('role', 'slider');
-    btn.setAttribute('aria-label', CORNER_LABEL[name]);
-    btn.setAttribute('aria-valuemin', '0');
-    btn.setAttribute('aria-valuemax', '100');
-    btn.setAttribute('aria-valuenow', String(pctX));
-    btn.setAttribute('aria-valuetext', `${pctX} percent across, ${pctY} percent down`);
-    if (btn.tabIndex < 0) btn.tabIndex = 0;
-  });
-}
-
 /* ------------------------------------------------------------------ */
-/* Corner editor surface (portaled; never inside AnimatePresence)       */
+/* ScanicCapture                                                       */
 /* ------------------------------------------------------------------ */
-
-function CornerEditorSurface({
-  image,
-  imageWidth,
-  imageHeight,
-  initialCorners,
-  autoAvailable,
-  onApply,
-  onClose,
-}: {
-  image: HTMLImageElement;
-  imageWidth: number;
-  imageHeight: number;
-  initialCorners: ScanicCorners;
-  /** False when there is no detection baseline to reseed from. */
-  autoAvailable: boolean;
-  onApply: (corners: ScanicCorners) => void;
-  onClose: () => void;
-}) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const editorRef = useRef<CornerEditor | null>(null);
-  const onApplyRef = useRef(onApply);
-  const onCloseRef = useRef(onClose);
-  onApplyRef.current = onApply;
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (host === null) return;
-    const editor = createCornerEditor({
-      container: host,
-      image,
-      corners: initialCorners,
-      magnifier: { enabled: true },
-      // Folio renders its own toolbar below (exact E2E labels + 44px targets).
-      toolbar: { enabled: false },
-      theme: {
-        accent: '#c97a1f',
-        edgeColor: '#c97a1f',
-        handleColor: '#fdfbf7',
-        handleRingColor: '#c97a1f',
-        mask: 'rgba(23, 19, 14, 0.55)',
-        surface: '#1e1913',
-        surfaceColor: '#fdfbf7',
-      },
-      classNames: { root: 'folio-scanic-editor' },
-      handleHitArea: 44,
-      keyboard: true,
-      onChange: (corners) => enhanceEditorHandles(host, corners, imageWidth, imageHeight),
-      onConfirm: (corners) => onApplyRef.current(corners),
-      onCancel: () => onCloseRef.current(),
-    });
-    editorRef.current = editor;
-    enhanceEditorHandles(host, editor.getCorners(), imageWidth, imageHeight);
-    host.querySelector<HTMLButtonElement>('.scanic-handle')?.focus();
-    return () => {
-      editor.destroy();
-      editorRef.current = null;
-    };
-    // Mount-once per opening (parent remounts via key); initialCorners is the seed.
-  }, [image]);
-
-  return (
-    <div
-      className="flex max-h-[100dvh] w-full max-w-2xl flex-col gap-3 overflow-y-auto rounded-2xl border border-paper-300/70 bg-paper-50 p-4 shadow-soft sm:p-5 dark:border-ink-700 dark:bg-ink-800"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Adjust document corners"
-    >
-      <div
-        ref={hostRef}
-        className="relative w-full overflow-hidden rounded-xl bg-ink-950"
-        style={{ minHeight: 240 }}
-      />
-      <p className="text-xs text-ink-400 dark:text-ink-300">
-        Drag a handle or focus one and use the arrow keys (Shift for larger steps). Enter applies,
-        Escape closes.
-      </p>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => {
-            const editor = editorRef.current;
-            if (editor) onApplyRef.current(editor.confirm());
-          }}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-        >
-          Apply
-        </button>
-        <button
-          type="button"
-          disabled={!autoAvailable}
-          title={autoAvailable ? 'Reseed from auto-detection' : 'No auto-detection for this page'}
-          onClick={() => {
-            const editor = editorRef.current;
-            const host = hostRef.current;
-            if (!editor || !host) return;
-            editor.reset();
-            enhanceEditorHandles(host, editor.getCorners(), imageWidth, imageHeight);
-          }}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-800"
-        >
-          Reset to auto
-        </button>
-        <button
-          type="button"
-          aria-label="Close corner editor"
-          onClick={() => editorRef.current?.cancel()}
-          className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-4 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-800"
-        >
-          ✕
-        </button>
-      </div>
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /* ScanicCapture                                                       */
@@ -305,17 +163,18 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [entries, setEntries] = useState<QueueEntry[]>([]);
   const [phase, setPhase] = useState<Phase>('camera');
   const [reviewIndex, setReviewIndex] = useState(0);
-  const [editorEntryId, setEditorEntryId] = useState<number | null>(null);
   const [camState, setCamState] = useState<CameraState>('requesting');
   const [facing, setFacing] = useState<'environment' | 'user'>('environment');
+  const [mirrored, setMirrored] = useState(true);
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const [paused, setPaused] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [cardError, setCardError] = useState<string | null>(null);
-  const [warping, setWarping] = useState(false);
-  const [mlPreferred, setMlPreferred] = useState(false);
+  const [redetecting, setRedetecting] = useState(false);
+  /** Single-flight warp guard (the review child has no busy prop). */
+  const warpingRef = useRef(false);
 
   const idRef = useRef(0);
   const entriesRef = useRef<QueueEntry[]>([]);
@@ -326,8 +185,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const imageElsRef = useRef(new Map<number, HTMLImageElement>());
   const warpedBlobsRef = useRef(new Map<number, Blob>());
   const objectUrlsRef = useRef(new Set<string>());
-  const mlPreferredRef = useRef(mlPreferred);
-  mlPreferredRef.current = mlPreferred;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -335,6 +192,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       mountedRef.current = false;
       for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
       objectUrlsRef.current.clear();
+    };
+  }, []);
+
+  // Full-screen takeover: lock body scroll while the scanner is mounted so
+  // the in-page document never scrolls behind the fixed surface.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
     };
   }, []);
 
@@ -359,10 +227,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const accepted = queue.filter((e) => e.decision !== 'pending');
   const safeIndex = queue.length === 0 ? 0 : Math.min(reviewIndex, queue.length - 1);
   const current = queue[safeIndex] ?? null;
+  // Front-camera preview is mirrored by default (industry standard); the back
+  // camera is never mirrored. Captured frames ignore this entirely (see
+  // captureFrame: drawImage reads raw pixels, not the CSS transform).
+  const previewMirrored = facing === 'user' && mirrored;
 
-  /* ---------------- detection (classical default, ML opt-in per call) ---------------- */
+  /* ---------------- detection (ML default, classical fallback) ---------------- */
 
-  const detectEntry = useCallback(async (id: number, photoUrl: string, ml: boolean) => {
+  const detectEntry = useCallback(async (id: number, photoUrl: string) => {
     const { el, w, h } = await loadImage(photoUrl);
     if (!mountedRef.current) return;
     if (w === 0 || h === 0) {
@@ -386,22 +258,34 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     setEntries((prev) =>
       prev.map((e) =>
         e.id === id
-          ? {
-              ...e,
-              imageWidth: w,
-              imageHeight: h,
-              note: ml ? 'Loading on-device ML detector…' : null,
-            }
+          ? { ...e, imageWidth: w, imageHeight: h, note: 'Loading on-device ML detector…' }
           : e,
       ),
     );
     try {
-      const result = ml
-        ? await scanDocument(el, {
-            detector: 'ml',
-            ml: { assetBaseUrl: SCANIC_ML_ASSET_BASE_URL },
-          })
-        : await scanDocument(el, { detector: 'classical' });
+      // ML-first: DocCornerNet via vendored same-origin assets. Preview pixels
+      // are never the detection input — scanic downscales internally, so the
+      // high-res viewfinder only affects what the user sees.
+      // Null-means-missed (not just throws): when ML succeeds but finds no
+      // quad, classical gets one attempt — it sees different features and
+      // regularly catches what ML passes over (and vice versa). Only when
+      // BOTH find nothing does the page settle croppable full-frame.
+      const result = await scanDocument(el, {
+        detector: DEFAULT_DETECTOR,
+        ml: { assetBaseUrl: SCANIC_ML_ASSET_BASE_URL },
+      });
+      if (!mountedRef.current) return;
+      if (result.corners !== null) {
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === id
+              ? { ...e, status: 'ready' as const, corners: result.corners, note: null }
+              : e,
+          ),
+        );
+        return;
+      }
+      const second = await scanDocument(el, { detector: 'classical' });
       if (!mountedRef.current) return;
       setEntries((prev) =>
         prev.map((e) =>
@@ -409,11 +293,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             ? {
                 ...e,
                 status: 'ready' as const,
-                corners: result.corners,
+                corners: second.corners,
                 note:
-                  result.corners === null
+                  second.corners === null
                     ? 'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.'
-                    : null,
+                    : 'ML found no page — classical detection placed this outline; adjust freely.',
               }
             : e,
         ),
@@ -422,26 +306,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       // ML can fail (model fetch, ORT runtime); fall back to classical once,
       // honestly labelled. Classical failure degrades to full-frame.
       if (!mountedRef.current) return;
-      if (ml) {
-        try {
-          const fallback = await scanDocument(el, { detector: 'classical' });
-          if (!mountedRef.current) return;
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === id
-                ? {
-                    ...e,
-                    status: 'ready' as const,
-                    corners: fallback.corners,
-                    note: 'ML detector unavailable — used on-device classical detection instead.',
-                  }
-                : e,
-            ),
-          );
-          return;
-        } catch {
-          if (!mountedRef.current) return;
-        }
+      try {
+        const fallback = await scanDocument(el, { detector: 'classical' });
+        if (!mountedRef.current) return;
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === id
+              ? {
+                  ...e,
+                  status: 'ready' as const,
+                  corners: fallback.corners,
+                  note: 'ML detector unavailable — used on-device classical detection instead.',
+                }
+              : e,
+          ),
+        );
+        return;
+      } catch {
+        if (!mountedRef.current) return;
       }
       setEntries((prev) =>
         prev.map((e) =>
@@ -490,10 +372,30 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       ];
       entriesRef.current = next;
       setEntries(next);
-      void detectEntry(id, photoUrl, mlPreferredRef.current);
+      void detectEntry(id, photoUrl);
       return position;
     },
     [detectEntry, trackUrl],
+  );
+
+  const redetectEntry = useCallback(
+    async (entry: QueueEntry) => {
+      setRedetecting(true);
+      setCardError(null);
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === entry.id
+            ? { ...e, status: 'detecting' as const, note: 'Re-running on-device ML detection…' }
+            : e,
+        ),
+      );
+      try {
+        await detectEntry(entry.id, entry.photoUrl);
+      } finally {
+        if (mountedRef.current) setRedetecting(false);
+      }
+    },
+    [detectEntry],
   );
 
   /* ---------------- camera session ---------------- */
@@ -524,8 +426,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     setCamState('requesting');
     (async () => {
       try {
+        const front = facing === 'user';
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: facing } },
+          video: front
+            ? {
+                facingMode: { ideal: facing },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              }
+            : {
+                facingMode: { ideal: facing },
+                width: { ideal: 1920 },
+                height: { ideal: 1080 },
+              },
           audio: false,
         });
         if (cancelled) {
@@ -543,6 +456,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           }
         }
         const track = stream.getVideoTracks()[0];
+        // Continuous focus effort where available — silent no-op otherwise.
+        try {
+          await track?.applyConstraints({
+            advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+          });
+        } catch {
+          // Unsupported on this browser/device — fixed focus still scans.
+        }
         let supportsTorch = false;
         try {
           const caps = track?.getCapabilities?.() as
@@ -627,6 +548,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       setCaptureError('Could not read a camera frame on this browser — add an image file instead.');
       return;
     }
+    // Unmirrored invariant: drawImage reads raw camera pixels, never the CSS
+    // `scaleX(-1)` preview transform — captures are always true-to-scene.
     ctx.drawImage(video, 0, 0);
     const blob = await new Promise<Blob | null>((resolve) => {
       try {
@@ -697,16 +620,23 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   const acceptWarped = useCallback(
     async (entry: QueueEntry) => {
+      // Single-flight guard: the review child has no busy prop, so a second
+      // Looks-good while the first warp is in flight must not advance past
+      // the next pending page. (Decision check alone is insufficient: the
+      // decision only flips after the warp resolves.)
+      if (warpingRef.current) return;
+      if (entriesRef.current.find((e) => e.id === entry.id)?.decision !== 'pending') return;
+      warpingRef.current = true;
       setCardError(null);
       const img = imageElsRef.current.get(entry.id);
       const corners =
         entry.corners ??
         (entry.imageWidth > 0 ? fullFrameCorners(entry.imageWidth, entry.imageHeight) : null);
       if (!img || !corners) {
+        warpingRef.current = false;
         setCardError('Warp needs the decoded image — use the original instead.');
         return;
       }
-      setWarping(true);
       try {
         const result = await extractDocument(img, corners, { output: 'canvas' });
         const canvas = result.output as HTMLCanvasElement | null;
@@ -725,10 +655,43 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             'Warp failed on this page — nothing was committed. Use the original instead.',
           );
       } finally {
-        if (mountedRef.current) setWarping(false);
+        warpingRef.current = false;
       }
     },
     [markDecision, revokeUrl, trackUrl],
+  );
+
+  /**
+   * Re-warp after an adjust Apply (or any corner change): same warp as
+   * acceptWarped but commits NO decision — the fresh `warpedUrl` re-renders
+   * the overlay outline + result preview reactively. Decisions stay pending
+   * so Looks-good / Use-original still apply afterwards.
+   */
+  const rewrapEntry = useCallback(
+    async (id: number, corners: ScanicCorners) => {
+      const entry = entriesRef.current.find((e) => e.id === id);
+      const img = imageElsRef.current.get(id);
+      if (!entry || !img) return;
+      setCardError(null);
+      try {
+        const result = await extractDocument(img, corners, { output: 'canvas' });
+        const canvas = result.output as HTMLCanvasElement | null;
+        if (!canvas) throw new Error('no canvas');
+        const blob = await canvasToPng(canvas);
+        if (!blob) throw new Error('no png');
+        if (!mountedRef.current) return;
+        warpedBlobsRef.current.set(id, blob);
+        revokeUrl(entriesRef.current.find((e) => e.id === id)?.warpedUrl ?? null);
+        const url = trackUrl(URL.createObjectURL(blob));
+        setEntries((prev) =>
+          prev.map((e) => (e.id === id ? { ...e, corners, warpedUrl: url } : e)),
+        );
+      } catch {
+        if (mountedRef.current)
+          setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+      }
+    },
+    [revokeUrl, trackUrl],
   );
 
   const discardEntry = useCallback(
@@ -771,10 +734,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     onExit();
   }, [accepted, onCommit, onExit, startIndex]);
 
-  const editorEntry =
-    editorEntryId !== null ? (queue.find((e) => e.id === editorEntryId) ?? null) : null;
-  const editorImage = editorEntry ? (imageElsRef.current.get(editorEntry.id) ?? null) : null;
-
   const cameraHelp =
     camState === 'insecure'
       ? 'Camera needs a secure connection (HTTPS or localhost). You can add image files instead — they never leave this device.'
@@ -784,13 +743,28 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? 'No camera is available on this device or browser. Add image files instead — they stay on this device.'
           : null;
 
-  return (
+  const finderStatus =
+    camState === 'requesting'
+      ? 'Starting camera…'
+      : paused
+        ? 'Paused (tab hidden) — preview resumes when you return.'
+        : 'Point at the page';
+
+  // NOTE(Agent F): the review phase below stays inline until
+  // `ScanicReview.tsx` lands (another agent's new file — never created here).
+  // When it exists, replace the `[data-scan-queue]` block with
+  // `<ScanicReview photoUrl imageWidth imageHeight corners warpedUrl
+  //   detecting note pageLabel progressLabel onLooksGood
+  //   onAdjustApply onUseOriginal onDiscard onRedetect redetecting />`
+  // keeping the E2E contract and exact button labels below.
+  const content = (
     <div
       data-scanner-root
-      className="overflow-hidden rounded-2xl border border-paper-300/70 bg-paper-50/85 shadow-soft dark:border-ink-700 dark:bg-ink-800/60"
+      data-detector={DEFAULT_DETECTOR}
+      className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 dark:bg-ink-900 dark:text-paper-100"
     >
       {/* header */}
-      <div className="flex items-center gap-2 border-b border-paper-200/70 px-4 py-3 dark:border-ink-700/70">
+      <div className="flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-4 py-3 dark:border-ink-700/70 dark:bg-ink-900/95">
         <div className="min-w-0 flex-1">
           <p className="font-display text-base font-semibold tracking-tight text-ink-900 dark:text-paper-100">
             {phase === 'camera'
@@ -809,25 +783,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         </div>
         <button
           type="button"
-          data-ml-detector
-          aria-pressed={mlPreferred}
-          title={
-            mlPreferred
-              ? 'ML detector on (opt-in, self-hosted model)'
-              : 'Classical detector (default, fully on-device)'
-          }
-          onClick={() => setMlPreferred((v) => !v)}
-          className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors ${
-            mlPreferred
-              ? 'border-brass-400/60 bg-brass-400/[0.12] text-brass-600 dark:text-brass-300'
-              : 'border-paper-300 text-ink-500 hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700'
-          }`}
-        >
-          <span aria-hidden>{mlPreferred ? '◆' : '◇'}</span>
-          ML detector
-        </button>
-        <button
-          type="button"
           aria-label="Close scanner"
           onClick={onExit}
           className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
@@ -839,7 +794,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       {/* session strip — always rendered */}
       <div
         data-scan-strip
-        className="flex items-center gap-2 overflow-x-auto border-b border-paper-200/70 px-4 py-2.5 dark:border-ink-700/70"
+        className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
       >
         {queue.length === 0 ? (
           <p className="text-xs text-ink-400 dark:text-ink-300">
@@ -881,33 +836,38 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       </div>
 
       {phase === 'camera' && (
-        <div className="space-y-3 p-4">
+        <div className="flex min-h-0 flex-1 flex-col">
           {camState === 'live' || camState === 'requesting' ? (
-            <div className="relative overflow-hidden rounded-xl bg-ink-950">
+            <div className="relative min-h-0 flex-1 overflow-hidden bg-ink-950">
               <video
                 ref={videoRef}
                 muted
                 playsInline
                 autoPlay
                 aria-label="Camera preview"
-                className="mx-auto max-h-[70dvh] w-full object-contain"
+                style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
+                className="absolute inset-0 h-full w-full object-cover"
               />
-              {camState === 'requesting' && (
-                <p
-                  role="status"
-                  className="absolute inset-0 flex items-center justify-center text-sm text-paper-100"
-                >
-                  Starting camera…
-                </p>
-              )}
-              {paused && (
-                <p
-                  role="status"
-                  className="absolute inset-x-0 top-2 text-center text-xs text-paper-100/80"
-                >
-                  Paused (tab hidden) — preview resumes when you return.
-                </p>
-              )}
+              {/* Finder guidance frame: rounded-rect overlay with corner ticks. */}
+              <div
+                data-finder-frame
+                aria-hidden
+                className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 sm:p-10"
+              >
+                <div className="relative h-full max-h-[70dvh] w-full max-w-md rounded-2xl">
+                  <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
+                  <span className="absolute right-0 top-0 h-9 w-9 rounded-tr-2xl border-r-4 border-t-4 border-paper-50/90" />
+                  <span className="absolute bottom-0 left-0 h-9 w-9 rounded-bl-2xl border-b-4 border-l-4 border-paper-50/90" />
+                  <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
+                </div>
+              </div>
+              <p
+                data-finder-status
+                role="status"
+                className="absolute inset-x-0 bottom-3 px-4 text-center text-sm font-medium text-paper-50 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
+              >
+                {finderStatus}
+              </p>
               <div className="absolute right-2 top-2 flex gap-2">
                 <button
                   type="button"
@@ -916,6 +876,21 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
                 >
                   ⇄
+                </button>
+                <button
+                  type="button"
+                  data-mirror-toggle
+                  aria-pressed={mirrored}
+                  aria-label="Mirror front-camera preview"
+                  title={
+                    mirrored
+                      ? 'Front preview mirrored (captures stay unmirrored)'
+                      : 'Front preview unmirrored'
+                  }
+                  onClick={() => setMirrored((v) => !v)}
+                  className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                >
+                  {mirrored ? '◐' : '◑'}
                 </button>
                 {torchSupported && (
                   <button
@@ -931,8 +906,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               </div>
             </div>
           ) : (
-            <div className="rounded-xl border border-dashed border-paper-300 px-4 py-6 text-center dark:border-ink-700">
-              <p className="text-sm text-ink-500 dark:text-ink-300">{cameraHelp}</p>
+            <div className="mx-4 mt-4 rounded-xl border border-dashed border-paper-300 px-4 py-6 text-center dark:border-ink-700">
+              <p
+                data-finder-status
+                role="status"
+                className="text-sm text-ink-500 dark:text-ink-300"
+              >
+                {cameraHelp}
+              </p>
               {camState === 'denied' && (
                 <button
                   type="button"
@@ -945,144 +926,94 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </div>
           )}
 
-          {camState === 'live' && (
-            <div className="flex items-center justify-center">
-              <button
-                type="button"
-                data-scan-capture
-                aria-label="Capture page"
-                onClick={() => void captureFrame()}
-                className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
-              >
-                <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
-              </button>
-            </div>
-          )}
-          {captureError !== null && (
-            <p role="alert" className="text-center text-xs text-red-600 dark:text-red-400">
-              {captureError}
-            </p>
-          )}
-
-          <div className="flex flex-col items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,.jpg,.jpeg,.png"
-              multiple
-              className="hidden"
-              aria-label="Add image files instead"
-              onChange={(e) => {
-                addFilesInstead(Array.from(e.target.files ?? []));
-                e.target.value = '';
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              Add image files instead
-            </button>
-            {mlPreferred && (
-              <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
-                ML detector on: the model loads on first use from this device (self-hosted, no CDN).
+          <div className="shrink-0 space-y-2 overflow-y-auto bg-paper-50 px-4 py-3 dark:bg-ink-900">
+            {camState === 'live' && (
+              <div className="flex items-center justify-center">
+                <button
+                  type="button"
+                  data-scan-capture
+                  aria-label="Capture page"
+                  onClick={() => void captureFrame()}
+                  className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
+                >
+                  <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
+                </button>
+              </div>
+            )}
+            {captureError !== null && (
+              <p role="alert" className="text-center text-xs text-red-600 dark:text-red-400">
+                {captureError}
               </p>
             )}
-            {queue.length > 0 && (
+
+            <div className="flex flex-col items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                multiple
+                className="hidden"
+                aria-label="Add image files instead"
+                onChange={(e) => {
+                  addFilesInstead(Array.from(e.target.files ?? []));
+                  e.target.value = '';
+                }}
+              />
               <button
                 type="button"
-                data-review-cta
-                onClick={() => goToReview()}
-                className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
               >
-                {pendingCount > 0 ? `Review ${pendingCount} pages` : `View ${queue.length} pages`}
+                Add image files instead
               </button>
-            )}
+              <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
+                On-device ML auto-crop — images never leave this device.
+              </p>
+              {queue.length > 0 && (
+                <button
+                  type="button"
+                  data-review-cta
+                  onClick={() => goToReview()}
+                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+                >
+                  {pendingCount > 0 ? `Review ${pendingCount} pages` : `View ${queue.length} pages`}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
 
       {phase === 'review' && current !== null && (
-        <div data-scan-queue className="space-y-3 p-4">
-          <div className="flex items-center gap-2">
-            <p className="flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
-              Page {safeIndex + 1} of {queue.length}
-            </p>
-            <p
-              data-review-progress
-              aria-label={`${reviewedCount} of ${queue.length} reviewed`}
-              className="text-xs tabular-nums text-ink-400 dark:text-ink-300"
-            >
-              {reviewedCount} of {queue.length} reviewed
-            </p>
-          </div>
-
-          <div data-crop-result className="relative overflow-hidden rounded-xl bg-ink-950">
-            {current.status === 'detecting' ? (
-              <p
-                role="status"
-                className="flex min-h-56 items-center justify-center text-sm text-paper-100"
-              >
-                Preparing…
-              </p>
-            ) : (
-              <img
-                data-crop-result-img
-                src={current.warpedUrl ?? current.photoUrl}
-                alt={`Scan page ${safeIndex + 1}`}
-                className="mx-auto max-h-[60dvh] w-full object-contain"
-              />
-            )}
-          </div>
-          {current.note !== null && current.status === 'ready' && (
-            <p className="text-xs text-ink-400 dark:text-ink-300">{current.note}</p>
-          )}
+        <div data-scan-queue className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {cardError !== null && (
             <p role="alert" className="text-xs text-red-600 dark:text-red-400">
               {cardError}
             </p>
           )}
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={current.status !== 'ready' || warping}
-              onClick={() => void acceptWarped(current)}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-wait disabled:opacity-50 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-            >
-              {warping ? 'Preparing…' : 'Looks good'}
-            </button>
-            <button
-              type="button"
-              disabled={current.status !== 'ready' || warping}
-              onClick={() => setEditorEntryId(current.id)}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              Adjust corners
-            </button>
-            <button
-              type="button"
-              disabled={current.status !== 'ready' || warping}
-              onClick={() => markDecision(current.id, 'original')}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              Use original
-            </button>
-            <button
-              type="button"
-              disabled={warping}
-              onClick={() => discardEntry(current.id)}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-red-600/30 px-5 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:hover:bg-red-950/30"
-            >
-              Discard
-            </button>
-          </div>
+          <ScanicReview
+            key={current.id}
+            photoUrl={current.photoUrl}
+            imageWidth={current.imageWidth}
+            imageHeight={current.imageHeight}
+            corners={current.corners}
+            warpedUrl={current.warpedUrl}
+            detecting={current.status === 'detecting'}
+            note={current.note}
+            pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
+            progressLabel={`${reviewedCount} of ${queue.length} reviewed`}
+            onLooksGood={() => void acceptWarped(current)}
+            onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
+            onUseOriginal={() => markDecision(current.id, 'original')}
+            onDiscard={() => discardEntry(current.id)}
+            onRedetect={() => void redetectEntry(current)}
+            redetecting={redetecting}
+          />
         </div>
       )}
 
       {phase === 'done' && (
-        <div className="space-y-3 p-4 text-center">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-center">
           <p className="font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
             {accepted.length > 0 ? 'All pages ready' : 'No pages kept'}
           </p>
@@ -1112,37 +1043,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           </div>
         </div>
       )}
-
-      {/* Portaled editor surface — a sibling here, mounted on document.body, never in AnimatePresence. */}
-      {editorEntry !== null &&
-        editorImage !== null &&
-        typeof document !== 'undefined' &&
-        createPortal(
-          <div className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-ink-950/70 p-4 backdrop-blur-sm">
-            <CornerEditorSurface
-              key={editorEntry.id}
-              image={editorImage}
-              imageWidth={editorEntry.imageWidth}
-              imageHeight={editorEntry.imageHeight}
-              initialCorners={
-                editorEntry.corners ??
-                fullFrameCorners(
-                  Math.max(1, editorEntry.imageWidth),
-                  Math.max(1, editorEntry.imageHeight),
-                )
-              }
-              autoAvailable={editorEntry.corners !== null}
-              onApply={(corners) => {
-                setEntries((prev) =>
-                  prev.map((e) => (e.id === editorEntry.id ? { ...e, corners } : e)),
-                );
-                setEditorEntryId(null);
-              }}
-              onClose={() => setEditorEntryId(null)}
-            />
-          </div>,
-          document.body,
-        )}
     </div>
   );
+
+  // Single body portal carries the full-screen root (mounted on
+  // document.body, never in AnimatePresence). Corner adjust lives inside
+  // the review component, not in a separate overlay.
+  if (typeof document !== 'undefined' && document.body) {
+    return createPortal(content, document.body);
+  }
+  return content;
 }

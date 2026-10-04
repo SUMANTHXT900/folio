@@ -56,19 +56,27 @@ export interface ScanicEntry {
   warpedUrl: string | null;
   /** `ready` means settled (processed, no-document, or failed — see `error`). */
   phase: ScanicEntryPhase;
+  /**
+   * Detector behind the settled result: the backend that produced `corners`,
+   * or — when none were found — the backend that made the final attempt.
+   * Null while queued/processing or when processing failed before detection.
+   */
+  detector: ScanicDetectorKind | null;
   /** Failure message when processing failed; null otherwise. */
   error: string | null;
 }
 
 /**
  * Test/platform seams. Every field defaults to the real implementation;
- * production callers pass nothing. `detector` is read at PROCESS time, so an
- * ML opt-in toggle takes effect for captures still queued or processing.
+ * production callers pass nothing. `detector` is read at PROCESS time, so a
+ * detector override takes effect for captures still queued or processing;
+ * when omitted, the client resolves the ML-first policy (classical only after
+ * a warm preload here proved ML unavailable).
  */
 export interface ScanicProcessorOptions {
   /** Defaults to a fresh `ScanicClient` owned by this hook instance. */
   client?: ScanicClient;
-  /** Detection backend for background processing. Default `'classical'`. */
+  /** Explicit detection backend override; omitted = ML-first policy. */
   detector?: ScanicDetectorKind;
   /** Decodes an ORIGINAL File into a full-resolution ImageData copy. */
   decode?: (file: File) => Promise<ImageData>;
@@ -157,10 +165,11 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
     encodePng: options.encodePng ?? encodeImageDataToPng,
   }));
 
-  // Latest detector choice (ML opt-in) without re-creating the drainer.
-  const detectorRef = useRef<ScanicDetectorKind>(options.detector ?? 'classical');
+  // Latest detector override (undefined = ML-first policy) without
+  // re-creating the drainer; read at process time for every capture.
+  const detectorRef = useRef<ScanicDetectorKind | undefined>(options.detector);
   useEffect(() => {
-    detectorRef.current = options.detector ?? 'classical';
+    detectorRef.current = options.detector;
   });
 
   // Synchronous source of truth; `entries` is its published snapshot.
@@ -206,7 +215,12 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
         const detection = await seams.client.detect(detectionImage, detectorRef.current);
         if (stale()) return 'requeued';
         if (!detection.success || detection.corners === null) {
-          patch(id, { phase: 'ready', corners: null, warpedUrl: null });
+          patch(id, {
+            phase: 'ready',
+            corners: null,
+            warpedUrl: null,
+            detector: detection.detector,
+          });
           return 'done';
         }
         const corners = detection.corners;
@@ -218,7 +232,12 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
         if (stale()) return 'requeued';
         const png = await seams.encodePng(warped);
         if (stale()) return 'requeued';
-        patch(id, { phase: 'ready', corners, warpedUrl: URL.createObjectURL(png) });
+        patch(id, {
+          phase: 'ready',
+          corners,
+          warpedUrl: URL.createObjectURL(png),
+          detector: detection.detector,
+        });
         return 'done';
       } catch (error) {
         if (stale()) return 'requeued';
@@ -295,6 +314,7 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
         corners: null,
         warpedUrl: null,
         phase: 'queued',
+        detector: null,
         error: null,
       };
       recordsRef.current = [...recordsRef.current, entry];

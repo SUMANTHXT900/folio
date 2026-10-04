@@ -1,8 +1,48 @@
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { version } from './package.json';
+
+/**
+ * Dev-only: serve scanic's vendored ORT loader as a plain static file.
+ * The ML runtime loads `ort-wasm-simd-threaded.mjs` through a runtime
+ * dynamic `import()` built from `wasmPaths` — Vite's dev middleware refuses
+ * to transform-import anything under `public/` (500 + fullscreen error
+ * overlay, which also eats trusted-mouse hit-testing for E2E drags), while
+ * production serves the same file statically with no issue. This middleware
+ * runs before the transform stack (`serve` only — never in `build`) and
+ * answers that one URL with the file bytes + JS MIME, so dev exercises the
+ * real ML path exactly like production. The `.ort`/`.wasm` siblings are
+ * plain runtime `fetch()`es and already serve fine from `public/`.
+ */
+function scanicMlDevLoader(): Plugin {
+  return {
+    name: 'folio-scanic-ml-dev-loader',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        try {
+          const path = (req.url ?? '').split('?')[0];
+          if (path !== '/assets/scanic-ml/ort-wasm-simd-threaded.mjs') {
+            next();
+            return;
+          }
+          const { readFile } = await import('node:fs/promises');
+          const { join } = await import('node:path');
+          const bytes = await readFile(
+            join(server.config.publicDir, 'assets', 'scanic-ml', 'ort-wasm-simd-threaded.mjs'),
+          );
+          res.setHeader('Content-Type', 'text/javascript');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(bytes);
+        } catch {
+          next();
+        }
+      });
+    },
+  };
+}
 
 // Studio dev server. No backend, no proxy: the engine boundary is a
 // Web-Worker adapter (see src/engine/EngineAdapter.ts) with a mock for
@@ -13,6 +53,7 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    scanicMlDevLoader(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],

@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import './scanicTestImageData';
 import { useScanicProcessor, type ScanicProcessorOptions } from './useScanicProcessor';
 import type { ScanicClient } from './scanicClient';
-import type { ScanicCorners } from './scanicProtocol';
+import type { ScanicCorners, ScanicDetectorKind } from './scanicProtocol';
 
 const CORNERS: ScanicCorners = {
   topLeft: { x: 0, y: 0 },
@@ -22,6 +22,8 @@ const CORNERS: ScanicCorners = {
 interface FakeClientHarness {
   client: ScanicClient;
   kinds: string[];
+  /** Detector argument per detect call; undefined = client policy default. */
+  detectors: Array<ScanicDetectorKind | undefined>;
   maxConcurrent: () => number;
 }
 
@@ -31,26 +33,33 @@ function makeFakeClient(
       success: boolean;
       corners: ScanicCorners | null;
       confidence: number | null;
+      detector: ScanicDetectorKind;
     }>;
   } = {},
 ): FakeClientHarness {
   const kinds: string[] = [];
+  const detectors: Array<ScanicDetectorKind | undefined> = [];
   let concurrent = 0;
   let maxConcurrent = 0;
   const client = {
-    async detect(): Promise<{
+    async detect(
+      _image: ImageData,
+      detector?: ScanicDetectorKind,
+    ): Promise<{
       success: boolean;
       corners: ScanicCorners | null;
       confidence: number | null;
+      detector: ScanicDetectorKind;
     }> {
       kinds.push('detect');
+      detectors.push(detector);
       concurrent += 1;
       maxConcurrent = Math.max(maxConcurrent, concurrent);
       try {
         await new Promise((resolve) => setTimeout(resolve, 0));
         return overrides.detect
           ? await overrides.detect()
-          : { success: true, corners: CORNERS, confidence: 0.8 };
+          : { success: true, corners: CORNERS, confidence: 0.8, detector: detector ?? 'ml' };
       } finally {
         concurrent -= 1;
       }
@@ -60,7 +69,7 @@ function makeFakeClient(
       return new ImageData(2, 2);
     },
   } as unknown as ScanicClient;
-  return { client, kinds, maxConcurrent: () => maxConcurrent };
+  return { client, kinds, detectors, maxConcurrent: () => maxConcurrent };
 }
 
 function makeOptions(client: ScanicClient, overrides: Partial<ScanicProcessorOptions> = {}) {
@@ -83,7 +92,7 @@ beforeEach(() => {
 
 describe('useScanicProcessor draining', () => {
   it('drains captures sequentially in capture order under StrictMode', async () => {
-    const { client, kinds, maxConcurrent } = makeFakeClient();
+    const { client, kinds, detectors, maxConcurrent } = makeFakeClient();
     const { result, unmount } = renderHook(() => useScanicProcessor(makeOptions(client)), {
       wrapper: strictWrapper,
     });
@@ -98,8 +107,10 @@ describe('useScanicProcessor draining', () => {
     });
 
     // Exactly one detect+extract per capture (StrictMode must not double-run
-    // the drain) and strict capture order with concurrency 1.
+    // the drain) and strict capture order with concurrency 1. No detector is
+    // passed: the client resolves the ML-first policy itself.
     expect(kinds).toEqual(['detect', 'extract', 'detect', 'extract']);
+    expect(detectors).toEqual([undefined, undefined]);
     expect(maxConcurrent()).toBe(1);
     expect(result.current.readyCount).toBe(2);
     expect(result.current.entries.map((entry) => entry.id)).toEqual(['scan-1', 'scan-2']);
@@ -109,15 +120,40 @@ describe('useScanicProcessor draining', () => {
       expect(entry.imageHeight).toBe(2);
       expect(entry.corners).toEqual(CORNERS);
       expect(entry.warpedUrl).toMatch(/^blob:scan-/);
+      expect(entry.detector).toBe('ml');
       expect(entry.error).toBeNull();
       expect(entry.photoUrl).toMatch(/^blob:scan-/);
     }
     unmount();
   });
 
+  it('passes an explicit detector override through to the client', async () => {
+    const { client, kinds, detectors } = makeFakeClient();
+    const { result, unmount } = renderHook(() =>
+      useScanicProcessor(makeOptions(client, { detector: 'classical' })),
+    );
+
+    act(() => {
+      result.current.enqueueCapture(new File(['a'], 'a.jpg', { type: 'image/jpeg' }));
+    });
+    await act(async () => {
+      await result.current.buildNow();
+    });
+
+    expect(kinds).toEqual(['detect', 'extract']);
+    expect(detectors).toEqual(['classical']);
+    expect(result.current.entries[0].detector).toBe('classical');
+    unmount();
+  });
+
   it('settles a capture with no detected document as ready with null corners', async () => {
     const { client, kinds } = makeFakeClient({
-      detect: async () => ({ success: false, corners: null, confidence: null }),
+      detect: async () => ({
+        success: false,
+        corners: null,
+        confidence: null,
+        detector: 'classical',
+      }),
     });
     const { result, unmount } = renderHook(() => useScanicProcessor(makeOptions(client)));
 
@@ -133,6 +169,7 @@ describe('useScanicProcessor draining', () => {
     expect(result.current.entries[0].phase).toBe('ready');
     expect(result.current.entries[0].corners).toBeNull();
     expect(result.current.entries[0].warpedUrl).toBeNull();
+    expect(result.current.entries[0].detector).toBe('classical');
     expect(result.current.entries[0].error).toBeNull();
     unmount();
   });
@@ -165,8 +202,10 @@ describe('useScanicProcessor draining', () => {
     expect(result.current.entries[0].phase).toBe('ready');
     expect(result.current.entries[0].error).toBe('decode exploded');
     expect(result.current.entries[0].warpedUrl).toBeNull();
+    expect(result.current.entries[0].detector).toBeNull();
     expect(result.current.entries[1].error).toBeNull();
     expect(result.current.entries[1].warpedUrl).not.toBeNull();
+    expect(result.current.entries[1].detector).toBe('ml');
     expect(kinds).toEqual(['detect', 'extract']);
     unmount();
   });
@@ -177,15 +216,19 @@ describe('useScanicProcessor draining', () => {
           success: boolean;
           corners: ScanicCorners | null;
           confidence: number | null;
+          detector: ScanicDetectorKind;
         }) => void)
       | null = null;
     const client = {
       detect: () =>
-        new Promise<{ success: boolean; corners: ScanicCorners | null; confidence: number | null }>(
-          (resolve) => {
-            resolveDetect = resolve;
-          },
-        ),
+        new Promise<{
+          success: boolean;
+          corners: ScanicCorners | null;
+          confidence: number | null;
+          detector: ScanicDetectorKind;
+        }>((resolve) => {
+          resolveDetect = resolve;
+        }),
       extract: async () => new ImageData(2, 2),
     } as unknown as ScanicClient;
     const { result, unmount } = renderHook(() => useScanicProcessor(makeOptions(client)));
@@ -201,7 +244,7 @@ describe('useScanicProcessor draining', () => {
     expect(URL.revokeObjectURL).not.toHaveBeenCalled();
 
     await act(async () => {
-      resolveDetect?.({ success: false, corners: null, confidence: null });
+      resolveDetect?.({ success: false, corners: null, confidence: null, detector: 'ml' });
       await Promise.resolve();
     });
     // A post-unmount result is dropped silently; nothing is revoked either.

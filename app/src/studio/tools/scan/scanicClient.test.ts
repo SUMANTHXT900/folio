@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import './scanicTestImageData';
+import { DEFAULT_DETECTOR } from './detectorPolicy';
 import { ScanicClient } from './scanicClient';
 import { SCANIC_WORKER_PROTOCOL_VERSION, type ScanicCorners } from './scanicProtocol';
 
@@ -56,7 +57,7 @@ function detectReply(id: unknown, overrides: Record<string, unknown> = {}): obje
     protocol: SCANIC_WORKER_PROTOCOL_VERSION,
     kind: 'detect-result',
     id,
-    result: { success: true, corners: CORNERS, confidence: 0.9, ...overrides },
+    result: { success: true, corners: CORNERS, confidence: 0.9, detector: 'ml', ...overrides },
   };
 }
 
@@ -71,7 +72,8 @@ describe('ScanicClient.detect', () => {
     const [post] = workers[0].posts;
     expect(post.message.kind).toBe('detect');
     expect(post.message.protocol).toBe(SCANIC_WORKER_PROTOCOL_VERSION);
-    expect(post.message.detector).toBe('classical');
+    // ML-first default (D35): no detector argument means the policy default.
+    expect(post.message.detector).toBe(DEFAULT_DETECTOR);
     expect(post.message.width).toBe(2);
     expect(post.message.height).toBe(2);
     // The exact pixel buffer crosses as a transferred buffer (neuter-on-send).
@@ -79,7 +81,12 @@ describe('ScanicClient.detect', () => {
     expect(post.message.buffer).toBe(image.data.buffer);
 
     workers[0].deliver(detectReply(post.message.id));
-    await expect(promise).resolves.toEqual({ success: true, corners: CORNERS, confidence: 0.9 });
+    await expect(promise).resolves.toEqual({
+      success: true,
+      corners: CORNERS,
+      confidence: 0.9,
+      detector: 'ml',
+    });
 
     // Init-once: the next request reuses the same worker.
     const again = client.detect(new ImageData(1, 1), 'ml');
@@ -89,7 +96,12 @@ describe('ScanicClient.detect', () => {
     workers[0].deliver(
       detectReply(second?.message.id, { success: false, corners: null, confidence: null }),
     );
-    await expect(again).resolves.toEqual({ success: false, corners: null, confidence: null });
+    await expect(again).resolves.toEqual({
+      success: false,
+      corners: null,
+      confidence: null,
+      detector: 'ml',
+    });
   });
 
   it('copies a view over a larger buffer down to its exact range before transfer', async () => {
@@ -130,6 +142,36 @@ describe('ScanicClient.detect', () => {
       message: 'scanic worker received invalid image dimensions (0x0)',
     });
     await expect(promise).rejects.toThrow(/invalid image dimensions/);
+  });
+});
+
+describe('ScanicClient.redetect', () => {
+  it('forces the ML attempt even when the default path resolved classical, and transfers the buffer', async () => {
+    const workers: FakeWorker[] = [];
+    const client = new ScanicClient({
+      createWorker: () => {
+        const worker = new FakeWorker();
+        workers.push(worker);
+        return worker as unknown as Worker;
+      },
+      // A cached warm-failure policy would resolve detect() to classical;
+      // redetect() must bypass it and force ML.
+      defaultDetector: () => 'classical',
+    });
+
+    const firstImage = new ImageData(2, 2);
+    const first = client.detect(firstImage);
+    expect(workers[0].posts[0].message.detector).toBe('classical');
+    expect(workers[0].posts[0].transfer).toEqual([firstImage.data.buffer]);
+    workers[0].deliver(detectReply(workers[0].posts[0].message.id, { detector: 'classical' }));
+    await expect(first).resolves.toMatchObject({ detector: 'classical' });
+
+    const secondImage = new ImageData(2, 2);
+    const second = client.redetect(secondImage);
+    expect(workers[0].posts[1].message.detector).toBe(DEFAULT_DETECTOR);
+    expect(workers[0].posts[1].transfer).toEqual([secondImage.data.buffer]);
+    workers[0].deliver(detectReply(workers[0].posts[1].message.id));
+    await expect(second).resolves.toMatchObject({ success: true, detector: 'ml' });
   });
 });
 

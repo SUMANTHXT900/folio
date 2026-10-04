@@ -1,9 +1,11 @@
 /**
- * scanic scanner core (D34): worker client, capture queue hook, and the
- * shared corner/protocol types. The corner-editor UI consumes this barrel.
+ * scanic scanner core (D34/D35): ML-first worker client with `redetect`, the
+ * capture queue hook, the detector policy (ML default, classical silent
+ * fallback, warm preload at scanner open), and the shared corner/protocol
+ * types. The corner-editor UI consumes this barrel.
  */
 
-export { ScanicClient, ScanicClientError } from './scanicClient';
+export { ScanicClient, ScanicClientError, redetect } from './scanicClient';
 export type { ScanicClientErrorCode, ScanicClientOptions } from './scanicClient';
 export { useScanicProcessor } from './useScanicProcessor';
 export type {
@@ -12,6 +14,16 @@ export type {
   ScanicProcessor,
   ScanicProcessorOptions,
 } from './useScanicProcessor';
+export {
+  DEFAULT_DETECTOR,
+  ML_ASSET_BASE_URL,
+  ML_DETECTOR_OPTIONS,
+  defaultDetector,
+  detectorForAttempt,
+  mlDetectorWarmState,
+  warmMlDetector,
+} from './detectorPolicy';
+export type { MlWarmState } from './detectorPolicy';
 export {
   SCANIC_CORNER_KEYS,
   SCANIC_WORKER_PROTOCOL_VERSION,
