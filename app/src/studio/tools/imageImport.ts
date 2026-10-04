@@ -1,5 +1,5 @@
 /**
- * Scan-image import normalization (M3.x): bounded, pixel-budget based.
+ * Image import normalization (M3.x): bounded, pixel-budget based.
  *
  * The file-import path must never materialize many full-resolution
  * decodes at once: a ~2 MB phone JPEG can decode to ~36 MB of raw
@@ -11,8 +11,9 @@
  *
  * JPEGs already inside the pixel budget keep their ORIGINAL bytes —
  * no unnecessary recompression, no quality loss. Oversized images are
- * re-encoded once at the shared generation-1 quality (q0.95; the scan
- * re-encode is q95 too — see `scan/src/warp.rs` `SCAN_JPEG_QUALITY`). PNGs are
+ * re-encoded once at [`IMPORT_JPEG_QUALITY`] (q0.95). The scan chain's
+ * second-generation re-encode policy (`scan/src/warp.rs`
+ * `SCAN_JPEG_QUALITY`) was removed with the D33 scanner strip. PNGs are
  * ALWAYS converted to JPEG (white-filled, budget-clamped): the engine
  * embeds PNGs as uncompressed raw RGB, so a retained 2 MB screenshot
  * would become ~15 MB in the PDF (real-phone report: 100 MB+ outputs
@@ -29,10 +30,11 @@
 /** Working long edge for imported images (engineering constant). */
 export const MAX_IMPORT_LONG_EDGE = 2500;
 
-/** Generation-1 JPEG quality (import normalization + scan captures).
- *  0.95 keeps text legible through the scan chain's second generation
- *  (`scan/src/warp.rs` re-encodes at q95); +~16% bytes on re-encoded
- *  files only, which D17 DCT-passthrough turns into PDF size ≈ JPEG size. */
+/** JPEG quality for import normalization (generation 1). The scan
+ *  chain's q95 second generation was removed with the D33 scanner strip;
+ *  0.95 remains the re-encode quality for oversized images. +~16% bytes
+ *  on re-encoded files only, which D17 DCT-passthrough turns into
+ *  PDF size ≈ JPEG size. */
 export const IMPORT_JPEG_QUALITY = 0.95;
 
 export interface ImageDimensions {
@@ -155,8 +157,7 @@ const pendingEncodes = new Map<number, PendingEncode>();
 /**
  * Silently-dropped worker messages (malformed framing, unroutable jobs,
  * version mismatches without a job to fail). Diagnostic only — no UI
- * reads this; unit tests assert it so nothing vanishes uncounted
- * (mirrors `ScanWorkerClient.droppedMessages`).
+ * reads this; unit tests assert it so nothing vanishes uncounted.
  */
 let encodeDroppedMessages = 0;
 
@@ -170,7 +171,7 @@ const ENCODE_WORKER_TIMEOUT_MS = 30_000;
 /** Maximum time to wait for the worker's boot handshake. */
 const ENCODE_WORKER_READY_TIMEOUT_MS = 3000;
 
-/** Test-only factory override (FakeWorker pattern, cf. ScanWorkerClient). */
+/** Test-only factory override (FakeWorker pattern). */
 export function __setEncodeWorkerFactoryForTests(factory: EncodeWorkerFactory | null): void {
   encodeWorkerFactory = factory ?? defaultEncodeWorkerFactory;
   encodeWorkerFactoryOverride = factory !== null;

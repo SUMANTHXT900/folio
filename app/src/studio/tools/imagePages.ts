@@ -8,6 +8,11 @@
  * therefore mutates this array only; image binaries are never copied.
  */
 
+/**
+ * Where a page came from — badge/diagnostics only, never a pipeline.
+ * `'camera'` is currently unused (capture removed in the D33 strip;
+ * the scanic integration wave will emit captures with it again).
+ */
 export type ImageSource = 'upload' | 'camera';
 
 /** Clockwise quarter-turns applied at build time (0 = direct passthrough). */

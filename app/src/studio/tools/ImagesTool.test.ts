@@ -23,7 +23,7 @@ describe('stageImagePages', () => {
   it('stages in collection order with per-page progress counts', async () => {
     const pages = [
       createPage({ id: 'a', source: 'upload', file: upload('a.jpg', [1]), name: 'a.jpg' }),
-      createPage({ id: 'b', source: 'camera', file: upload('b.jpg', [2, 2]), name: 'b.jpg' }),
+      createPage({ id: 'b', source: 'upload', file: upload('b.jpg', [2, 2]), name: 'b.jpg' }),
       createPage({ id: 'c', source: 'upload', file: upload('c.jpg', [3, 3, 3]), name: 'c.jpg' }),
     ];
     const progress: Array<[number, number]> = [];
@@ -78,7 +78,7 @@ describe('preStageShardEstimate', () => {
       createPage({ id: 'a', source: 'upload', file: upload('a.jpg', [1, 2]), name: 'a.jpg' }),
       createPage({
         id: 'b',
-        source: 'camera',
+        source: 'upload',
         file: upload('b.jpg', [3, 4, 5]),
         name: 'b.jpg',
       }),

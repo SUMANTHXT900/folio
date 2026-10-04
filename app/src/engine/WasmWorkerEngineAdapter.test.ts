@@ -485,7 +485,7 @@ describe('WasmWorkerEngineAdapter', () => {
     const { adapter, worker } = makeAdapter();
     const { jobId, done } = adapter.execute(inspectRequest());
     // No ready arrives: the worker reports init failure with no job
-    // context (empty clientJobId, mirroring scan.worker's fatal-null).
+    // context (empty clientJobId, the boot-time fatal-null shape).
     worker.deliver({
       protocol: 1,
       kind: 'fatal',

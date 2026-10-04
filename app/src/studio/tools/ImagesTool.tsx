@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ToolHeading,
@@ -21,10 +21,8 @@ import {
 import { buildImagesPdf, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
-import { CameraCapture } from './CameraCapture';
 import { browserImageRenderer, preparePageBytes, type ImageRenderer } from './imagePrepare';
 import type { ImagePage } from './imagePages';
-import { clearScans, releaseScan, retainOriginal } from './scan/scanStore';
 
 const ICON = (
   <svg
@@ -73,8 +71,8 @@ export async function stageImagePages(
 
 /**
  * Pre-stage sharding policy (M5): evaluates `resolveShardCount` on
- * pre-stage sums — Σ `file.size` bytes plus Σ known w×h pixels (retained
- * scan originals included) — BEFORE the prepare loop materializes staged
+ * pre-stage sums — Σ `file.size` bytes plus Σ known w×h pixels — BEFORE
+ * the prepare loop materializes staged
  * bytes. Image pages retain no decoded dims (handles only), so known
  * pixels are 0 here and the byte gate still bounds exactly as before;
  * the page-count gate runs first, so small batches keep the single-worker
@@ -95,19 +93,17 @@ export function preStageShardEstimate(pages: readonly { file: File | Blob; size:
 }
 
 /**
- * Images → PDF page assembly: uploads + camera captures join one ordered
- * page collection (preview, reorder, remove, rotate), then build through
- * the Folio engine (`pdf.images_to_pdf`, one page per image, in listed
- * order). Image bytes are staged in the service store only for the run
- * (never in React state); pages hold File/Blob handles + preview URLs.
+ * Images → PDF page assembly: uploads join one ordered page collection
+ * (preview, reorder, remove, rotate), then build through the Folio engine
+ * (`pdf.images_to_pdf`, one page per image, in listed order). Image bytes
+ * are staged in the service store only for the run (never in React state);
+ * pages hold File/Blob handles + preview URLs. Upload-only in the
+ * intermediate state after the D33 scanner strip; the scanic capture
+ * entry point is rebuilt in a later wave.
  */
 export default function ImagesTool() {
-  const { pages, addEntries, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
+  const { pages, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
-  const [cameraMode, setCameraMode] = useState(false);
-  // Session boundary: ids captured since the scanner was opened. Retake
-  // only ever touches these — never pre-session pages. Reset on Done.
-  const [sessionIds, setSessionIds] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
   const [meta, setMeta] = useState<string[]>([]);
@@ -117,17 +113,11 @@ export default function ImagesTool() {
   const [importing, setImporting] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
   const moreInputRef = useRef<HTMLInputElement>(null);
-  const [cameraSupported] = useState(
-    () =>
-      typeof navigator !== 'undefined' &&
-      !!navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === 'function',
-  );
 
   const addUploads = async (incoming: File[]) => {
-    // Same normalized path as scanner imports: pixel-budget resize +
-    // PNG→JPEG conversion, one file at a time. Raw gallery PNGs would
-    // otherwise embed as uncompressed RGB downstream (100 MB+ PDFs).
+    // Shared normalized import path: pixel-budget resize + PNG→JPEG
+    // conversion, one file at a time. Raw gallery PNGs would otherwise
+    // embed as uncompressed RGB downstream (100 MB+ PDFs).
     setImporting('Preparing images…');
     try {
       const summary = await importFiles(incoming, 'upload', {
@@ -152,81 +142,11 @@ export default function ImagesTool() {
     }
   };
 
-  /**
-   * Scanner import: memory-safe sequential normalization (one decode at
-   * a time, pixel-budget resize) with per-file progress and cancellation.
-   */
-  const onCameraImport = async (
-    files: File[],
-    progress: (completed: number, total: number, name: string) => void,
-    signal: AbortSignal,
-  ) => {
-    setError(null);
-    const summary = await importFiles(files, 'camera', {
-      signal,
-      onProgress: (completed, total, result) => {
-        progress(completed, total, result.name);
-      },
-    });
-    if (summary.failed > 0 && summary.firstError !== null) {
-      setError(new Error(`Couldn't import ${summary.failed} image(s): ${summary.firstError}`));
-    }
-    return summary;
-  };
-
-  const onCapture = (file: File) => {
-    const [id] = addEntries([{ file, name: file.name, source: 'camera' }]);
-    if (id !== undefined) setSessionIds((prev) => [...prev, id]);
-  };
-  void onCapture;
-
-  /**
-   * Accepted scan: the processed (or original) file becomes the page;
-   * the pre-scan capture is retained under the page id for Use-original
-   * provenance. Released on page remove / clear-all (never on scanner
-   * close — lifetime follows the page).
-   */
-  const onScanAccept = (entry: { file: File; original: File | null; name: string }) => {
-    const [id] = addEntries([{ file: entry.file, name: entry.name, source: 'camera' }]);
-    if (id === undefined) return;
-    if (entry.original !== null) retainOriginal(id, entry.original, entry.name);
-    setSessionIds((prev) => [...prev, id]);
-  };
-
-  const onRemovePage = useCallback(
-    (id: string) => {
-      releaseScan(id);
-      remove(id);
-    },
-    [remove],
-  );
-
-  const onClearAll = () => {
-    clearScans();
-    clear();
-  };
-
-  const onRetake = () => {
-    setSessionIds((prev) => {
-      const target = prev[prev.length - 1];
-      if (target !== undefined) {
-        releaseScan(target);
-        remove(target);
-      }
-      return prev.slice(0, -1);
-    });
-  };
-
-  // Session thumbnails for the scanner strip (URLs only, no byte copies).
-  // Filters the live collection so removals are reflected immediately.
-  const sessionPages = pages.filter((p) => sessionIds.includes(p.id));
-
   // A completed PDF is stale the moment the collection or page-size
-  // policy changes (import/capture/remove/reorder/rotate/clear). Clearing
-  // the completion card brings Build PDF back AND releases the previous
-  // output Blob (P2) — post-build imports are a first-class flow now that
-  // the scanner can import from inside the camera surface. (On mount the
-  // state is already empty; these setters are no-ops.)
+  // policy changes (import/remove/reorder/rotate/clear). Clearing the
+  // completion card brings Build PDF back AND releases the previous
+  // output Blob (P2). (On mount the state is already empty; these setters
+  // are no-ops.)
   useEffect(() => {
     setDone(null);
     setMeta([]);
@@ -330,83 +250,35 @@ export default function ImagesTool() {
       <ToolHeading
         icon={ICON}
         name="Images to PDF"
-        desc="Assemble pages from files or camera, arrange them in order, then build one PDF."
+        desc="Assemble pages from image files, arrange them in order, then build one PDF."
       />
 
-      {pages.length === 0 && !cameraMode ? (
+      {pages.length === 0 ? (
         <div className="space-y-4">
-          <EntryCard
-            onFiles={addUploads}
-            cameraSupported={cameraSupported}
-            onCamera={() => {
-              setSessionIds([]);
-              setCameraMode(true);
-            }}
-          />
+          <EntryCard onFiles={addUploads} />
           {error !== null && <ErrorBlock error={error} />}
         </div>
       ) : (
         <div className="space-y-5">
-          {cameraMode ? (
-            <CameraCapture
-              onScanAccept={onScanAccept}
-              onImportFiles={onCameraImport}
-              onRetake={onRetake}
-              onDone={() => {
-                setCameraMode(false);
-                setSessionIds([]);
-              }}
-              onBuildNow={() => {
-                setCameraMode(false);
-                setSessionIds([]);
-                void onBuild();
-              }}
-              sessionPages={sessionPages.map((p) => ({
-                id: p.id,
-                previewUrl: p.previewUrl,
-                name: p.name,
-              }))}
-            />
-          ) : (
-            cameraSupported && (
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setSessionIds([]);
-                  setCameraMode(true);
-                }}
-                className="w-full"
-              >
-                Scan with camera
-              </Button>
-            )
-          )}
-
           <Card>
             <div className="mb-3 flex items-center justify-between gap-2">
               <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink-700 dark:text-paper-100">
                 {pages.length} page{pages.length === 1 ? '' : 's'} · top-to-bottom is PDF order
               </p>
               <button
-                onClick={onClearAll}
+                onClick={clear}
                 className="shrink-0 whitespace-nowrap rounded-lg px-2 py-1 text-xs text-ink-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-ink-300 dark:hover:bg-red-950/30"
               >
                 Clear all
               </button>
             </div>
-            {pages.length > 0 ? (
-              <PageGrid
-                pages={pages}
-                onMove={move}
-                onReorder={reorder}
-                onRemove={onRemovePage}
-                onRotate={rotate}
-              />
-            ) : (
-              <p className="text-sm text-ink-400 dark:text-ink-300">
-                No pages yet — add images below or capture with the camera.
-              </p>
-            )}
+            <PageGrid
+              pages={pages}
+              onMove={move}
+              onReorder={reorder}
+              onRemove={remove}
+              onRotate={rotate}
+            />
             <div className="mt-4 flex flex-wrap gap-2">
               <input
                 ref={moreInputRef}
@@ -426,18 +298,7 @@ export default function ImagesTool() {
               )}
               <Button variant="ghost" onClick={() => moreInputRef.current?.click()}>
                 Add images
-              </Button>{' '}
-              {cameraSupported && !cameraMode && (
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setSessionIds([]);
-                    setCameraMode(true);
-                  }}
-                >
-                  Scan more
-                </Button>
-              )}
+              </Button>
             </div>
             <p className="mb-3 mt-4 text-sm font-medium text-ink-700 dark:text-paper-100">
               Page size policy
@@ -504,20 +365,12 @@ export default function ImagesTool() {
 const ease = [0.22, 1, 0.36, 1] as const;
 
 /**
- * Unified entry card: upload and camera are two animated tiles in ONE
- * surface instead of two disconnected cards. The whole card is a drop
- * target (drag-over spotlights the upload tile); tiles stagger in,
- * lift on hover, and compress on tap.
+ * Upload entry card: the whole card is a drop target (drag-over
+ * spotlights the upload tile); the tile staggers in, lifts on hover, and
+ * compresses on tap. It was one of two tiles before the D33 scanner
+ * strip removed the camera entry point.
  */
-function EntryCard({
-  onFiles,
-  cameraSupported,
-  onCamera,
-}: {
-  onFiles: (files: File[]) => void;
-  cameraSupported: boolean;
-  onCamera: () => void;
-}) {
+function EntryCard({ onFiles }: { onFiles: (files: File[]) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -587,48 +440,6 @@ function EntryCard({
           )}
         </AnimatePresence>
       </motion.button>
-
-      {cameraSupported && (
-        <motion.button
-          type="button"
-          onClick={onCamera}
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45, ease, delay: 0.16 }}
-          whileHover={{ y: -3 }}
-          whileTap={{ scale: 0.97 }}
-          className="group relative flex flex-1 flex-col items-center gap-2.5 overflow-hidden rounded-2xl border border-brass-500/25 bg-brass-400/[0.07] px-4 py-7 text-center transition-colors hover:border-brass-400/50 hover:bg-brass-400/[0.12] sm:py-9 dark:border-brass-400/20"
-        >
-          <motion.span
-            className="flex items-center justify-center rounded-2xl bg-brass-500 p-3 text-white shadow-sm ring-1 ring-brass-500/30 transition-colors group-hover:bg-brass-400 dark:bg-brass-400 dark:text-ink-900"
-            aria-hidden
-            whileHover={{ rotate: 6 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 15 }}
-          >
-            <svg
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-              <circle cx="12" cy="13" r="4" />
-            </svg>
-          </motion.span>
-          <span>
-            <span className="block font-display text-base font-semibold text-ink-900 dark:text-paper-100">
-              Scan with camera
-            </span>
-            <span className="mt-1 block text-xs text-ink-500 dark:text-ink-300">
-              Scan pages on device
-            </span>
-          </span>
-        </motion.button>
-      )}
     </>
   );
 

@@ -71,11 +71,6 @@ folio/
 │   ├── examples/      Rust CLI examples (opt-in corpus tools).
 │   ├── Cargo.toml     Engine manifest (package `folio-engine`).
 │   └── Cargo.lock     Engine dependency lock.
-├── scan/              Folio Rust document-scan core (v2.0 M1) — detection, warp, enhancement.
-│   ├── src/           Scan source (geometry, detect, warp, enhance, pipeline, error).
-│   ├── examples/      Scan benchmark + debug CLIs.
-│   ├── Cargo.toml     Scan manifest (package `folio-scan`).
-│   └── Cargo.lock     Scan dependency lock.
 ├── wasm/              Thin Rust → WASM bridge (wasm-pack). No PDF logic here.
 │   ├── src/           Glue crate (`folio-wasm`) over the engine.
 │   └── Cargo.toml     Bridge manifest; path-depends on `../engine`.
@@ -85,14 +80,16 @@ folio/
 │   ├── src/studio/    Application UI: shell, tools, hooks, Folio service boundary.
 │   ├── e2e/           Production E2E suite (real headless Chrome, real engine, no mocks).
 │   ├── package.json   App scripts (`dev`, `build`, `build:wasm`, `test`, E2E via node).
-│   └── vite.config.ts App build config (PWA precache incl. WASM, `fs.allow` for `../wasm/pkg`).
+│   └── vite.config.ts App build config (PWA precache incl. WASM, `fs.allow` for `./` + `../wasm`).
 ├── ARCHITECTURE.md    Long-form historical architecture log (lesson-by-lesson build record).
 └── README.md          Public project front page.
 ```
 
-Rust commands run in `engine/` (PDF engine) or `scan/` (document-scan core); frontend commands run in `app/`. There is no
-Cargo workspace: `engine/`, `scan/`, and `wasm/` keep their independent manifests and
-lockfiles (see `docs/DECISIONS.md` D12). The `test pdfs/` directory (gitignored,
+Rust commands run in `engine/` (PDF engine); frontend commands run in `app/`. There is no
+Cargo workspace: `engine/` and `wasm/` keep their independent manifests and
+lockfiles (see `docs/DECISIONS.md` D12). The `scan/` crate was deleted in the D33 scanner
+pivot (document scanning is being rebuilt on the external `scanic` library — see
+`docs/DECISIONS.md` D33). The `test pdfs/` directory (gitignored,
 local-only, optional benchmark corpus — never required for canonical testing,
 see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
 

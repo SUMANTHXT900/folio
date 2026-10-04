@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Private PDF tools that stay on your device.</strong><br />
-  Merge, split, rearrange, rotate, edit metadata, scan pages, and build PDFs from images — entirely in your browser.<br />
+  Merge, split, rearrange, rotate, edit metadata, and build PDFs from images — entirely in your browser.<br />
   Your files never leave your device.
 </p>
 
@@ -32,15 +32,17 @@ Most PDF tools upload your documents to a server to process them. **Folio doesn'
 
 ## Features
 
-| Tool | What it does |
-|------|--------------|
-| **Merge** | Combine multiple PDFs into one document, in any order, with real progress, cancellation, and page counts |
-| **Split** | Pick pages visually or carve a PDF by page ranges (one file per range), with structured validation errors |
-| **Rearrange** | Drag to reorder pages, preview at full resolution, then save |
-| **Rotate** | Rotate individual pages or the whole document by quarter turns |
-| **Metadata** | Read and edit titles, authors, dates, and other document properties (set / clear / leave unchanged) |
-| **Images → PDF** | Build one PDF from JPEG/PNG images — upload, or scan pages with the on-device camera (auto-crop + enhance) |
-| **Compress** | *Coming in a future update* — the action stays disabled rather than pretending to work |
+| Tool             | What it does                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------- |
+| **Merge**        | Combine multiple PDFs into one document, in any order, with real progress, cancellation, and page counts  |
+| **Split**        | Pick pages visually or carve a PDF by page ranges (one file per range), with structured validation errors |
+| **Rearrange**    | Drag to reorder pages, preview at full resolution, then save                                              |
+| **Rotate**       | Rotate individual pages or the whole document by quarter turns                                            |
+| **Metadata**     | Read and edit titles, authors, dates, and other document properties (set / clear / leave unchanged)       |
+| **Images → PDF** | Build one PDF from JPEG/PNG images — upload your photos (camera capture temporarily removed)              |
+| **Compress**     | _Coming in a future update_ — the action stays disabled rather than pretending to work                    |
+
+> **Document scanning is being rebuilt on [scanic](https://github.com/marquaye/scanic) (MIT).** Camera capture is temporarily removed, so Images → PDF is upload-only until the integration lands.
 
 Every completed file gets a smart name derived from your inputs (or your own custom name) before it downloads. Every tool reports real engine progress, honest cancellation, completion time, and output sizes.
 
@@ -68,7 +70,6 @@ PDF rendering             Studio → PdfRenderEngine → PDF.js → canvas
 folio/
 ├── app/          Production Studio (React + TS + Vite)
 ├── engine/       Folio Rust PDF engine (src, tests, examples, Cargo.toml)
-├── scan/         On-device document-scan core (detect, warp, enhance)
 ├── wasm/         Rust → WASM bridge (wasm-pack)
 ├── docs/         Persistent project memory
 ├── AGENTS.md
@@ -84,9 +85,8 @@ Requires Node.js 18+ and a Rust toolchain with the `wasm32-unknown-unknown` targ
 cd app
 npm install
 
-# build the WASM engine + scan packages (generates wasm/pkg/ and scan/pkg/, gitignored)
+# build the WASM engine package (generates wasm/pkg/, gitignored)
 npm run build:wasm
-npm run build:scan
 
 # run the dev server (production Studio)
 npm run dev
@@ -101,11 +101,10 @@ npm run preview
 ## Tests
 
 ```bash
-# Rust engine + scan core (382 + 39 tests)
+# Rust engine (see docs/STATUS.md for the current baseline)
 cd engine && cargo test && cargo fmt --check && cargo clippy --all-targets
-cd ../scan && cargo test && cargo fmt --check && cargo clippy --all-targets
 
-# Frontend (380 unit tests, typecheck, lint, format) — run inside app/
+# Frontend (unit tests, typecheck, lint, format) — run inside app/
 cd app
 npm test
 npm run typecheck
@@ -113,7 +112,7 @@ npm run lint
 npm run format:check
 ```
 
-Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/` — 57/57 passing from a fresh clone with no private corpus:
+Production E2E (real headless Chrome, real engine, no mocks) lives in `app/e2e/` — see `docs/STATUS.md` for the current baseline:
 
 ```bash
 cd app

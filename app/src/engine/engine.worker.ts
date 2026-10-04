@@ -124,10 +124,10 @@ self.onmessage = (ev: MessageEvent<WorkerExecuteRequest>): void => {
 
 // Eager init at boot so the adapter's readiness handshake is meaningful:
 // by the time {kind:'ready'} arrives, the WASM module is instantiated and
-// the engine handle exists. A failed init posts an explicit init-fatal
-// (mirrors scan.worker): at boot there is no job context, so the adapter
-// routes the empty clientJobId as a worker-level failure and every
-// in-flight job resolves fast instead of hanging on the ready timeout.
+// the engine handle exists. A failed init posts an explicit init-fatal:
+// at boot there is no job context, so the adapter routes the empty
+// clientJobId as a worker-level failure and every in-flight job resolves
+// fast instead of hanging on the ready timeout.
 (async (): Promise<void> => {
   try {
     await init();

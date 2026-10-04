@@ -48,7 +48,11 @@ export default defineConfig({
   server: {
     port: 5173,
     fs: {
-      allow: ['..'],
+      // Explicit allow list overrides Vite's default app-root allowance,
+      // so `.` (the app root) must stay listed alongside the engine bridge
+      // output. Narrowed from the repo root at the D33 scanner strip
+      // (the old list implicitly allowed the deleted `scan/pkg`).
+      allow: ['.', '../wasm'],
     },
   },
   test: {

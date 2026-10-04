@@ -50,11 +50,15 @@ PdfRenderEngine → PDF.js
 
 Everything PDF-related executes in one of three places: the main thread (UI + rendering orchestration), the engine Web Worker (manipulation), and PDF.js's own worker (rendering). The main thread never blocks on engine work: `adapter.execute()` returns a `jobId` plus a `done` promise, and progress streams via subscription.
 
-## Scan worker boundary (v2.0 M2)
+## Scan worker boundary (v2.0 M2) — SUPERSEDED by D33 (scanner deleted 2026-10-04)
+
+> **Historical only.** The D33 scanner pivot deleted this entire boundary — `scan/` crate, `scan.worker.ts`, `ScanWorkerClient`, and `scanProtocol.ts` no longer exist. Document scanning is being rebuilt on the external MIT-licensed `scanic` library (classical detection + warp on the main thread/worker adapter; self-hosted ML opt-in later). This section is kept as history until the integration wave rewrites it to the new boundary.
 
 Document-scan processing runs in a DEDICATED scan worker (`app/src/studio/tools/scan/scan.worker.ts`), separate from the PDF engine worker: different responsibility (image analysis vs PDF manipulation), different WASM module (`scan/pkg`, ~542 KB measured `folio_scan_bg.wasm` + glue), independent lifecycle. `ScanWorkerClient` is the main-thread gateway: lazy worker creation, init-once module reuse, transferable byte ownership (neuter-on-send), epoch-guarded stale-result discard, terminate-to-cancel with transparent recreate. The protocol (`scanProtocol.ts`, v2: `detectOnly` request flag + `detected` result status for the live path) distinguishes `processed | detected | original | error` — "no document detected" is fallback, not failure. Scan WASM loads on first scanner use, never at app boot; PWA precache budget unchanged (≈4.7 MB « 8 MB cap).
 
-## Scanner integration (v2.0 M3 + M3.x hardening)
+## Scanner integration (v2.0 M3 + M3.x hardening) — SUPERSEDED by D33 (scanner deleted 2026-10-04)
+
+> **Historical only.** `useScanProcessor`, `CameraCapture`, `scanStore`, and the capture/review flow described below were deleted in the D33 strip; the Images tool is upload-only until the scanic integration wave lands. Kept as history.
 
 `useScanProcessor` drives capture → worker → review inside `CameraCapture`. There is NO scan-mode selector (removed in M3.x): one color capture experience with the core pipeline mode fixed at the color path (`CORE_MODE = 'original'` in `useScanProcessor.ts`). Captures resolve two ways: processed scans land in an explicit review (Use scan / Use original / Retry / Discard); no-boundary fallbacks auto-accept (normalized through the import pixel budget, committed to the collection with a transient "Added as photo" note — per-capture interrogation was removed as nagging after real-device feedback). Throttled low-res live detection (~160px, 500 ms, skipped while busy) feeds only the "Document detected" framing hint — the shutter always re-detects at full resolution and live corners are never reused. Accepted scans enter `ImagePage[]` with the pre-scan capture retained in `scanStore` under the page id (released on remove/clear/replace, never on scanner close). The scanner surface renders via `createPortal(..., document.body)` (full-bleed on phones, centered panel on desktop) with body scroll lock while mounted. See `docs/DECISIONS.md` D15.
 

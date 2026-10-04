@@ -9,14 +9,14 @@ import { usePwaUpdate } from './usePwaUpdate';
  *
  * The whole banner links to the About updates card, where the waiting
  * version is reviewed and applied with one tap. The banner itself never
- * applies or reloads — so while a StudioJob or a live scan session is
+ * applies or reloads — so while a StudioJob or an image import is
  * active it defers (copy says to finish the current task first) instead
  * of pushing the user toward a reload mid-task.
  */
 export default function UpdateBanner() {
   const state = usePwaUpdate();
   const [dismissed, setDismissed] = useState(false);
-  const busy = useScannerBusy();
+  const busy = useBusyGuard();
   const applying = state.phase === 'applying';
   // Enter/exit is an opacity-only fade (180ms): the banner conditionally
   // mounts, so AnimatePresence plays both directions. Dismiss sets state
@@ -72,22 +72,23 @@ export default function UpdateBanner() {
 }
 
 /**
- * Live-scan busy guard. There is no global StudioJob registry (job handles
- * stay tool-local by design), so this observes the existing scan-surface
- * markers in the DOM: the scanner root (camera live / review open) and the
- * native-picker import progress. No new stores — presence is read from
- * state the scanner already publishes, via MutationObserver so the banner
- * copy defers the moment a session starts.
+ * Busy guard for deferred updates. There is no global StudioJob registry
+ * (job handles stay tool-local by design), so this observes the
+ * native-picker import progress marker in the DOM. The scanner-root
+ * marker (camera live / review open) was removed with the D33 scanner
+ * strip; the scanic integration wave re-arms a scanner marker through
+ * this same query. No new stores — presence is read from state the
+ * surface already publishes, via MutationObserver so the banner copy
+ * defers the moment a session starts.
  */
-function useScannerBusy(): boolean {
+function useBusyGuard(): boolean {
   const [busy, setBusy] = useState<boolean>(() =>
     typeof document === 'undefined'
       ? false
-      : document.querySelector('[data-scanner-root],[data-import-progress]') !== null,
+      : document.querySelector('[data-import-progress]') !== null,
   );
   useEffect(() => {
-    const check = () =>
-      setBusy(document.querySelector('[data-scanner-root],[data-import-progress]') !== null);
+    const check = () => setBusy(document.querySelector('[data-import-progress]') !== null);
     check();
     const observer = new MutationObserver(check);
     observer.observe(document.body, { childList: true, subtree: true });
