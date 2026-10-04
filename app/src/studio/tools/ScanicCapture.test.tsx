@@ -17,8 +17,13 @@ import ScanicCapture, {
   AUTO_CAPTURE_STABLE_TICKS_REQUIRED,
   AUTO_CAPTURE_TICK_MS,
   SCANIC_ML_ASSET_BASE_URL,
+  __resetCameraChoiceForTests,
+  buildVideoConstraints,
+  cameraDisplayName,
+  cameraFailureMessage,
   formatScanName,
   grayscaleSAD,
+  isLandscapeScreen,
   isStableFrame,
   shouldAutoFire,
 } from './ScanicCapture';
@@ -187,6 +192,7 @@ let urlCounter = 0;
 
 beforeEach(() => {
   urlCounter = 0;
+  __resetCameraChoiceForTests();
   URL.createObjectURL = vi.fn(() => {
     urlCounter += 1;
     return `blob:mock-${urlCounter}`;
@@ -872,5 +878,421 @@ describe('ML detector default', () => {
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     const reset = await screen.findByRole('button', { name: 'Reset to auto' });
     expect((reset as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('original-blob capture (ImageCapture)', () => {
+  function stubImageCaptureNative() {
+    let seenSettings: { imageWidth?: number; imageHeight?: number } | undefined | null = null;
+    let calls = 0;
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        constructor(_track: unknown) {
+          void _track;
+        }
+        async getPhotoCapabilities() {
+          return { imageWidth: { max: 4000 }, imageHeight: { max: 3000 } };
+        }
+        async takePhoto(settings?: { imageWidth?: number; imageHeight?: number }) {
+          calls += 1;
+          seenSettings = settings ?? null;
+          return new Blob(['sensor-bytes'], { type: 'image/jpeg' });
+        }
+      },
+    );
+    return {
+      seen: () => seenSettings,
+      calls: () => calls,
+    };
+  }
+
+  function mockCameraForShutter() {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => stream),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    });
+    return { stop };
+  }
+
+  it('takePhoto resolves the sensor-native blob with photoCapabilities max (no canvas re-encode)', async () => {
+    const toBlobTypes: Array<string | undefined> = [];
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void, type?: string) {
+      toBlobTypes.push(type);
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
+    const probe = stubImageCaptureNative();
+    mockCameraForShutter();
+    const onCommit = vi.fn();
+    render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+
+    fireEvent.click(q('[data-scan-capture]'));
+    const cta = await findQ('[data-review-cta]');
+    expect(cta.textContent).toBe('View 1 pages');
+    // Best original: the capabilities max was requested.
+    await waitFor(() => expect(probe.calls()).toBe(1));
+    expect(probe.seen()).toEqual({ imageWidth: 4000, imageHeight: 3000 });
+    // Capture never re-encoded: no JPEG canvas export anywhere (warp PNG only).
+    expect(toBlobTypes.includes('image/jpeg')).toBe(false);
+
+    // Original bytes flow downstream byte-identical.
+    fireEvent.click(cta);
+    await findQ('[data-scan-queue]');
+    fireEvent.click(screen.getByText('Use original', { exact: true }));
+    fireEvent.click(screen.getByText('Next', { exact: true }));
+    await screen.findByText('All pages ready');
+    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
+    expect(pages).toHaveLength(1);
+    expect(pages[0].file.type).toBe('image/jpeg');
+    expect(await pages[0].file.text()).toBe('sensor-bytes');
+  });
+
+  it('takePhoto without exposed capabilities uses the native default', async () => {
+    let seen: unknown = 'unset';
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        constructor(_track: unknown) {
+          void _track;
+        }
+        async takePhoto(settings?: unknown) {
+          seen = settings;
+          return new Blob(['native-default'], { type: 'image/jpeg' });
+        }
+      },
+    );
+    mockCameraForShutter();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    fireEvent.click(q('[data-scan-capture]'));
+    await findQ('[data-review-cta]');
+    expect(seen === undefined || seen === null).toBe(true);
+  });
+
+  it('canvas-draw fallback runs only when ImageCapture is unavailable', async () => {
+    // No ImageCapture on this browser — the legacy video-frame path applies.
+    vi.stubGlobal('ImageCapture', undefined);
+    const toBlobTypes: Array<string | undefined> = [];
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void, type?: string) {
+      toBlobTypes.push(type);
+      cb(new Blob(['fallback-bytes'], { type: 'image/jpeg' }));
+    };
+    const drawImage = vi.fn();
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    // @ts-expect-error test-only canvas 2D double (drawImage probe)
+    HTMLCanvasElement.prototype.getContext = () => ({ drawImage });
+    try {
+      mockCameraForShutter();
+      render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+      await findQ('[data-scan-capture]');
+      const video = document.querySelector(
+        'video[aria-label="Camera preview"]',
+      ) as HTMLVideoElement;
+      Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true });
+      Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true });
+
+      fireEvent.click(q('[data-scan-capture]'));
+      await findQ('[data-review-cta]');
+      expect(drawImage).toHaveBeenCalled();
+      expect(toBlobTypes.includes('image/jpeg')).toBe(true);
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetContext;
+    }
+  });
+});
+
+describe('camera picker', () => {
+  function mockTwoCameras() {
+    const stop1 = vi.fn();
+    const track1 = {
+      stop: stop1,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream1 = {
+      getTracks: () => [track1],
+      getVideoTracks: () => [track1],
+    } as unknown as MediaStream;
+    const stop2 = vi.fn();
+    const track2 = {
+      stop: stop2,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream2 = {
+      getTracks: () => [track2],
+      getVideoTracks: () => [track2],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async (constraints: unknown) => {
+      const video = (constraints as { video?: { deviceId?: { exact?: string } } }).video;
+      if (video?.deviceId?.exact === 'cam-2') return stream2;
+      return stream1;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia,
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Front Cam', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    return { stop1, stop2, getUserMedia };
+  }
+
+  it('lists every video input in a 44px labelled select and restarts with deviceId exact', async () => {
+    const { stop1, getUserMedia } = mockTwoCameras();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    expect(select.getAttribute('aria-label')).toBe('Choose camera');
+    expect(select.className).toMatch('min-h-[44px]');
+    const options = Array.from(select.querySelectorAll('option'));
+    // Default + every enumerated input, ordered indices in the labels.
+    expect(options.map((o) => o.value)).toEqual(['', 'cam-1', 'cam-2']);
+    expect(options[1].textContent).toMatch(/1:/);
+    expect(options[1].textContent).toMatch(/Front Cam/);
+    expect(options[2].textContent).toMatch(/2:/);
+
+    fireEvent.change(select, { target: { value: 'cam-2' } });
+    await waitFor(() => {
+      const last = getUserMedia.mock.calls[getUserMedia.mock.calls.length - 1][0] as {
+        video: { deviceId?: { exact?: string } };
+      };
+      expect(last.video.deviceId).toEqual({ exact: 'cam-2' });
+    });
+    // Switching stops the old tracks.
+    expect(stop1).toHaveBeenCalled();
+    // Facing quick-flip stays alongside the picker.
+    expect(screen.getByLabelText('Switch camera')).toBeTruthy();
+  });
+
+  it('falls back to facingMode with an honest note when the exact device fails', async () => {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1280, height: 720 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const fallbackStream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async (constraints: unknown) => {
+      const video = (constraints as { video?: { deviceId?: { exact?: string } } }).video;
+      if (video?.deviceId?.exact === 'dead-cam') {
+        throw new DOMException('not found', 'NotFoundError');
+      }
+      return fallbackStream;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia,
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'dead-cam', label: 'Dead Cam', groupId: '' },
+          { kind: 'videoinput', deviceId: 'good-cam', label: 'Good Cam', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'dead-cam' } });
+    // Fallback recovers to live with an honest note (no bare failure).
+    await findQ('[data-scan-capture]');
+    await waitFor(() => {
+      expect(getUserMedia.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert?.textContent).toMatch(/could not be opened/);
+  });
+});
+
+describe('orientation-honest constraints', () => {
+  function setOrientation(type: string | null) {
+    const screenObj = window.screen as unknown as { orientation?: { type?: string } };
+    const prev = screenObj.orientation;
+    if (type === null) {
+      // @ts-expect-error test-only orientation removal
+      delete window.screen.orientation;
+    } else {
+      Object.defineProperty(window.screen, 'orientation', {
+        value: { type },
+        configurable: true,
+      });
+    }
+    return () => {
+      if (prev === undefined) {
+        try {
+          // @ts-expect-error test-only orientation restore
+          delete window.screen.orientation;
+        } catch {
+          // Nothing to restore.
+        }
+      } else {
+        Object.defineProperty(window.screen, 'orientation', {
+          value: prev,
+          configurable: true,
+        });
+      }
+    };
+  }
+
+  it('keeps portrait ideals on portrait screens (back 1080x1920, front 720x1280)', () => {
+    const restore = setOrientation('portrait-primary');
+    try {
+      expect(isLandscapeScreen()).toBe(false);
+      expect(buildVideoConstraints('environment')).toEqual({
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1080 },
+        height: { ideal: 1920 },
+      });
+      expect(buildVideoConstraints('user')).toEqual({
+        facingMode: { ideal: 'user' },
+        width: { ideal: 720 },
+        height: { ideal: 1280 },
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it('requests landscape max with a 1280 width floor on landscape screens', () => {
+    const restore = setOrientation('landscape-primary');
+    try {
+      expect(isLandscapeScreen()).toBe(true);
+      const back = buildVideoConstraints('environment');
+      expect(back.width).toEqual({ ideal: 1920, min: 1280 });
+      expect(back.height).toEqual({ ideal: 1080 });
+      const front = buildVideoConstraints('user');
+      expect(front.width).toEqual({ ideal: 1920, min: 1280 });
+      expect(front.height).toEqual({ ideal: 1080 });
+      // Explicit device omits facingMode (exact conflicts with it).
+      const exact = buildVideoConstraints('environment', 'cam-2');
+      expect(exact.deviceId).toEqual({ exact: 'cam-2' });
+      expect('facingMode' in exact).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('reflects the live stream aspect onto the preview (no forced ratio)', async () => {
+    const restore = setOrientation('landscape-primary');
+    try {
+      const stop = vi.fn();
+      const track = {
+        stop,
+        readyState: 'live',
+        getCapabilities: () => ({}),
+        getSettings: () => ({ width: 2560, height: 1440 }),
+        applyConstraints: vi.fn(async () => undefined),
+      };
+      const stream = {
+        getTracks: () => [track],
+        getVideoTracks: () => [track],
+      } as unknown as MediaStream;
+      const getUserMedia = vi.fn(async (_constraints?: unknown) => stream);
+      Object.defineProperty(navigator, 'mediaDevices', {
+        value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+        configurable: true,
+      });
+      render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+      await findQ('[data-scan-capture]');
+      // Landscape ideals reached the sensor request (never a portrait crop).
+      const firstCall = getUserMedia.mock.calls[0]?.[0] as unknown as {
+        video: { width?: unknown; height?: unknown };
+      };
+      if (!firstCall) throw new Error('getUserMedia was not called');
+      expect(firstCall.video.width).toEqual({ ideal: 1920, min: 1280 });
+      const video = document.querySelector(
+        'video[aria-label="Camera preview"]',
+      ) as HTMLVideoElement;
+      await waitFor(() => {
+        expect(video.style.aspectRatio).toBe('2560 / 1440');
+      });
+      // Full-bleed layer keeps no hardcoded aspect/max-w box.
+      expect(q('[data-viewfinder]').className).not.toMatch('aspect-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('names cameras with ordered indices and honest fallbacks', () => {
+    expect(cameraDisplayName({ label: 'HD Webcam' }, 0)).toBe('1: HD Webcam');
+    expect(cameraDisplayName({ label: '' }, 1)).toBe('Camera 2');
+    expect(cameraDisplayName({ label: null }, 0, 'environment')).toBe('1: Back camera 1');
+    expect(cameraDisplayName({ label: '  ' }, 2, 'user')).toBe('3: Front camera 3');
+  });
+});
+
+describe('honest camera errors', () => {
+  function mockFailingCamera(name: string) {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => {
+          throw new DOMException('camera failed', name);
+        }),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    });
+  }
+
+  it('speaks plainly per failure type, never a bare something-went-wrong', async () => {
+    expect(cameraFailureMessage('denied').toLowerCase()).toMatch(/denied/);
+    expect(cameraFailureMessage('missing').toLowerCase()).toMatch(/no camera was found/);
+    expect(cameraFailureMessage('overconstrained').toLowerCase()).toMatch(/resolution/);
+    for (const kind of ['denied', 'missing', 'overconstrained', 'unavailable'] as const) {
+      expect(cameraFailureMessage(kind).toLowerCase()).not.toMatch(/something went wrong/);
+    }
+  });
+
+  it('shows the permission line when access is denied', async () => {
+    mockFailingCamera('NotAllowedError');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toMatch(/denied/);
+    });
+  });
+
+  it('shows the device-missing line when no device exists', async () => {
+    mockFailingCamera('NotFoundError');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toMatch(/No camera was found/);
+    });
+  });
+
+  it('shows the overconstrained line when the resolution cannot be met', async () => {
+    mockFailingCamera('OverconstrainedError');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toMatch(/requested resolution/);
+    });
   });
 });

@@ -494,8 +494,9 @@ describe('ScanicReview', () => {
       '[data-crop-handle="tl"] > span',
     ) as unknown as HTMLElement;
     const largeSize = parseFloat(largeDot.style.width);
-    expect(largeSize).toBe(20);
+    expect(largeSize).toBe(16);
     expect(largeSize).toBeGreaterThan(smallSize);
+    expect(largeSize).toBeLessThanOrEqual(16);
     for (const h of Array.from(
       container.querySelectorAll('[data-crop-handle], [data-crop-handle-mid]') ?? [],
     )) {
@@ -506,36 +507,62 @@ describe('ScanicReview', () => {
 });
 
 describe('ScanicReview handles + loupe', () => {
-  it('handles use thin dotted brass-ring visuals with a center dot (44px hit preserved)', () => {
+  it('handles use thin solid brass-ring small circles with a center micro-dot (44px hit preserved)', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    // Single-line outline: thin solid 1.5–2px brass, never dotted.
+    const outline = container.querySelector(
+      '[data-crop-adjust] polygon',
+    ) as unknown as SVGPolygonElement | null;
+    expect(outline).not.toBeNull();
+    const strokeWidth = parseFloat(outline!.getAttribute('stroke-width') ?? '');
+    expect(strokeWidth).toBeGreaterThanOrEqual(1.5);
+    expect(strokeWidth).toBeLessThanOrEqual(2);
+    expect(outline!.getAttribute('stroke-dasharray')).toBeNull();
     for (const key of ['tl', 'tr', 'br', 'bl']) {
       const h = document.querySelector(`[data-crop-handle="${key}"]`) as HTMLElement;
       expect(h.getAttribute('role')).toBe('slider');
-      // 44px hit target preserved via the button.
+      // 44px invisible hit target preserved on the button.
       expect(h.className).toMatch('min-h-[44px]');
       expect(h.className).toMatch('min-w-[44px]');
+      expect(h.className).toMatch('h-11');
+      expect(h.className).toMatch('w-11');
       const visual = h.querySelector(':scope > span') as HTMLElement | null;
       expect(visual).not.toBeNull();
-      expect(visual!.className).toMatch('border-dotted');
+      // Thin solid small-circle ring (never dotted, never square).
+      expect(visual!.className).not.toMatch('border-dotted');
+      expect(visual!.className).toMatch('border-solid');
       expect(visual!.className).toMatch('border-brass-400');
-      // Small center dot inside the transparent/paper ring.
+      expect(visual!.className).toMatch('rounded-full');
+      const size = parseFloat(visual!.style.width);
+      expect(size).toBeLessThanOrEqual(16);
+      expect(size).toBeGreaterThanOrEqual(14);
+      // 2–3px center micro-dot.
       const dot = visual!.querySelector('span') as HTMLElement | null;
       expect(dot).not.toBeNull();
       expect(dot!.className).toMatch('bg-brass-400');
+      const dotSize = parseFloat(dot!.style.width);
+      expect(dotSize).toBeGreaterThanOrEqual(2);
+      expect(dotSize).toBeLessThanOrEqual(3);
     }
     for (const edge of ['top', 'right', 'bottom', 'left']) {
       const h = document.querySelector(`[data-crop-handle-mid="${edge}"]`) as HTMLElement;
       expect(h.getAttribute('role')).toBe('slider');
+      expect(h.className).toMatch('min-h-[44px]');
+      expect(h.className).toMatch('min-w-[44px]');
       const visual = h.querySelector(':scope > span') as HTMLElement | null;
       expect(visual).not.toBeNull();
-      expect(visual!.className).toMatch('border-dotted');
+      expect(visual!.className).not.toMatch('border-dotted');
+      expect(visual!.className).toMatch('border-solid');
       expect(visual!.className).toMatch('border-brass-400');
+      expect(visual!.className).toMatch('rounded-full');
+      const size = parseFloat(visual!.style.width);
+      expect(size).toBeLessThanOrEqual(16);
     }
     expect(container.querySelector('[data-loupe]')).toBeNull();
   });
 
-  it('handle visuals stay in the compact 14–20px range (44px hit preserved)', () => {
+  it('handle visuals stay in the compact 14–16px range (44px hit preserved)', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
     mockAdjustRect(container);
@@ -543,7 +570,7 @@ describe('ScanicReview handles + loupe', () => {
       const visual = document.querySelector(sel) as unknown as HTMLElement;
       const size = parseFloat(visual.style.width);
       expect(size).toBeGreaterThanOrEqual(14);
-      expect(size).toBeLessThanOrEqual(20);
+      expect(size).toBeLessThanOrEqual(16);
       expect(parseFloat(visual.style.height)).toBe(size);
     }
     for (const h of Array.from(

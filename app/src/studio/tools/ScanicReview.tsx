@@ -358,8 +358,10 @@ export default function ScanicReview({
       ? containContentRect(frameBox.w, frameBox.h, safeW, safeH)
       : null;
   const contentMin = contentRect !== null ? Math.min(contentRect.width, contentRect.height) : 0;
-  // Proportionate visual dot (14–20px); the 44px hit target is preserved via padding.
-  const handleVisual = Math.min(20, Math.max(14, contentMin * 0.07));
+  // Small-circle visuals (14–16px): thin solid brass rings with a 2–3px
+  // center micro-dot. The 44px invisible hit target lives on the button.
+  const handleVisual = Math.min(16, Math.max(14, contentMin * 0.07));
+  const handleDot = 3;
 
   const enterAdjust = () => {
     setDraft(cloneCorners(corners ?? fullFrameCorners(safeW, safeH)));
@@ -657,37 +659,10 @@ export default function ScanicReview({
               points={quadPointsAttr(draft)}
               fill="none"
               stroke="#c97a1f"
-              strokeWidth={Math.max(safeW, safeH) * 0.004}
+              strokeWidth={2}
               strokeLinejoin="round"
               vectorEffect="non-scaling-stroke"
             />
-            {(['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const).map((name) => (
-              <circle
-                key={name}
-                cx={draft[name].x}
-                cy={draft[name].y}
-                r={Math.max(safeW, safeH) * 0.008}
-                fill="#fdfbf7"
-                stroke="#c97a1f"
-                strokeWidth={Math.max(safeW, safeH) * 0.003}
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-            {MID_EDGES.map((edge) => {
-              const [n1, n2] = EDGE_CORNERS[edge];
-              return (
-                <circle
-                  key={edge}
-                  cx={(draft[n1].x + draft[n2].x) / 2}
-                  cy={(draft[n1].y + draft[n2].y) / 2}
-                  r={Math.max(safeW, safeH) * 0.006}
-                  fill="#c97a1f"
-                  stroke="#fdfbf7"
-                  strokeWidth={Math.max(safeW, safeH) * 0.002}
-                  vectorEffect="non-scaling-stroke"
-                />
-              );
-            })}
           </svg>
           <div className="absolute inset-0">
             {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
@@ -765,13 +740,13 @@ export default function ScanicReview({
                 >
                   <span
                     aria-hidden
-                    className="inline-flex items-center justify-center rounded-full border-2 border-dotted border-brass-400 bg-paper-50/25 shadow-soft"
+                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
                     style={{ width: handleVisual, height: handleVisual }}
                   >
                     <span
                       aria-hidden
                       className="rounded-full bg-brass-400"
-                      style={{ width: 4, height: 4 }}
+                      style={{ width: handleDot, height: handleDot }}
                     />
                   </span>
                 </button>
@@ -858,13 +833,13 @@ export default function ScanicReview({
                 >
                   <span
                     aria-hidden
-                    className="inline-flex items-center justify-center rounded-[3px] border-2 border-dotted border-brass-400 bg-paper-50/25 shadow-soft"
+                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
                     style={{ width: handleVisual, height: handleVisual }}
                   >
                     <span
                       aria-hidden
                       className="rounded-full bg-brass-400"
-                      style={{ width: 4, height: 4 }}
+                      style={{ width: handleDot, height: handleDot }}
                     />
                   </span>
                 </button>

@@ -21,8 +21,33 @@
  *
  * Mirror invariant: the front-camera preview is CSS-mirrored (`scaleX(-1)`,
  * industry standard) for a natural selfie feel, but captured frames are
- * ALWAYS unmirrored — `canvas drawImage(video)` reads raw camera pixels,
- * never the CSS transform. The back camera is never mirrored.
+ * ALWAYS unmirrored — `ImageCapture.takePhoto()` returns the sensor-native
+ * Blob (never the CSS transform), and the canvas-draw fallback reads raw
+ * camera pixels via `drawImage(video)` (likewise never the CSS transform).
+ * The back camera is never mirrored.
+ *
+ * Original-blob capture: the shutter uses the ImageCapture API
+ * (`new ImageCapture(track).takePhoto()`) so the queued File is the
+ * sensor's native encoding — no canvas, no toBlob, no quality param, zero
+ * encode/decode. Canvas-draw is a fallback ONLY when ImageCapture is
+ * unavailable or throws (older browsers, Firefox without ImageCapture,
+ * virtual cameras that reject takePhoto). takePhoto resolution requests the
+ * `getPhotoCapabilities()` max when exposed (best original), else the
+ * native default (bare `takePhoto()`).
+ *
+ * Camera choice: after permission, `enumerateDevices()` lists video inputs;
+ * the `[data-camera-select]` native select (alongside the facing quick-flip)
+ * restarts the session with `deviceId: { exact }`, falling back to
+ * facingMode ideals on failure. The choice persists in a session ref.
+ *
+ * Orientation-honest constraints: ideals come from screen orientation at
+ * session start — portrait screens keep portrait ideals (1080x1920 back /
+ * 720x1280 front); landscape screens request landscape max (1920x1080 with
+ * a `width: { min: 1280 }` floor). No portrait crop is ever forced on a
+ * landscape sensor. The preview is full-bleed `object-cover` (no forced
+ * ratio anywhere); the live stream aspect from `track.getSettings()` is
+ * reflected onto the video box so a 1440p landscape webcam never renders
+ * as a blurry zoomed crop.
  *
  * E2E DATA CONTRACT (do not rename):
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
@@ -80,6 +105,140 @@ export type ScanicHandleKey = (typeof SCANIC_HANDLE_KEYS)[number];
 /** `scan-NNN.jpg` collection names (capture order; engine sniffs magic bytes). */
 export function formatScanName(index: number): string {
   return `scan-${String(index + 1).padStart(3, '0')}.jpg`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Camera choice + orientation-honest constraints                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Session-persisted camera choice: module lifetime equals the page-session
+ * lifetime, so a remount (StrictMode double-mount, camera↔review trips that
+ * tear down the session effect) keeps the user's pick without localStorage.
+ * Mirrored into `chosenDeviceIdRef` + state below on every change.
+ */
+let persistedCameraDeviceId: string | null = null;
+
+/** Minimal ImageCapture surface used here (avoids lib.dom version skew). */
+interface TakePhotoCapabilities {
+  imageWidth?: { max?: number };
+  imageHeight?: { max?: number };
+}
+interface ImageCaptureInstance {
+  getPhotoCapabilities?: () => Promise<TakePhotoCapabilities>;
+  takePhoto: (settings?: { imageWidth?: number; imageHeight?: number }) => Promise<Blob>;
+}
+type ImageCaptureCtor = new (track: MediaStreamTrack) => ImageCaptureInstance;
+
+function getImageCaptureCtor(): ImageCaptureCtor | undefined {
+  try {
+    const ctor = (globalThis as unknown as { ImageCapture?: ImageCaptureCtor }).ImageCapture;
+    return typeof ctor === 'function' ? ctor : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True on landscape screens. Reads `screen.orientation.type` when exposed
+ * (all modern browsers, incl. desktop Chrome `landscape-primary`); when the
+ * API is missing (older browsers, jsdom) defaults to portrait — deliberately
+ * NOT `innerWidth > innerHeight`, because jsdom reports 1024x768 landscape
+ * and would otherwise force landscape ideals in tests and on phones caught
+ * mid-rotation. Real landscape desktops always expose the orientation API,
+ * so they still get landscape ideals.
+ */
+export function isLandscapeScreen(): boolean {
+  try {
+    const w = window as unknown as {
+      screen?: { orientation?: { type?: string } };
+    };
+    const t = w.screen?.orientation?.type;
+    if (typeof t === 'string') {
+      if (t.startsWith('landscape')) return true;
+      if (t.startsWith('portrait')) return false;
+    }
+  } catch {
+    // Fall through to the portrait default below.
+  }
+  return false;
+}
+
+/**
+ * Orientation-honest `getUserMedia` video constraints built at session start.
+ * Portrait screens keep the phone-tall ideals (1080x1920 back / 720x1280
+ * front); landscape screens request landscape max (1920x1080 with a
+ * `width: { min: 1280 }` floor so a 1440p landscape webcam is never squeezed
+ * through a portrait crop and upscaled into blur). All ideals are
+ * non-binding hints — the sensor settles to its closest native mode; only
+ * the landscape `min: 1280` floor can over-constrain, and the session effect
+ * retries without it on `OverconstrainedError`.
+ *
+ * With an explicit `deviceId` the facingMode hint is omitted (exact device
+ * selection conflicts with facingMode on some browsers); without one,
+ * `facingMode: { ideal }` applies.
+ */
+export function buildVideoConstraints(
+  facing: 'environment' | 'user',
+  deviceId?: string | null,
+): MediaTrackConstraints {
+  const base: MediaTrackConstraints =
+    deviceId !== null && deviceId !== undefined && deviceId !== ''
+      ? { deviceId: { exact: deviceId } }
+      : { facingMode: { ideal: facing } };
+  if (isLandscapeScreen()) {
+    return { ...base, width: { ideal: 1920, min: 1280 }, height: { ideal: 1080 } };
+  }
+  if (facing === 'user') {
+    return { ...base, width: { ideal: 720 }, height: { ideal: 1280 } };
+  }
+  return { ...base, width: { ideal: 1080 }, height: { ideal: 1920 } };
+}
+
+/**
+ * Display name for a video input: the OS/browser label when permission has
+ * granted it, else an honest fallback (`Camera N`) — always prefixed with
+ * the ordered index (`1: …`) so duplicate/blank labels stay distinguishable.
+ * Callers needing Front/Back wording get it free when the label itself (or
+ * the facing fallback) carries it; the index suffix is the disambiguator.
+ */
+export function cameraDisplayName(
+  device: { label?: string | null },
+  index: number,
+  facingHint?: 'environment' | 'user' | null,
+): string {
+  const raw = (device.label ?? '').trim();
+  if (raw !== '') return `${index + 1}: ${raw}`;
+  const side = facingHint === 'user' ? 'Front' : facingHint === 'environment' ? 'Back' : null;
+  if (side !== null) return `${index + 1}: ${side} camera ${index + 1}`;
+  return `Camera ${index + 1}`;
+}
+
+/** Test-only reset for the session-persisted camera pick (isolates picker tests). */
+export function __resetCameraChoiceForTests(): void {
+  persistedCameraDeviceId = null;
+}
+
+/** Plain-language camera failure line per error type (never a bare "something went wrong"). */
+export function cameraFailureMessage(
+  kind: 'denied' | 'missing' | 'overconstrained' | 'unavailable',
+): string {
+  if (kind === 'denied')
+    return 'Camera access was denied. Folio only uses the camera while this scanner is open. Allow access in the browser site settings and retry — or add image files instead.';
+  if (kind === 'missing')
+    return 'No camera was found on this device or browser. Connect a camera and retry — or add image files instead; they stay on this device.';
+  if (kind === 'overconstrained')
+    return 'That camera could not provide the requested resolution, so a compatible mode was tried instead. If the preview stays black, add image files instead — they stay on this device.';
+  return 'No camera is available on this device or browser. Add image files instead — they stay on this device.';
+}
+
+function classifyCameraError(e: unknown): 'denied' | 'missing' | 'overconstrained' | 'unavailable' {
+  const name = e instanceof DOMException ? e.name : e instanceof Error ? e.name : '';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return 'denied';
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'missing';
+  if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError')
+    return 'overconstrained';
+  return 'unavailable';
 }
 
 /* ------------------------------------------------------------------ */
@@ -259,7 +418,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [phase, setPhase] = useState<Phase>('camera');
   const [reviewIndex, setReviewIndex] = useState(0);
   const [camState, setCamState] = useState<CameraState>('requesting');
+  const [camErrorKind, setCamErrorKind] = useState<
+    'denied' | 'missing' | 'overconstrained' | 'unavailable'
+  >('unavailable');
   const [facing, setFacing] = useState<'environment' | 'user'>('environment');
+  /** All video inputs enumerated after permission (labels need permission). */
+  const [cameras, setCameras] = useState<Array<{ deviceId: string; label: string }>>([]);
+  /** Explicit device choice; ''/null = default (facingMode ideals). */
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(persistedCameraDeviceId);
+  /** Live stream aspect (`W / H`) read from `track.getSettings()` — honest preview, never forced. */
+  const [liveAspect, setLiveAspect] = useState<string | null>(null);
   const [mirrored, setMirrored] = useState(true);
   const [torchOn, setTorchOn] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
@@ -291,6 +459,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const entriesRef = useRef<QueueEntry[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  /** Session ref mirror of the camera choice (survives effect remounts within the session). */
+  const chosenDeviceIdRef = useRef<string | null>(persistedCameraDeviceId);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   const imageElsRef = useRef(new Map<number, HTMLImageElement>());
@@ -349,7 +519,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const visitedCount = queue.filter((e) => visitedIdsRef.current.has(e.id)).length;
   // Front-camera preview is mirrored by default (industry standard); the back
   // camera is never mirrored. Captured frames ignore this entirely (see
-  // captureFrame: drawImage reads raw pixels, not the CSS transform).
+  // captureFrame: takePhoto is sensor-native = unmirrored; the canvas
+  // fallback drawImage reads raw pixels, never the CSS transform).
   const previewMirrored = facing === 'user' && mirrored;
 
   /* ---------------- detection (ML default, classical fallback) ---------------- */
@@ -527,6 +698,23 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
+  /**
+   * Camera picker choice: stops the old tracks immediately, persists the
+   * pick in the session ref (+ module), and restarts the session effect with
+   * `deviceId: { exact }`. The facing quick-flip stays alongside the picker.
+   */
+  const chooseCamera = useCallback(
+    (deviceId: string | null) => {
+      const next = deviceId === '' ? null : deviceId;
+      persistedCameraDeviceId = next;
+      chosenDeviceIdRef.current = next;
+      setSelectedDeviceId(next);
+      setCaptureError(null);
+      stopTracks();
+    },
+    [stopTracks],
+  );
+
   useEffect(() => {
     if (phase !== 'camera' || paused) return;
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
@@ -538,32 +726,69 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       !navigator.mediaDevices ||
       typeof navigator.mediaDevices.getUserMedia !== 'function'
     ) {
+      setCamErrorKind('unavailable');
       setCamState('unavailable');
       return;
     }
     let cancelled = false;
     let stream: MediaStream | null = null;
     setCamState('requesting');
+    setLiveAspect(null);
     (async () => {
+      // Orientation-honest ideals, chosen once per session start (never a
+      // forced portrait crop on a landscape sensor — see
+      // buildVideoConstraints). With an explicit device the facingMode hint
+      // is omitted (exact selection conflicts with it on some browsers).
+      const activeDeviceId = chosenDeviceIdRef.current ?? selectedDeviceId;
+      const wanted = buildVideoConstraints(facing, activeDeviceId);
+      const openStream = async (video: MediaTrackConstraints): Promise<MediaStream> =>
+        navigator.mediaDevices.getUserMedia({ video, audio: false });
       try {
-        const front = facing === 'user';
-        // Portrait ideals: phone cameras deliver tall frames — the
-        // full-bleed viewfinder cover-crops in preview (standard viewfinder
-        // behavior) while the capture path stores the full tall frame.
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: front
-            ? {
-                facingMode: { ideal: facing },
-                width: { ideal: 720 },
-                height: { ideal: 1280 },
+        try {
+          stream = await openStream(wanted);
+        } catch (first) {
+          // Exact-device failure: fall back to the facingMode ideals once,
+          // honestly (clear the failed pick so state matches the live
+          // stream), then continue below on the fallback stream.
+          const hasExactPick =
+            activeDeviceId !== null && activeDeviceId !== undefined && activeDeviceId !== '';
+          const firstKind = classifyCameraError(first);
+          if (hasExactPick && firstKind !== 'denied') {
+            try {
+              stream = await openStream(buildVideoConstraints(facing, null));
+              if (!cancelled) {
+                persistedCameraDeviceId = null;
+                chosenDeviceIdRef.current = null;
+                setSelectedDeviceId(null);
+                setCamErrorKind('overconstrained');
+                setCaptureError(
+                  'That camera could not be opened — using the default camera instead. You can pick another camera above.',
+                );
               }
-            : {
-                facingMode: { ideal: facing },
-                width: { ideal: 1080 },
-                height: { ideal: 1920 },
-              },
-          audio: false,
-        });
+            } catch {
+              throw first;
+            }
+          } else if (firstKind === 'overconstrained') {
+            // Landscape `min: 1280` floor over-constrained a low-res sensor:
+            // retry once with ideals only (no floor), which cannot
+            // over-constrain — ideals are pure hints.
+            const relaxed: MediaTrackConstraints =
+              activeDeviceId !== null && activeDeviceId !== undefined && activeDeviceId !== ''
+                ? {
+                    deviceId: { exact: activeDeviceId },
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
+                  }
+                : {
+                    facingMode: { ideal: facing },
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
+                  };
+            stream = await openStream(relaxed);
+          } else {
+            throw first;
+          }
+        }
         if (cancelled) {
           for (const track of stream.getTracks()) track.stop();
           return;
@@ -587,6 +812,47 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         } catch {
           // Unsupported on this browser/device — fixed focus still scans.
         }
+        // Honest preview aspect: read the LIVE stream settings (actual
+        // sensor mode), never a hardcoded ratio — the full-bleed
+        // `object-cover` layer crops, never stretches, so a landscape
+        // webcam renders landscape instead of a blurry zoomed portrait crop.
+        try {
+          const settings = track?.getSettings?.() as
+            { width?: number; height?: number } | undefined;
+          if (
+            !cancelled &&
+            typeof settings?.width === 'number' &&
+            typeof settings?.height === 'number' &&
+            settings.width > 0 &&
+            settings.height > 0
+          ) {
+            setLiveAspect(`${settings.width} / ${settings.height}`);
+          }
+        } catch {
+          // Settings unreadable — the full-bleed layer already avoids any
+          // forced ratio, so there is nothing to correct.
+        }
+        // Camera choice: enumerate AFTER permission so labels are real
+        // (before permission they are blank). Fallback names keep blank
+        // labels usable; the ordered index disambiguates duplicates.
+        try {
+          const enumerate = navigator.mediaDevices.enumerateDevices?.bind(navigator.mediaDevices);
+          if (typeof enumerate === 'function' && !cancelled) {
+            const devices = await enumerate();
+            if (!cancelled) {
+              const videos = devices
+                .filter((d) => d.kind === 'videoinput')
+                .map((d) => ({
+                  deviceId: d.deviceId ?? '',
+                  label: (d.label ?? '').trim(),
+                }))
+                .filter((d) => d.deviceId !== '');
+              setCameras(videos);
+            }
+          }
+        } catch {
+          // Enumeration failure leaves the facing quick-flip working.
+        }
         let supportsTorch = false;
         try {
           const caps = track?.getCapabilities?.() as
@@ -602,8 +868,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         }
       } catch (e) {
         if (cancelled) return;
-        const name = e instanceof DOMException ? e.name : e instanceof Error ? e.name : '';
-        if (name === 'NotAllowedError' || name === 'SecurityError') setCamState('denied');
+        const kind = classifyCameraError(e);
+        setCamErrorKind(kind);
+        if (kind === 'denied') setCamState('denied');
         else setCamState('unavailable');
       }
     })();
@@ -614,7 +881,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (streamRef.current === stream) streamRef.current = null;
       }
     };
-  }, [phase, facing, paused, retryNonce]);
+  }, [phase, facing, selectedDeviceId, paused, retryNonce]);
 
   // Leaving the camera view (review/done) releases the camera; returning resumes.
   useEffect(() => {
@@ -651,9 +918,66 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     }
   }, [torchOn]);
 
+  /**
+   * Original-blob shutter: the ImageCapture API returns the sensor's native
+   * Blob (`takePhoto()`) — zero canvas, zero toBlob, zero re-encode, no
+   * quality param. takePhoto output is sensor-native and therefore
+   * UNMIRRORED by construction (the front-preview `scaleX(-1)` is CSS-only
+   * and never reaches the sensor path), preserving the mirror invariant.
+   * Resolution requests the `getPhotoCapabilities()` max when the browser
+   * exposes it (best original); otherwise the bare native default.
+   * Canvas-draw is a fallback ONLY when ImageCapture is unavailable or
+   * `takePhoto()` throws (older browsers, virtual cameras) — commented at
+   * the branch, same unmirrored `drawImage` semantics as before.
+   */
   const captureFrame = useCallback(async () => {
     const video = videoRef.current;
+    const track = streamRef.current?.getVideoTracks()[0] ?? null;
     setCaptureError(null);
+    if (!track || track.readyState === 'ended') {
+      setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
+      return;
+    }
+    const ImageCaptureCtor = getImageCaptureCtor();
+    if (ImageCaptureCtor) {
+      try {
+        const capture = new ImageCaptureCtor(track);
+        let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined;
+        try {
+          if (typeof capture.getPhotoCapabilities === 'function') {
+            const caps = await capture.getPhotoCapabilities();
+            const maxW = caps.imageWidth?.max;
+            const maxH = caps.imageHeight?.max;
+            if (typeof maxW === 'number' && typeof maxH === 'number') {
+              photoSettings = { imageWidth: maxW, imageHeight: maxH };
+            }
+          }
+        } catch {
+          // Capabilities unreadable — fall through to the native default.
+          photoSettings = undefined;
+        }
+        const blob =
+          photoSettings !== undefined
+            ? await capture.takePhoto(photoSettings)
+            : await capture.takePhoto();
+        if (!mountedRef.current) return;
+        if (!blob || blob.size === 0) throw new Error('empty photo');
+        // Untouched original from here on: the queue never re-encodes it.
+        const file = new File([blob], `capture-${idRef.current + 1}.jpg`, {
+          type: blob.type || 'image/jpeg',
+        });
+        enqueueCapture(file);
+        return;
+      } catch {
+        // takePhoto rejected (virtual camera, insecure pipe, in-use track) —
+        // fall through to the canvas-draw fallback below, which reads the
+        // live <video> frame instead of the sensor still.
+      }
+    }
+    // Fallback ONLY: ImageCapture unavailable or takePhoto threw on this
+    // browser/device. Reads raw camera pixels (never the CSS mirror), at the
+    // preview's native frame size — no upscale, no quality param beyond the
+    // legacy JPEG container this path historically produced.
     if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
       setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
       return;
@@ -899,9 +1223,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     camState === 'insecure'
       ? 'Camera needs a secure connection (HTTPS or localhost). You can add image files instead — they never leave this device.'
       : camState === 'denied'
-        ? 'Camera access was denied. Folio only uses the camera while this scanner is open. Allow access in the browser site settings and retry — or add image files instead.'
+        ? cameraFailureMessage('denied')
         : camState === 'unavailable'
-          ? 'No camera is available on this device or browser. Add image files instead — they stay on this device.'
+          ? cameraFailureMessage(camErrorKind)
           : null;
 
   const anyDetecting = queue.some((e) => e.status === 'detecting');
@@ -1083,7 +1407,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   playsInline
                   autoPlay
                   aria-label="Camera preview"
-                  style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
+                  style={{
+                    ...(previewMirrored ? { transform: 'scaleX(-1)' } : {}),
+                    ...(liveAspect ? { aspectRatio: liveAspect } : {}),
+                  }}
                   className="absolute inset-0 h-full w-full object-cover"
                 />
                 {/* Finder guidance frame: rounded-rect overlay with corner
@@ -1112,11 +1439,46 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 >
                   {finderStatus}
                 </p>
-                <div className="absolute right-3 top-24 flex gap-2">
+                <div className="absolute right-3 top-24 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center justify-end gap-2">
+                  {cameras.length > 0 && (
+                    <select
+                      data-camera-select
+                      aria-label="Choose camera"
+                      value={selectedDeviceId ?? ''}
+                      onChange={(e) => {
+                        const id = e.target.value === '' ? null : e.target.value;
+                        // Keep the mirror semantics honest when the OS label
+                        // names a side: a picked front lens mirrors the
+                        // preview, a picked back lens never does. Unknown
+                        // labels leave the facing toggle untouched.
+                        const picked = cameras.find((c) => c.deviceId === id);
+                        const lbl = (picked?.label ?? '').toLowerCase();
+                        if (id !== null && /front|user|facetime|selfie/.test(lbl))
+                          setFacing('user');
+                        else if (id !== null && /back|rear|environment/.test(lbl))
+                          setFacing('environment');
+                        chooseCamera(id);
+                      }}
+                      className="inline-flex min-h-[44px] max-w-44 truncate rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                    >
+                      <option value="">Default camera</option>
+                      {cameras.map((c, i) => (
+                        <option key={c.deviceId} value={c.deviceId}>
+                          {cameraDisplayName(c, i)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     type="button"
                     aria-label="Switch camera"
-                    onClick={() => setFacing((f) => (f === 'environment' ? 'user' : 'environment'))}
+                    onClick={() => {
+                      // Quick flip alongside the picker: clears any explicit
+                      // device pick (exact selection would otherwise ignore
+                      // facingMode) so the flip always takes effect.
+                      chooseCamera(null);
+                      setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+                    }}
                     className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
                   >
                     ⇄

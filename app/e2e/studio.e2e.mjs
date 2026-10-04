@@ -1251,6 +1251,36 @@ async function main() {
           Math.abs(viewfinderBefore.videoEdge.bottom) <= 2,
         JSON.stringify(viewfinderBefore),
       );
+      // Orientation honesty (desktop 1280×900 viewport): the video box must
+      // NOT be portrait-forced — no `aspect-[9/16]` class, no 9:16 hook on the
+      // video or its box. The live stream decides the aspect. Missing video
+      // fails honestly (the no-shift gate below is kept as-is).
+      const orientationHonest = await page.evaluate(() => {
+        try {
+          const video = document.querySelector('[data-scanner-root] video');
+          const box = document.querySelector('[data-viewfinder]');
+          if (!video) return null;
+          const videoClass = video.className ?? '';
+          const boxClass = box?.className ?? '';
+          const combined = `${videoClass} ${boxClass}`;
+          return {
+            videoPresent: true,
+            boxPresent: box !== null,
+            forcedAspectOnVideo: /aspect-/.test(videoClass),
+            forced916: /9\s*\/\s*16/.test(combined),
+            classes: combined.slice(0, 200),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner preview is orientation-honest (no portrait-forced 9:16 box, stream decides)',
+        orientationHonest !== null &&
+          orientationHonest.forcedAspectOnVideo === false &&
+          orientationHonest.forced916 === false,
+        JSON.stringify(orientationHonest),
+      );
       // Click in one evaluate, read the flip in a LATER one: React flushes
       // setState after the click returns, so a same-evaluate read always
       // sees the stale value (L-12 family — reads as a dead toggle).
@@ -1302,6 +1332,85 @@ async function main() {
         'scanner mirror toggle flips preview mirroring (aria-pressed)',
         mirrorFlip !== null && mirrorFlip.flipped === true,
         JSON.stringify(mirrorFlip),
+      );
+      // Camera-select contract: native select (aria-label "Choose camera")
+      // listing video inputs; the front/back quick toggle above is kept.
+      // Missing hook fails honestly (never falls back to the toggle).
+      const cameraSelectBefore = await page.evaluate(() => {
+        try {
+          const sel = document.querySelector('[data-camera-select]');
+          if (!sel) return null;
+          return {
+            tag: sel.tagName,
+            label: sel.getAttribute('aria-label') ?? '',
+            options: sel.querySelectorAll('option').length,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner camera select lists video inputs (native select, ≥1 option)',
+        cameraSelectBefore !== null &&
+          cameraSelectBefore.tag === 'SELECT' &&
+          /choose camera/i.test(cameraSelectBefore.label) &&
+          cameraSelectBefore.options >= 1,
+        JSON.stringify(cameraSelectBefore),
+      );
+      // Switching the option keeps the scanner live: no crash, shutter back.
+      // Dispatch in one evaluate, waitForFunction the recovery, measure in a
+      // LATER evaluate (L-12 — device renegotiation is async).
+      let cameraSwitchLive = false;
+      if (cameraSelectBefore !== null && cameraSelectBefore.options >= 1) {
+        await page.evaluate(() => {
+          try {
+            const sel = document.querySelector('[data-camera-select]');
+            if (!sel) return;
+            const opts = sel.querySelectorAll('option');
+            const next =
+              opts.length > 1 ? (sel.selectedIndex + 1) % opts.length : sel.selectedIndex;
+            sel.selectedIndex = next;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                return (
+                  document.querySelector('[data-scanner-root]') !== null &&
+                  document.querySelector('[data-scan-capture]') !== null
+                );
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+          );
+          cameraSwitchLive = true;
+        } catch {
+          cameraSwitchLive = false;
+        }
+      }
+      const cameraSwitchState = await page.evaluate(() => {
+        try {
+          return {
+            root: document.querySelector('[data-scanner-root]') !== null,
+            shutter: document.querySelector('[data-scan-capture]') !== null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner camera switch keeps scanner live (no crash, shutter present)',
+        cameraSwitchLive &&
+          cameraSwitchState !== null &&
+          cameraSwitchState.root &&
+          cameraSwitchState.shutter,
+        JSON.stringify(cameraSwitchState),
       );
       // Capture top bar (Google-style): close + title asserted strictly; flash
       // control probed into details (fake-camera devices may not expose torch,
@@ -2644,22 +2753,40 @@ async function main() {
         JSON.stringify(adjustLabels),
       );
       // Handle visual contract: the handle BUTTON is an intentionally
-      // borderless transparent 44px hit target (Tailwind preflight computes
-      // `solid` on it) — the dotted ring is its first-child visual span.
-      // Asserting on the button would pin the wrong node; the ring span is
-      // the user-visible dotted ring. Missing handle fails honestly.
+      // transparent 44px hit target — the thin single-line solid ring is its
+      // first-child visual span (≤16px). Asserting on the button would pin
+      // the wrong node; the ring span is the user-visible outline. Missing
+      // handle fails honestly.
       const handleRing = await page.evaluate(() => {
         try {
+          const btn = document.querySelector('[data-crop-handle="tl"]');
           const el = document.querySelector('[data-crop-handle="tl"] > span');
-          if (!el) return null;
-          return { borderStyle: getComputedStyle(el).borderStyle };
+          if (!btn || !el) return null;
+          const cs = getComputedStyle(el);
+          const br = btn.getBoundingClientRect();
+          const vr = el.getBoundingClientRect();
+          return {
+            borderStyle: cs.borderStyle,
+            borderWidth: cs.borderWidth,
+            visualW: Math.round(vr.width),
+            visualH: Math.round(vr.height),
+            hitW: Math.round(br.width),
+            hitH: Math.round(br.height),
+          };
         } catch {
           return null;
         }
       });
       check(
-        'scanner corner handles show dotted ring (border-style:dotted)',
-        handleRing !== null && handleRing.borderStyle === 'dotted',
+        'scanner corner handles show thin solid ring (solid ≤2px, visual ≤16px, hitbox ≥44px)',
+        handleRing !== null &&
+          handleRing.borderStyle === 'solid' &&
+          parseFloat(handleRing.borderWidth) > 0 &&
+          parseFloat(handleRing.borderWidth) <= 2 &&
+          handleRing.visualW <= 16 &&
+          handleRing.visualH <= 16 &&
+          handleRing.hitW >= 44 &&
+          handleRing.hitH >= 44,
         JSON.stringify(handleRing),
       );
       // Loupe contract: `[data-loupe]` circular lens with
@@ -3542,6 +3669,31 @@ async function main() {
         deniedHonest = false;
       }
       check('scanner-denied state fails honestly with no camera', deniedHonest);
+      // Denied-state camera select: the hook may list zero real devices on a
+      // flagless browser — assert honestly (present with any option count, no
+      // crash). Missing hook fails honestly, never skipped.
+      const deniedCameraSelect = await denied.page.evaluate(() => {
+        try {
+          const sel = document.querySelector('[data-camera-select]');
+          if (!sel) return null;
+          return {
+            tag: sel.tagName,
+            label: sel.getAttribute('aria-label') ?? '',
+            options: sel.querySelectorAll('option').length,
+            rootPresent: document.querySelector('[data-scanner-root]') !== null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner-denied camera select present (any option count, no crash)',
+        deniedCameraSelect !== null &&
+          deniedCameraSelect.tag === 'SELECT' &&
+          /choose camera/i.test(deniedCameraSelect.label) &&
+          deniedCameraSelect.rootPresent === true,
+        JSON.stringify(deniedCameraSelect),
+      );
       const red = path.join(__dirname, 'fixtures', 'red-wide.png');
       await upload(denied.page, 'input[type="file"]', [red]);
       let deniedUpload = false;
