@@ -289,3 +289,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** (1) Dotted thin handle visuals (proportionate sizing + 44px hits preserved); (2) grab/focus magnifier loupe (circular 2.5x zoom scope with centered crosshair tracking the active corner, clamps onscreen, canvas-absent degrades gracefully); (3) fullscreen edge-to-edge viewfinder (video fills the surface, chrome floats over scrims — no bars by construction; portrait capture constraints unchanged). Folio theme, 44px targets, no fake controls.
 - **Reason.** User phone feedback 2026-10-04.
 - **Status.** D39 wave (loupe-handles/finder/E2E/docs lanes); canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).
+
+## D40 — Auto-accept review + precision tuning (user phone feedback 2026-10-04)
+
+- **Decision.** (1) Per-page Looks-good accept-click DELETED — every queued page auto-accepts its current crop (warped when available, else original); navigation via filmstrip/pager/batch-Next, no accept gate; (2) smaller handle visuals (proportionate dot/ring shrinks, 44px hits preserved); (3) calmer loupe (~1.6x zoom for edge context, ~96px lens, crosshair kept); (4) progress counts VIEWED pages. Folio theme, 44px targets, no fake controls.
+- **Reason.** User phone feedback 2026-10-04.
+- **Status.** D40 wave (review-flow/capture/E2E/docs lanes); canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).

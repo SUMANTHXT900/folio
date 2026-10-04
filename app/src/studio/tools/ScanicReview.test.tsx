@@ -40,7 +40,7 @@ function baseProps(overrides: Partial<ScanicReviewProps> = {}): ScanicReviewProp
     note: null as string | null,
     pageLabel: 'Page 1 of 2',
     progressLabel: '0 of 2 reviewed',
-    onLooksGood: vi.fn(),
+    verdict: 'warped',
     onAdjustApply: vi.fn(),
     onUseOriginal: vi.fn(),
     onDiscard: vi.fn(),
@@ -250,12 +250,15 @@ describe('ScanicReview', () => {
 
   it('Use original swaps the single canvas to the unprocessed photo with an honest chip', () => {
     const props = baseProps();
-    const { container } = render(<ScanicReview {...props} />);
+    const { container, rerender } = render(<ScanicReview {...props} />);
     expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
       'warped.jpg',
     );
+    // The verdict lives in the parent: the click reports, the parent flips
+    // `verdict`, the hero follows. Toggle-back cannot desync (no local copy).
     fireEvent.click(screen.getByRole('button', { name: 'Use original' }));
     expect(props.onUseOriginal).toHaveBeenCalledTimes(1);
+    rerender(<ScanicReview {...props} verdict="original" />);
     const result = container.querySelector('[data-crop-result]');
     expect(result?.querySelectorAll('img').length).toBe(1);
     expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
@@ -263,6 +266,11 @@ describe('ScanicReview', () => {
     );
     expect(screen.getByText('Original photo — unprocessed')).toBeTruthy();
     expect(result?.querySelector('polygon')).toBeNull();
+    rerender(<ScanicReview {...props} verdict="warped" />);
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'warped.jpg',
+    );
+    expect(screen.queryByText('Original photo — unprocessed')).toBeNull();
   });
 
   it('shows a Preparing skeleton while detecting', () => {
@@ -349,15 +357,23 @@ describe('ScanicReview', () => {
     expect(document.querySelector('[data-redetect]')?.hasAttribute('disabled')).toBe(true);
   });
 
-  it('wires the verdict buttons to their callbacks', () => {
+  it('wires the remaining verdict buttons to their callbacks (no Looks-good button)', () => {
     const props = baseProps();
-    render(<ScanicReview {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Looks good' }));
+    const { container } = render(<ScanicReview {...props} />);
+    // Parent auto-accepts: the review card offers no Looks-good button.
+    expect(screen.queryByRole('button', { name: 'Looks good' })).toBeNull();
+    expect(container.textContent).not.toContain('Looks good');
     fireEvent.click(screen.getByRole('button', { name: 'Use original' }));
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
-    expect(props.onLooksGood).toHaveBeenCalledTimes(1);
     expect(props.onUseOriginal).toHaveBeenCalledTimes(1);
     expect(props.onDiscard).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays Looks-good-free inside adjust mode too (Apply is the only primary)', () => {
+    render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    expect(screen.queryByRole('button', { name: 'Looks good' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeTruthy();
   });
 
   it('action bar uses compact icon buttons with sr-only labels (textContent byte-identical)', () => {
@@ -372,9 +388,8 @@ describe('ScanicReview', () => {
       expect(btn.querySelector('svg')).not.toBeNull();
       expect(btn.getAttribute('aria-label')).toBe(label);
     }
-    const primary = screen.getByRole('button', { name: 'Looks good' });
-    expect(primary.textContent).toBe('Looks good');
-    expect(primary.className).toMatch('w-full');
+    // No Looks-good primary: parent auto-accepts.
+    expect(screen.queryByRole('button', { name: 'Looks good' })).toBeNull();
   });
 
   it('positions the overlay strictly inside the object-contain content box (no bar overlap)', () => {
@@ -462,7 +477,7 @@ describe('ScanicReview', () => {
       '[data-crop-handle="tl"] > span',
     ) as unknown as HTMLElement;
     const smallSize = parseFloat(smallDot.style.width);
-    expect(smallSize).toBe(18);
+    expect(smallSize).toBe(14);
     adjust.getBoundingClientRect = () =>
       ({
         left: 0,
@@ -479,7 +494,7 @@ describe('ScanicReview', () => {
       '[data-crop-handle="tl"] > span',
     ) as unknown as HTMLElement;
     const largeSize = parseFloat(largeDot.style.width);
-    expect(largeSize).toBe(28);
+    expect(largeSize).toBe(20);
     expect(largeSize).toBeGreaterThan(smallSize);
     for (const h of Array.from(
       container.querySelectorAll('[data-crop-handle], [data-crop-handle-mid]') ?? [],
@@ -520,6 +535,25 @@ describe('ScanicReview handles + loupe', () => {
     expect(container.querySelector('[data-loupe]')).toBeNull();
   });
 
+  it('handle visuals stay in the compact 14–20px range (44px hit preserved)', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    mockAdjustRect(container);
+    for (const sel of ['[data-crop-handle="tl"] > span', '[data-crop-handle-mid="top"] > span']) {
+      const visual = document.querySelector(sel) as unknown as HTMLElement;
+      const size = parseFloat(visual.style.width);
+      expect(size).toBeGreaterThanOrEqual(14);
+      expect(size).toBeLessThanOrEqual(20);
+      expect(parseFloat(visual.style.height)).toBe(size);
+    }
+    for (const h of Array.from(
+      container.querySelectorAll('[data-crop-handle], [data-crop-handle-mid]') ?? [],
+    )) {
+      expect((h as HTMLElement).className).toMatch('min-h-[44px]');
+      expect((h as HTMLElement).className).toMatch('min-w-[44px]');
+    }
+  });
+
   it('loupe appears on handle pointerdown with crosshair and hides on pointerup', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
@@ -530,9 +564,9 @@ describe('ScanicReview handles + loupe', () => {
     const loupe = container.querySelector('[data-loupe]');
     expect(loupe).not.toBeNull();
     expect(loupe?.querySelector('[data-loupe-crosshair]')).not.toBeNull();
-    // Circular ~120px brass-ring lens.
-    expect((loupe as HTMLElement).style.width).toBe('120px');
-    expect((loupe as HTMLElement).style.height).toBe('120px');
+    // Compact ~96px circular brass-ring lens.
+    expect((loupe as HTMLElement).style.width).toBe('96px');
+    expect((loupe as HTMLElement).style.height).toBe('96px');
     expect((loupe as HTMLElement).className).toMatch('rounded-full');
     fireEvent.pointerUp(tl, { pointerId: 1 });
     expect(container.querySelector('[data-loupe]')).toBeNull();
@@ -550,7 +584,12 @@ describe('ScanicReview handles + loupe', () => {
     expect(container.querySelector('[data-loupe]')).toBeNull();
   });
 
-  it('loupe source rect centers exactly on the active corner (2.5x zoom)', () => {
+  it('loupe uses the calm 1.6x zoom with a 96px lens', () => {
+    expect(LOUPE_ZOOM).toBe(1.6);
+    expect(LOUPE_SIZE).toBe(96);
+  });
+
+  it('loupe source rect centers exactly on the active corner (1.6x zoom)', () => {
     // Interior corner: rect center == corner, size == lens/zoom.
     const r = loupeSourceRect(50, 40, 100, 100);
     expect(r.sw).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);

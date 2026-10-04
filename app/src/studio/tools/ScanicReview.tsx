@@ -27,7 +27,7 @@
  * never full-frame %. Handle hit targets stay 44px (a11y) while the visual
  * dot scales with display size. The quad maps 1:1 to displayed pixels.
  *
- * Compact action bar: primary `Looks good` / `Apply` full-width-ish plus ONE
+ * Compact action bar: primary `Apply` (adjust mode only) plus ONE
  * icon-button row (Adjust / Reset, Re-detect, Use original, Discard). Icons
  * are visible SVGs; each icon button keeps its EXACT text label inside a
  * `<span className="sr-only">` so `textContent` matching (unit + E2E) is
@@ -61,7 +61,13 @@ export interface ScanicReviewProps {
   note: string | null;
   pageLabel: string;
   progressLabel: string;
-  onLooksGood(): void;
+  /**
+   * Parent-owned verdict — the single source of truth for warped-vs-original.
+   * The card never keeps its own copy: it renders from this prop and reports
+   * taps through `onUseOriginal`, so a toggle-back from the parent can never
+   * desync the hero (a local flag would stick on the photo forever).
+   */
+  verdict: 'warped' | 'original';
   onAdjustApply(corners: ScanicCorners): void;
   onUseOriginal(): void;
   onDiscard(): void;
@@ -170,12 +176,12 @@ function clampPoint(x: number, y: number, w: number, h: number): { x: number; y:
   };
 }
 
-export const LOUPE_SIZE = 120;
-export const LOUPE_ZOOM = 2.5;
+export const LOUPE_SIZE = 96;
+export const LOUPE_ZOOM = 1.6;
 const LOUPE_OFFSET = 16;
 
 /**
- * Source rect (natural image pixels) for the 2.5x loupe, centered EXACTLY
+ * Source rect (natural image pixels) for the 1.6x loupe, centered EXACTLY
  * on the active corner. Accuracy contract: rect center == corner position
  * (before edge clamping); clamping only shifts the rect to stay in bounds.
  */
@@ -243,16 +249,15 @@ export default function ScanicReview({
   note,
   pageLabel,
   progressLabel,
-  onLooksGood,
   onAdjustApply,
   onUseOriginal,
   onDiscard,
   onRedetect,
   redetecting,
+  verdict,
 }: ScanicReviewProps) {
   const [adjusting, setAdjusting] = useState(false);
   const [draft, setDraft] = useState<ScanicCorners | null>(null);
-  const [useOriginalView, setUseOriginalView] = useState(false);
   const [frameBox, setFrameBox] = useState<{ w: number; h: number } | null>(null);
   const heroRef = useRef<HTMLDivElement>(null);
   const photoImgRef = useRef<HTMLImageElement>(null);
@@ -274,11 +279,11 @@ export default function ScanicReview({
     snapshot: ScanicCorners;
   } | null>(null);
 
-  // New page = fresh seed: leave no adjust or verdict state behind.
+  // New page = fresh seed: leave no adjust state behind. The warped/original
+  // verdict lives in the parent (`verdict` prop) — never mirrored locally.
   useEffect(() => {
     setAdjusting(false);
     setDraft(null);
-    setUseOriginalView(false);
     setGrabbed(null);
     setFocusedHandle(null);
   }, [photoUrl]);
@@ -353,8 +358,8 @@ export default function ScanicReview({
       ? containContentRect(frameBox.w, frameBox.h, safeW, safeH)
       : null;
   const contentMin = contentRect !== null ? Math.min(contentRect.width, contentRect.height) : 0;
-  // Proportionate visual dot; the 44px hit target is preserved via padding.
-  const handleVisual = Math.min(28, Math.max(18, contentMin * 0.07));
+  // Proportionate visual dot (14–20px); the 44px hit target is preserved via padding.
+  const handleVisual = Math.min(20, Math.max(14, contentMin * 0.07));
 
   const enterAdjust = () => {
     setDraft(cloneCorners(corners ?? fullFrameCorners(safeW, safeH)));
@@ -471,18 +476,17 @@ export default function ScanicReview({
     setGrabbed(null);
     setFocusedHandle(null);
     // A fresh warp follows: the processed result is the hero again.
-    setUseOriginalView(false);
+    // (No local verdict flag to clear — the parent owns the verdict and
+    // re-warps on Apply, so the hero follows the fresh `warpedUrl`.)
   };
 
   const chooseOriginal = () => {
-    setUseOriginalView(true);
     setAdjusting(false);
     setDraft(null);
     onUseOriginal();
   };
 
   const redetect = () => {
-    setUseOriginalView(false);
     onRedetect();
   };
 
@@ -557,7 +561,7 @@ export default function ScanicReview({
     }
   }, [photoUrl]);
 
-  // Paint the 2.5x zoom centered EXACTLY on the active corner. Guards make
+  // Paint the 1.6x zoom centered EXACTLY on the active corner. Guards make
   // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
   useEffect(() => {
     if (loupeImagePoint === null || loupeHandle === null) return;
@@ -902,7 +906,7 @@ export default function ScanicReview({
             >
               Preparing…
             </p>
-          ) : useOriginalView ? (
+          ) : verdict === 'original' ? (
             <>
               <img
                 key="original"
@@ -971,32 +975,13 @@ export default function ScanicReview({
       )}
 
       <div className="space-y-2">
-        {!adjusting ? (
-          <button
-            type="button"
-            disabled={verdictDisabled}
-            onClick={onLooksGood}
-            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-wait disabled:opacity-50 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-          >
-            Looks good
-          </button>
-        ) : (
+        {adjusting && (
           <button
             type="button"
             onClick={applyDraft}
             className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
           >
             Apply
-          </button>
-        )}
-        {adjusting && (
-          <button
-            type="button"
-            disabled={verdictDisabled}
-            onClick={onLooksGood}
-            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-          >
-            Looks good
           </button>
         )}
         <div className="grid grid-cols-4 gap-2" role="group" aria-label="Review actions">

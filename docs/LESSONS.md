@@ -133,3 +133,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** D39 shipped a fullscreen edge-to-edge viewfinder (video fills the surface, chrome floats over scrims — no bars by construction) and a grab/focus magnifier loupe (circular 2.5x zoom scope with centered crosshair tracking the active corner) while handle visuals stayed dotted-thin with 44px hits preserved.
 - **Why it matters.** A viewfinder must fill its surface — any boxed preview reintroduces bars, ratio math, and shift bugs; full-bleed cover plus floating chrome deletes the whole category. And precision handles need a loupe, not bigger dots.
 - **Rule.** Viewfinders fill their surface (full-bleed cover + floating chrome, never a boxed preview); precise adjust gets a loupe, never enlarged dots. Evidence: `docs/DECISIONS.md` D39 (user phone feedback 2026-10-04).
+
+## L-23 — Never gate navigation on acceptance
+
+- **Observation.** D40 deleted the per-page Looks-good accept-click: every queued page auto-accepts its current crop (warped when available, else original) and navigation runs via filmstrip/pager/batch-Next with no accept gate.
+- **Why it matters.** Viewing a fine page IS the verdict; forced accept-clicks tax every page to protect against a discard case users already have.
+- **Rule.** Never gate navigation on acceptance — viewing a fine page IS the verdict. Evidence: `docs/DECISIONS.md` D40 (user phone feedback 2026-10-04).

@@ -33,15 +33,20 @@
  *   `[data-crop-result]` + `[data-crop-result-img]`, handles
  *   `[data-crop-handle="tl|tr|br|bl"]` (role=slider, arrow-key
  *   steppable via scanic's keyboard mode), review CTA `[data-review-cta]`
- *   (`Review N pages` / `View N pages`), progress `[data-review-progress]`
- *   (aria-label `i of N reviewed`), finder `[data-finder-frame]` +
- *   `[data-finder-status]`, mirror `[data-mirror-toggle]` (aria-pressed),
- *   filmstrip `[data-scan-filmstrip]` + `[data-film-thumb]` (numbered, tap
- *   jumps) + `[data-scan-add]` (back to camera), batch bar
- *   `[data-batch-bar]` (`Discard scans` ghost / `Next` primary).
- * - Queue button labels are EXACT: "Looks good", "Adjust corners", "Apply",
- *   "Use original", "Discard", "Reset to auto", "Build PDF",
- *   "Back to camera", "Re-detect".
+ *   (`View N pages` — every queued page is implicitly accepted, no pending),
+ *   progress `[data-review-progress]` (aria-label `i of N viewed`, visited
+ *   count — INTENTIONAL contract change from `reviewed`), pager
+ *   `[data-page-prev]` / `[data-page-next]` (44px, disabled at ends),
+ *   finder `[data-finder-frame]` + `[data-finder-status]`, mirror
+ *   `[data-mirror-toggle]` (aria-pressed), filmstrip `[data-scan-filmstrip]`
+ *   + `[data-film-thumb]` (numbered, tap jumps) + `[data-scan-add]` (back
+ *   to camera), batch bar `[data-batch-bar]` (`Discard scans` ghost /
+ *   `Next` primary, gated on >=1 page).
+ * - Queue button labels are EXACT: "Adjust corners", "Apply",
+ *   "Use original" (toggle warped <-> original), "Discard", "Reset to auto",
+ *   "Build PDF", "Back to camera", "Re-detect", "Previous page",
+ *   "Next page", "Next", "Discard scans". No "Looks good" exists anywhere —
+ *   seeing a fine page is enough to move on (implicit accept).
  *
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
@@ -191,17 +196,14 @@ interface QueueEntry {
   corners: ScanicCorners | null;
   warpedUrl: string | null;
   status: 'detecting' | 'ready';
-  decision: 'pending' | 'warped' | 'original';
+  /**
+   * Render verdict only (no pending — every queued page is implicitly
+   * accepted): `warped` uses the warped PNG when available else the
+   * original; `original` always uses the byte-identical original.
+   * Defaults to `warped` (implicit accept with current crop).
+   */
+  decision: 'warped' | 'original';
   note: string | null;
-}
-
-function fullFrameCorners(w: number, h: number): ScanicCorners {
-  return {
-    topLeft: { x: 0, y: 0 },
-    topRight: { x: w, y: 0 },
-    bottomRight: { x: w, y: h },
-    bottomLeft: { x: 0, y: h },
-  };
 }
 
 /** Loads an <img> for scanic; resolves unloaded on watchdog so jsdom never hangs. */
@@ -268,8 +270,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [redetecting, setRedetecting] = useState(false);
   /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
-  /** Single-flight warp guard (the review child has no busy prop). */
-  const warpingRef = useRef(false);
+  /**
+   * Visited tracking (implicit-accept progress): viewing a page marks it
+   * visited. `visitedTick` forces a rerender when the set grows (refs don't
+   * render by themselves); progress = visited count of remaining pages.
+   */
+  const visitedIdsRef = useRef(new Set<number>());
+  const [, setVisitedTick] = useState(0);
   /**
    * Eager-warp bookkeeping: which corner quad each entry's `warpedUrl` was
    * built for (`lastWarpedQuadRef`), and which quads an eager warp was
@@ -333,13 +340,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (url !== null && objectUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
   }, []);
 
-  /* Queue derived state: discarded entries leave the queue immediately. */
+  /* Queue derived state: discarded entries leave the queue immediately;
+     implicit accept means every remaining page builds (no pending). */
   const queue = entries;
-  const pendingCount = queue.filter((e) => e.decision === 'pending').length;
-  const reviewedCount = queue.length - pendingCount;
-  const accepted = queue.filter((e) => e.decision !== 'pending');
+  const accepted = queue;
   const safeIndex = queue.length === 0 ? 0 : Math.min(reviewIndex, queue.length - 1);
   const current = queue[safeIndex] ?? null;
+  const visitedCount = queue.filter((e) => visitedIdsRef.current.has(e.id)).length;
   // Front-camera preview is mirrored by default (industry standard); the back
   // camera is never mirrored. Captured frames ignore this entirely (see
   // captureFrame: drawImage reads raw pixels, not the CSS transform).
@@ -479,7 +486,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           corners: null,
           warpedUrl: null,
           status: 'detecting' as const,
-          decision: 'pending' as const,
+          decision: 'warped' as const,
           note: null,
         },
       ];
@@ -736,91 +743,32 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     [enqueueCapture],
   );
 
-  /* ---------------- review decisions ---------------- */
+  /* ---------------- review verdicts (implicit accept, toggle only) ---------------- */
 
-  const goToReview = useCallback(
-    (index?: number) => {
-      const firstPending = queue.findIndex((e) => e.decision === 'pending');
-      setReviewIndex(index ?? (firstPending >= 0 ? firstPending : 0));
-      setPhase('review');
-    },
-    [queue],
-  );
-
-  const advanceAfterDecision = useCallback((decidedId: number, nextQueue: QueueEntry[]) => {
-    const remaining = nextQueue.filter((e) => e.decision === 'pending');
-    if (remaining.length === 0) {
-      setPhase(nextQueue.length === 0 ? 'camera' : 'done');
-      return;
-    }
-    const at = nextQueue.findIndex((e) => e.id === decidedId);
-    const after = nextQueue.slice(at + 1).find((e) => e.decision === 'pending');
-    const before = nextQueue.slice(0, at).find((e) => e.decision === 'pending');
-    const target = after ?? before;
-    if (target) setReviewIndex(nextQueue.findIndex((e) => e.id === target.id));
+  const goToReview = useCallback((index?: number) => {
+    setReviewIndex(index ?? 0);
+    setPhase('review');
   }, []);
 
-  const markDecision = useCallback(
-    (id: number, decision: 'warped' | 'original') => {
-      const next = entriesRef.current.map((e) => (e.id === id ? { ...e, decision } : e));
-      entriesRef.current = next;
-      setEntries(next);
-      setTimeout(() => {
-        if (mountedRef.current) advanceAfterDecision(id, next);
-      }, 0);
-    },
-    [advanceAfterDecision],
-  );
-
-  const acceptWarped = useCallback(
-    async (entry: QueueEntry) => {
-      // Single-flight guard: the review child has no busy prop, so a second
-      // Looks-good while the first warp is in flight must not advance past
-      // the next pending page. (Decision check alone is insufficient: the
-      // decision only flips after the warp resolves.)
-      if (warpingRef.current) return;
-      if (entriesRef.current.find((e) => e.id === entry.id)?.decision !== 'pending') return;
-      warpingRef.current = true;
-      setCardError(null);
-      const img = imageElsRef.current.get(entry.id);
-      const corners =
-        entry.corners ??
-        (entry.imageWidth > 0 ? fullFrameCorners(entry.imageWidth, entry.imageHeight) : null);
-      if (!img || !corners) {
-        warpingRef.current = false;
-        setCardError('Warp needs the decoded image — use the original instead.');
-        return;
-      }
-      try {
-        const result = await extractDocument(img, corners, { output: 'canvas' });
-        const canvas = result.output as HTMLCanvasElement | null;
-        if (!canvas) throw new Error('no canvas');
-        const blob = await canvasToPng(canvas);
-        if (!blob) throw new Error('no png');
-        if (!mountedRef.current) return;
-        warpedBlobsRef.current.set(entry.id, blob);
-        revokeUrl(entry.warpedUrl);
-        const url = trackUrl(URL.createObjectURL(blob));
-        lastWarpedQuadRef.current.set(entry.id, JSON.stringify(corners));
-        setEntries((prev) => prev.map((e) => (e.id === entry.id ? { ...e, warpedUrl: url } : e)));
-        markDecision(entry.id, 'warped');
-      } catch {
-        if (mountedRef.current)
-          setCardError(
-            'Warp failed on this page — nothing was committed. Use the original instead.',
-          );
-      } finally {
-        warpingRef.current = false;
-      }
-    },
-    [markDecision, revokeUrl, trackUrl],
-  );
+  /**
+   * `Use original` toggle: flips the current page's render verdict between
+   * warped (implicit accept, warped PNG when available else original) and
+   * original (byte-identical). Stays on the same page — no auto-advance.
+   * StrictMode-safe: pure ref map + setEntries, no updater side effects.
+   */
+  const toggleVerdict = useCallback((id: number) => {
+    const next: QueueEntry[] = entriesRef.current.map((e) =>
+      e.id === id ? { ...e, decision: e.decision === 'original' ? 'warped' : 'original' } : e,
+    );
+    entriesRef.current = next;
+    setEntries(next);
+  }, []);
 
   /**
-   * Re-warp after an adjust Apply (or any corner change): same warp as
-   * acceptWarped but commits NO decision — the fresh `warpedUrl` re-renders
-   * the overlay outline + result preview reactively. Decisions stay pending
-   * so Looks-good / Use-original still apply afterwards.
+   * Re-warp after an adjust Apply (or any corner change): the fresh
+   * `warpedUrl` re-renders the result preview reactively. The verdict stays
+   * untouched (warped renders the fresh crop, original keeps the photo) —
+   * no navigation, no decision change.
    */
   const rewrapEntry = useCallback(
     async (id: number, corners: ScanicCorners) => {
@@ -860,6 +808,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         imageElsRef.current.delete(id);
         lastWarpedQuadRef.current.delete(id);
         eagerAttemptRef.current.delete(id);
+        visitedIdsRef.current.delete(id);
       }
       const next = entriesRef.current.filter((e) => e.id !== id);
       entriesRef.current = next;
@@ -874,9 +823,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
 
   /**
-   * Discard-all from the review batch bar: drops EVERYTHING (pending and
-   * accepted alike) back to the camera, confirm-free. Revokes every queued
-   * URL so no blob leaks.
+   * Discard-all from the review batch bar: drops EVERYTHING back to the
+   * camera, confirm-free. Revokes every queued URL so no blob leaks.
    */
   const discardAll = useCallback(() => {
     for (const entry of entriesRef.current) {
@@ -887,6 +835,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     }
     lastWarpedQuadRef.current.clear();
     eagerAttemptRef.current.clear();
+    visitedIdsRef.current.clear();
     entriesRef.current = [];
     setEntries([]);
     setReviewIndex(0);
@@ -895,17 +844,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   /**
    * EAGER warp: the review single canvas needs a `warpedUrl` the moment a
-   * pending page has corners. When the review shows a pending, ready page
-   * with corners whose quad has no warp yet, re-warp immediately via the
-   * decision-free `rewrapEntry` core — no decision change, ML-first /
-   * null-fallback / commit paths untouched. Loop guard: one attempt per
-   * (entry, quad); skip when the current `warpedUrl` was already built for
-   * these exact corners.
+   * page has corners. When the review shows a ready page with corners whose
+   * quad has no warp yet, re-warp immediately via the verdict-free
+   * `rewrapEntry` core — no verdict change, ML-first / null-fallback /
+   * commit paths untouched. Loop guard: one attempt per (entry, quad); skip
+   * when the current `warpedUrl` was already built for these exact corners.
+   * Runs for both verdicts so toggling back to warped is instant.
    */
   const eagerCornersKey = current?.corners ? JSON.stringify(current.corners) : null;
   useEffect(() => {
     if (phase !== 'review' || current === null || eagerCornersKey === null) return;
-    if (current.decision !== 'pending' || current.status !== 'ready') return;
+    if (current.status !== 'ready') return;
     if (current.corners === null) return;
     if (lastWarpedQuadRef.current.get(current.id) === eagerCornersKey) return;
     if (eagerAttemptRef.current.get(current.id) === eagerCornersKey) return;
@@ -913,14 +862,28 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     void rewrapEntry(current.id, current.corners);
   }, [phase, current, eagerCornersKey, rewrapEntry]);
 
+  /**
+   * Visited marking: viewing a page (reviewIndex change incl. filmstrip tap,
+   * pager buttons, and the initial show) marks it visited. Idempotent under
+   * StrictMode double-effects (Set add is a no-op the second time, no tick).
+   */
+  const currentId = current?.id ?? null;
+  useEffect(() => {
+    if (phase !== 'review' || currentId === null) return;
+    if (visitedIdsRef.current.has(currentId)) return;
+    visitedIdsRef.current.add(currentId);
+    setVisitedTick((t) => t + 1);
+  }, [phase, currentId, safeIndex]);
+
   const buildPdf = useCallback(() => {
     const pages: ScanicCommittedPage[] = accepted.map((entry, i) => {
       const name = formatScanName(startIndex + i);
-      if (entry.decision === 'warped') {
+      if (entry.decision !== 'original') {
         const blob = warpedBlobsRef.current.get(entry.id);
         if (blob) return { file: new File([blob], name, { type: 'image/png' }), name };
       }
-      // "Use original": the queued File, byte-identical — renamed, never re-encoded.
+      // Verdict `original`, or warped verdict with no warp yet: the queued
+      // File, byte-identical — renamed, never re-encoded.
       return {
         file: new File([entry.original], name, {
           type: entry.original.type || 'image/jpeg',
@@ -1001,7 +964,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           key={entry.id}
           type="button"
           onClick={() => goToReview(i)}
-          aria-label={`Review page ${i + 1}${entry.decision !== 'pending' ? ` (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})` : ''}`}
+          aria-label={`Review page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
           className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
             current?.id === entry.id && phase === 'review'
               ? 'border-brass-400'
@@ -1020,18 +983,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               …
             </span>
           )}
-          {entry.decision !== 'pending' && (
-            <span className="absolute inset-x-0 bottom-0 bg-forest-500/90 py-0.5 text-center text-[9px] font-semibold text-white">
-              ✓
-            </span>
-          )}
         </button>
       ))
     );
 
   // Review phase: the single-page card is owned by `./ScanicReview` (props
-  // below stay EXACT); the filmstrip + batch bar underneath are owned here
-  // because the review component renders the card only (never duplicates).
+  // below stay EXACT minus the removed Looks-good reliance); the pager +
+  // filmstrip + batch bar underneath are owned here because the review
+  // component renders the card only (never duplicates).
   const content = (
     <div
       data-scanner-root
@@ -1335,9 +1294,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                       onClick={() => goToReview()}
                       className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-paper-50 px-5 py-2.5 text-sm font-medium text-ink-900 transition-colors hover:bg-paper-200"
                     >
-                      {pendingCount > 0
-                        ? `Review ${pendingCount} pages`
-                        : `View ${queue.length} pages`}
+                      {`View ${queue.length} pages`}
                     </button>
                   )}
                 </div>
@@ -1354,6 +1311,29 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               {cardError}
             </p>
           )}
+          {/* Pager beside the hero: prev/next page without any accept click. */}
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              data-page-prev
+              aria-label="Go to previous page"
+              disabled={safeIndex <= 0}
+              onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            >
+              Previous page
+            </button>
+            <button
+              type="button"
+              data-page-next
+              aria-label="Go to next page"
+              disabled={safeIndex >= queue.length - 1}
+              onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            >
+              Next page
+            </button>
+          </div>
           <ScanicReview
             key={current.id}
             photoUrl={current.photoUrl}
@@ -1364,13 +1344,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             detecting={current.status === 'detecting'}
             note={current.note}
             pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
-            progressLabel={`${reviewedCount} of ${queue.length} reviewed`}
-            onLooksGood={() => void acceptWarped(current)}
+            progressLabel={`${visitedCount} of ${queue.length} viewed`}
             onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
-            onUseOriginal={() => markDecision(current.id, 'original')}
+            onUseOriginal={() => toggleVerdict(current.id)}
             onDiscard={() => discardEntry(current.id)}
             onRedetect={() => void redetectEntry(current)}
             redetecting={redetecting}
+            verdict={current.decision}
           />
           {/* Review filmstrip (owned here — ScanicReview renders the single
               card only): numbered thumbs jump to a page, + returns to camera. */}
@@ -1384,7 +1364,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 key={entry.id}
                 type="button"
                 data-film-thumb
-                aria-label={`Go to page ${i + 1}${entry.decision !== 'pending' ? ` (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})` : ''}`}
+                aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
                 aria-current={i === safeIndex}
                 onClick={() => setReviewIndex(i)}
                 className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
@@ -1413,7 +1393,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               + Add
             </button>
           </div>
-          {/* Batch bar: discard-all (confirm-free, everything) vs Next. */}
+          {/* Batch bar: discard-all (confirm-free, everything) vs Next.
+              Next needs >=1 page (implicit accept — no per-page gate). */}
           <div
             data-batch-bar
             className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
@@ -1427,7 +1408,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </button>
             <button
               type="button"
-              disabled={accepted.length === 0}
+              disabled={queue.length === 0}
               onClick={() => setPhase('done')}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >
@@ -1444,10 +1425,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           </p>
           <p
             data-review-progress
-            aria-label={`${accepted.length} of ${accepted.length} reviewed`}
+            aria-label={`${visitedCount} of ${accepted.length} viewed`}
             className="text-xs text-ink-400 dark:text-ink-300"
           >
-            {accepted.length} of {accepted.length} reviewed
+            {visitedCount} of {accepted.length} viewed
           </p>
           <div className="flex flex-wrap justify-center gap-2">
             <button

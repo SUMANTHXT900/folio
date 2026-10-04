@@ -1635,7 +1635,11 @@ async function main() {
           return null;
         }
       });
-      check('scanner Review CTA reads Review N pages', ctaText === 'Review 2 pages', ctaText);
+      check(
+        'scanner Review CTA reads View N pages (auto-accept: nothing to approve)',
+        ctaText === 'View 2 pages',
+        ctaText,
+      );
       await page.evaluate(() => {
         try {
           document.querySelector('[data-review-cta]')?.click();
@@ -1943,7 +1947,7 @@ async function main() {
         resultFirst !== null && resultFirst.naturalWidth > 0,
         JSON.stringify(resultFirst),
       );
-      const touchBefore = await page.evaluate(() => {
+      const touchReview = await page.evaluate(() => {
         try {
           const box = (label) => {
             const btn = [...document.querySelectorAll('button')].find(
@@ -1953,36 +1957,63 @@ async function main() {
             const r = btn.getBoundingClientRect();
             return { w: Math.round(r.width), h: Math.round(r.height) };
           };
-          return { looksGood: box('Looks good'), adjust: box('Adjust corners') };
+          const bar = document.querySelector('[data-batch-bar]');
+          const nextBtn =
+            [...(bar?.querySelectorAll('button') ?? [])].find(
+              (b) => b.textContent?.trim() === 'Next',
+            ) ?? null;
+          const nr = nextBtn?.getBoundingClientRect() ?? null;
+          return {
+            adjust: box('Adjust corners'),
+            batchNext: nr === null ? null : { w: Math.round(nr.width), h: Math.round(nr.height) },
+          };
         } catch {
           return null;
         }
       });
       check(
-        'scanner touch targets meet 44px (Looks-good/Adjust)',
-        touchBefore !== null &&
-          touchBefore.looksGood !== null &&
-          touchBefore.adjust !== null &&
-          touchBefore.looksGood.w >= 44 &&
-          touchBefore.looksGood.h >= 44 &&
-          touchBefore.adjust.w >= 44 &&
-          touchBefore.adjust.h >= 44,
-        JSON.stringify(touchBefore),
+        'scanner touch targets meet 44px (Adjust/Next)',
+        touchReview !== null &&
+          touchReview.adjust !== null &&
+          touchReview.batchNext !== null &&
+          touchReview.adjust.w >= 44 &&
+          touchReview.adjust.h >= 44 &&
+          touchReview.batchNext.w >= 44 &&
+          touchReview.batchNext.h >= 44,
+        JSON.stringify(touchReview),
       );
-      // Review action-bar contract: primary Looks-good + icon row whose
-      // textContent still carries the EXACT labels (sr-only spans) so every
-      // existing label query keeps working unchanged.
+      // Per-page accept is deleted: every page auto-accepts its current crop.
+      // Any surviving Looks-good button fails honestly here (never clicked).
+      const noAccept = await page.evaluate(() => {
+        try {
+          const matches = [...document.querySelectorAll('button')].filter((b) =>
+            /looks good/i.test(b.textContent ?? ''),
+          );
+          return {
+            count: matches.length,
+            visible: matches.map((b) => {
+              const r = b.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            }),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner review has no per-page accept button (Looks-good removed)',
+        noAccept !== null && noAccept.count === 0,
+        JSON.stringify(noAccept),
+      );
+      // Review action-bar contract (accept-free): the icon row keeps its EXACT
+      // labels (sr-only spans) so every surviving label query works unchanged.
       const actionBar = await page.evaluate(() => {
         try {
           const btns = [...document.querySelectorAll('button')];
           const texts = btns.map((b) => b.textContent ?? '');
           const has = (label) => texts.some((t) => t.includes(label));
-          const looks = btns.find((b) => (b.textContent ?? '').includes('Looks good'));
-          const r = looks?.getBoundingClientRect() ?? null;
           return {
             hasLooksGood: has('Looks good'),
-            looksVisible: r !== null && r.width > 0 && r.height > 0,
-            looksEnabled: looks ? !looks.disabled : false,
             hasRedetect: has('Re-detect'),
             hasDiscard: has('Discard'),
             hasAdjust: has('Adjust'),
@@ -1993,58 +2024,271 @@ async function main() {
         }
       });
       check(
-        'scanner review action bar shows Looks-good primary + icon labels (Re-detect/Discard/Adjust/Use-original)',
+        'scanner review action bar keeps icon labels (Adjust/Re-detect/Use-original/Discard, no Looks-good)',
         actionBar !== null &&
-          actionBar.hasLooksGood &&
-          actionBar.looksVisible &&
-          actionBar.looksEnabled &&
+          actionBar.hasLooksGood === false &&
           actionBar.hasRedetect &&
           actionBar.hasDiscard &&
           actionBar.hasAdjust &&
           actionBar.hasUseOriginal,
         JSON.stringify(actionBar),
       );
-      await page.evaluate(() => {
+      // Pager contract: `[data-page-prev]` / `[data-page-next]` step pages,
+      // disabled at the ends. Missing hooks fail honestly (never fall back to
+      // text queries or accept-clicks).
+      const pagerEnds = await page.evaluate(() => {
         try {
-          [...document.querySelectorAll('button')]
-            .find((b) => b.textContent === 'Looks good')
-            ?.click();
-        } catch {
-          /* noop */
-        }
-      });
-      let progressed = false;
-      try {
-        await page.waitForFunction(
-          () => {
-            try {
-              const p = document.querySelector('[data-review-progress]');
-              if (!p) return false;
-              const label = p.getAttribute('aria-label') ?? p.textContent ?? '';
-              return /1 of 2 reviewed/.test(label);
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 30000 },
-        );
-        progressed = true;
-      } catch {
-        progressed = false;
-      }
-      const progressState = await page.evaluate(() => {
-        try {
-          const p = document.querySelector('[data-review-progress]');
-          if (!p) return null;
-          return { label: p.getAttribute('aria-label') ?? p.textContent ?? '' };
+          const prev = document.querySelector('[data-page-prev]');
+          const next = document.querySelector('[data-page-next]');
+          if (!prev || !next) return { prevPresent: prev !== null, nextPresent: next !== null };
+          return {
+            prevPresent: true,
+            nextPresent: true,
+            prevDisabled: prev.disabled === true,
+            nextDisabled: next.disabled === true,
+          };
         } catch {
           return null;
         }
       });
       check(
-        'scanner Looks-good advances + progress 1 of 2 reviewed',
-        progressed && progressState !== null && /1 of 2 reviewed/.test(progressState.label),
-        JSON.stringify(progressState),
+        'scanner pager offers prev/next (prev disabled on first page)',
+        pagerEnds !== null &&
+          pagerEnds.prevPresent === true &&
+          pagerEnds.nextPresent === true &&
+          pagerEnds.prevDisabled === true &&
+          pagerEnds.nextDisabled === false,
+        JSON.stringify(pagerEnds),
+      );
+      // AUTO-ACCEPT CORE: navigation (never an accept click) advances pages.
+      // Read the hero src + progress on page 1 first (L-12: measure in a
+      // later evaluate, never synchronously after a dispatch).
+      const heroSrcPage1 = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
+      const progressEntry = await page.evaluate(() => {
+        try {
+          const p = document.querySelector('[data-review-progress]');
+          if (!p) return null;
+          return p.getAttribute('aria-label') ?? p.textContent ?? '';
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner review progress counts viewed pages (1 of 2 viewed on entry)',
+        progressEntry !== null && /1 of 2 viewed/.test(progressEntry),
+        JSON.stringify(progressEntry),
+      );
+      // Filmstrip tap to page 2: the hero src must swap and progress must
+      // increment to 2 of 2 viewed — with zero accept clicks anywhere.
+      await page.evaluate(() => {
+        try {
+          document.querySelectorAll('[data-film-thumb]')[1]?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let filmAdvanced = false;
+      try {
+        await page.waitForFunction(
+          (before) => {
+            try {
+              const img = document.querySelector('[data-crop-result-img]');
+              const src = img ? img.getAttribute('src') : null;
+              const p = document.querySelector('[data-review-progress]');
+              const label = p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : '';
+              return (
+                typeof src === 'string' &&
+                src.length > 0 &&
+                src !== before &&
+                /2 of 2 viewed/.test(label)
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          heroSrcPage1,
+        );
+        filmAdvanced = true;
+      } catch {
+        filmAdvanced = false;
+      }
+      const filmAdvancedState = await page.evaluate((before) => {
+        try {
+          const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+          const p = document.querySelector('[data-review-progress]');
+          return {
+            srcLen: src?.length ?? 0,
+            swapped: typeof src === 'string' && src.length > 0 && src !== before,
+            label: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
+          };
+        } catch {
+          return null;
+        }
+      }, heroSrcPage1);
+      check(
+        'scanner filmstrip tap advances page (hero src swaps, progress 1→2 of 2 viewed, zero accept clicks)',
+        filmAdvanced &&
+          filmAdvancedState !== null &&
+          filmAdvancedState.swapped === true &&
+          filmAdvancedState.label !== null &&
+          /2 of 2 viewed/.test(filmAdvancedState.label),
+        JSON.stringify(filmAdvancedState),
+      );
+      // Pager round-step from page 2: prev back to page 1 (hero swaps back;
+      // visited is STICKY, so the label stays "2 of 2 viewed" — going back to
+      // an already-viewed page must not un-view anything). Ends stay
+      // disabled on their own side.
+      const heroSrcPage2 = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-page-prev]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let pagerBack = false;
+      try {
+        await page.waitForFunction(
+          (before) => {
+            try {
+              const img = document.querySelector('[data-crop-result-img]');
+              const src = img ? img.getAttribute('src') : null;
+              const p = document.querySelector('[data-review-progress]');
+              const label = p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : '';
+              return (
+                typeof src === 'string' &&
+                src.length > 0 &&
+                src !== before &&
+                /2 of 2 viewed/.test(label)
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          heroSrcPage2,
+        );
+        pagerBack = true;
+      } catch {
+        pagerBack = false;
+      }
+      const pagerBackState = await page.evaluate(() => {
+        try {
+          const prev = document.querySelector('[data-page-prev]');
+          const next = document.querySelector('[data-page-next]');
+          const p = document.querySelector('[data-review-progress]');
+          return {
+            prevDisabled: prev ? prev.disabled === true : null,
+            nextDisabled: next ? next.disabled === true : null,
+            label: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner pager prev steps back to page 1 (hero swaps, stays 2 of 2 viewed, prev disabled at start)',
+        pagerBack &&
+          pagerBackState !== null &&
+          pagerBackState.label !== null &&
+          /2 of 2 viewed/.test(pagerBackState.label) &&
+          pagerBackState.prevDisabled === true &&
+          pagerBackState.nextDisabled === false,
+        JSON.stringify(pagerBackState),
+      );
+      const heroSrcBack1 = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-page-next]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let pagerFwd = false;
+      try {
+        await page.waitForFunction(
+          (before) => {
+            try {
+              const img = document.querySelector('[data-crop-result-img]');
+              const src = img ? img.getAttribute('src') : null;
+              const p = document.querySelector('[data-review-progress]');
+              const label = p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : '';
+              return (
+                typeof src === 'string' &&
+                src.length > 0 &&
+                src !== before &&
+                /2 of 2 viewed/.test(label)
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          heroSrcBack1,
+        );
+        pagerFwd = true;
+      } catch {
+        pagerFwd = false;
+      }
+      const pagerFwdState = await page.evaluate(() => {
+        try {
+          const next = document.querySelector('[data-page-next]');
+          const p = document.querySelector('[data-review-progress]');
+          return {
+            nextDisabled: next ? next.disabled === true : null,
+            label: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner pager next steps forward to page 2 (hero swaps, 2 of 2 viewed, next disabled at end)',
+        pagerFwd &&
+          pagerFwdState !== null &&
+          pagerFwdState.label !== null &&
+          /2 of 2 viewed/.test(pagerFwdState.label) &&
+          pagerFwdState.nextDisabled === true,
+        JSON.stringify(pagerFwdState),
+      );
+      // Batch Next needs zero accepts: every page auto-accepts its crop, so
+      // Next is already enabled before anything is ever clicked.
+      const batchNextArmed = await page.evaluate(() => {
+        try {
+          const bar = document.querySelector('[data-batch-bar]');
+          const b =
+            [...(bar?.querySelectorAll('button') ?? [])].find(
+              (x) => x.textContent?.trim() === 'Next',
+            ) ?? null;
+          if (!b) return null;
+          return { present: true, disabled: b.disabled };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner batch Next is enabled with zero accept clicks (auto-accept)',
+        batchNextArmed !== null && batchNextArmed.disabled === false,
+        JSON.stringify(batchNextArmed),
       );
       // Destructive batch action now (fresh queue re-captured below) so the
       // surviving adjust/Apply/reactive/Build-PDF flow keeps its 2-page shape.
@@ -2920,94 +3164,204 @@ async function main() {
         touchEnd !== null && typeof touchEnd === 'object' && touchEnd.w >= 44 && touchEnd.h >= 44,
         JSON.stringify(touchEnd),
       );
-      // Finish-one-early path: with ≥1 accepted, Next must reach the same done
-      // screen. Fresh queues (post-Discard recapture) hold 0 accepted here, so
-      // accept the current page first; kept queues already read 1 of 2.
-      const progressBeforeNext = await page.evaluate(() => {
-        try {
-          const p = document.querySelector('[data-review-progress]');
-          if (!p) return null;
-          return p.getAttribute('aria-label') ?? p.textContent ?? '';
-        } catch {
-          return null;
-        }
-      });
-      if (progressBeforeNext !== null && /^0 of 2\b/.test(progressBeforeNext)) {
-        await page.evaluate(() => {
+      // Use-original is a toggle (not a one-way accept): the single hero
+      // swaps warped→photo and back, with no navigation and no commit.
+      // Click in one evaluate, waitForFunction the post-condition, measure
+      // in a LATER evaluate (L-12 — React-flush timing).
+      const clickUseOriginal = () =>
+        page.evaluate(() => {
           try {
             [...document.querySelectorAll('button')]
-              .find((b) => b.textContent === 'Looks good')
+              .find((b) => (b.textContent ?? '').includes('Use original'))
               ?.click();
           } catch {
             /* noop */
           }
         });
-        try {
-          await page.waitForFunction(
-            () => {
-              try {
-                const p = document.querySelector('[data-review-progress]');
-                if (!p) return false;
-                const label = p.getAttribute('aria-label') ?? p.textContent ?? '';
-                return /1 of 2 reviewed/.test(label);
-              } catch {
-                return false;
-              }
-            },
-            { timeout: 60000 },
-          );
-        } catch {
-          /* measured at the done screen below */
-        }
-      }
-      await page.evaluate(() => {
-        try {
-          const bar = document.querySelector('[data-batch-bar]');
-          const inBar = [...(bar?.querySelectorAll('button') ?? [])].find(
-            (b) => b.textContent?.trim() === 'Next',
-          );
-          const fallback = [...document.querySelectorAll('button')].find(
-            (b) => b.textContent?.trim() === 'Next',
-          );
-          (inBar ?? fallback)?.click();
-        } catch {
-          /* noop */
-        }
-      });
-      let nextDone = false;
+      const readHero = () =>
+        page.evaluate(() => {
+          try {
+            const img = document.querySelector('[data-crop-result-img]');
+            const result = document.querySelector('[data-crop-result]');
+            return {
+              src: img?.getAttribute('src') ?? null,
+              alt: img?.getAttribute('alt') ?? null,
+              chip: result?.textContent ?? null,
+            };
+          } catch {
+            return null;
+          }
+        });
+      const toggleBase = await readHero();
+      await clickUseOriginal();
+      let toggledToPhoto = false;
       try {
         await page.waitForFunction(
-          () => {
+          (before) => {
             try {
-              const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
-              return labels.includes('Build PDF') && labels.includes('Back to camera');
+              const img = document.querySelector('[data-crop-result-img]');
+              if (!img) return false;
+              const src = img.getAttribute('src');
+              const alt = img.getAttribute('alt') ?? '';
+              const chip = document.querySelector('[data-crop-result]')?.textContent ?? '';
+              return (
+                typeof src === 'string' &&
+                src.length > 0 &&
+                src !== before &&
+                (/original/i.test(alt) || /unprocessed/i.test(chip))
+              );
             } catch {
               return false;
             }
           },
           { timeout: 30000 },
+          toggleBase?.src ?? null,
         );
-        nextDone = true;
+        toggledToPhoto = true;
       } catch {
-        nextDone = false;
+        toggledToPhoto = false;
       }
+      const togglePhoto = await readHero();
+      const photoSrc = togglePhoto?.src ?? null;
+      await clickUseOriginal();
+      let toggledBack = false;
+      try {
+        await page.waitForFunction(
+          (photo) => {
+            try {
+              const img = document.querySelector('[data-crop-result-img]');
+              if (!img) return false;
+              const src = img.getAttribute('src');
+              const alt = img.getAttribute('alt') ?? '';
+              return (
+                typeof src === 'string' && src.length > 0 && src !== photo && /auto-crop/i.test(alt)
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          photoSrc,
+        );
+        toggledBack = true;
+      } catch {
+        toggledBack = false;
+      }
+      const toggleRestored = await readHero();
+      check(
+        'scanner Use-original toggles hero warped↔photo and back (no navigation)',
+        toggledToPhoto &&
+          toggledBack &&
+          toggleBase !== null &&
+          togglePhoto !== null &&
+          toggleRestored !== null &&
+          typeof toggleBase.src === 'string' &&
+          toggleBase.src.length > 0 &&
+          typeof photoSrc === 'string' &&
+          photoSrc.length > 0 &&
+          photoSrc !== toggleBase.src &&
+          typeof toggleRestored.src === 'string' &&
+          toggleRestored.src !== photoSrc &&
+          /auto-crop/i.test(toggleRestored.alt ?? ''),
+        JSON.stringify({ base: toggleBase, photo: togglePhoto, restored: toggleRestored }),
+      );
+      // Post-recapture all-viewed sweep: tap filmstrip thumb 2 so every page
+      // counts viewed before Next (Next may gate on all-viewed; harmless
+      // otherwise). Dispatch, waitForFunction, then measure (L-12).
+      const sweepBase = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
+      await page.evaluate(() => {
+        try {
+          document.querySelectorAll('[data-film-thumb]')[1]?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          (before) => {
+            try {
+              const img = document.querySelector('[data-crop-result-img]');
+              const src = img ? img.getAttribute('src') : null;
+              return typeof src === 'string' && src.length > 0 && src !== before;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          sweepBase,
+        );
+      } catch {
+        /* measured at the done screen below */
+      }
+      // Batch Next → done with zero accept clicks: auto-accept already holds
+      // every page, so Next is armed from the start.
+      const clickBatchNext = () =>
+        page.evaluate(() => {
+          try {
+            const bar = document.querySelector('[data-batch-bar]');
+            const inBar = [...(bar?.querySelectorAll('button') ?? [])].find(
+              (b) => b.textContent?.trim() === 'Next',
+            );
+            const fallback = [...document.querySelectorAll('button')].find(
+              (b) => b.textContent?.trim() === 'Next',
+            );
+            (inBar ?? fallback)?.click();
+          } catch {
+            /* noop */
+          }
+        });
+      const waitDone = async (timeoutMs = 30000) => {
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+                return labels.includes('Build PDF') && labels.includes('Back to camera');
+              } catch {
+                return false;
+              }
+            },
+            { timeout: timeoutMs },
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      await clickBatchNext();
+      const nextDone = await waitDone();
       const nextState = await page.evaluate(() => {
         try {
           const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+          const p = document.querySelector('[data-review-progress]');
           return {
             doneVisible: labels.includes('Build PDF') && labels.includes('Back to camera'),
+            progress: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner Next reaches done screen with ≥1 accepted',
+        'scanner batch Next reaches done screen with zero accept clicks',
         nextDone && nextState !== null && nextState.doneVisible,
-        JSON.stringify({ progressBeforeNext, nextState }),
+        JSON.stringify(nextState),
       );
-      // Return to the pending page for the surviving accept-all flow (skipped
-      // when Next never left review — the flow is already positioned there).
+      check(
+        'scanner done screen progress reads 2 of 2 viewed',
+        nextState !== null &&
+          typeof nextState.progress === 'string' &&
+          /2 of 2 viewed/.test(nextState.progress),
+        JSON.stringify(nextState),
+      );
+      // Done → camera → review round-trip (Back to camera + review CTA),
+      // then Next → done again for the surviving Build-PDF flow.
       if (nextDone) {
         await page.evaluate(() => {
           try {
@@ -3039,6 +3393,7 @@ async function main() {
             /* noop */
           }
         });
+        let roundTripped = false;
         try {
           await page.waitForFunction(
             () => {
@@ -3051,37 +3406,31 @@ async function main() {
             { timeout: 30000 },
           );
           await waitForResultImg(page);
+          roundTripped = true;
         } catch {
-          /* the surviving Looks-good wait measures */
+          roundTripped = false;
         }
-      }
-      await page.evaluate(() => {
-        try {
-          [...document.querySelectorAll('button')]
-            .find((b) => b.textContent === 'Looks good')
-            ?.click();
-        } catch {
-          /* noop */
-        }
-      });
-      let endScreen = false;
-      try {
-        await page.waitForFunction(
-          () => {
-            try {
-              const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
-              return labels.includes('Build PDF') && labels.includes('Back to camera');
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 30000 },
+        const roundTripState = await page.evaluate((reached) => {
+          try {
+            return {
+              cameraLeft: reached,
+              backInReview:
+                document.querySelector('[data-scan-queue]') !== null &&
+                document.querySelector('[data-crop-result-img]') !== null,
+            };
+          } catch {
+            return null;
+          }
+        }, roundTripped);
+        check(
+          'scanner done Back-to-camera returns via review CTA (round-trip)',
+          roundTripState !== null && roundTripState.backInReview,
+          JSON.stringify(roundTripState),
         );
-        endScreen = true;
-      } catch {
-        endScreen = false;
+        await clickBatchNext();
+        const redone = await waitDone();
+        check('scanner batch Next returns to done after round-trip', redone);
       }
-      check('scanner end screen offers Build PDF + Back to camera', endScreen);
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')]

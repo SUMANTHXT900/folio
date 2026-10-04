@@ -431,7 +431,8 @@ describe('result-FIRST queue', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
     const cta = await findQ('[data-review-cta]');
-    expect(cta.textContent).toBe('Review 2 pages');
+    // Implicit accept: no pending, the CTA always offers the full queue.
+    expect(cta.textContent).toBe('View 2 pages');
     fireEvent.click(cta);
     expect(await findQ('[data-scan-queue]')).toBeTruthy();
     expect(screen.getByText('Page 1 of 2')).toBeTruthy();
@@ -441,13 +442,22 @@ describe('result-FIRST queue', () => {
     const result = q('[data-crop-result]');
     expect(result.querySelectorAll('img').length).toBe(1);
     expect(document.querySelector('[data-detect-overlay]')).toBeNull();
-    for (const label of ['Looks good', 'Use original', 'Adjust corners', 'Discard', 'Re-detect']) {
+    // No accept click exists anywhere.
+    expect(screen.queryByText('Looks good', { exact: true })).toBeNull();
+    for (const label of ['Use original', 'Adjust corners', 'Discard', 'Re-detect']) {
       expect(screen.getByText(label, { exact: true })).toBeTruthy();
     }
-    expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('0 of 2 reviewed');
+    // Pager beside the hero (prev disabled on the first page).
+    expect(q('[data-page-prev]')).toBeTruthy();
+    expect(q('[data-page-next]')).toBeTruthy();
+    expect((q('[data-page-prev]') as HTMLButtonElement).disabled).toBe(true);
+    // Implicit accept: the first show already marks page 1 visited.
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 2 viewed');
+    });
   });
 
-  it('commits warped PNGs in capture order, then offers Build PDF / Back to camera', async () => {
+  it('builds all remaining pages in order with no accept click', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['png-bytes'], { type: 'image/png' }));
     };
@@ -456,14 +466,20 @@ describe('result-FIRST queue', () => {
     render(<ScanicCapture onCommit={onCommit} onExit={onExit} />);
     await injectAndReview(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
 
-    fireEvent.click(screen.getByText('Looks good', { exact: true }));
+    // Eager warp fills each page's blob on view; no accept click needed —
+    // Next is already gated open (>=1 page) and builds everything remaining.
+    // Visit page 2 so its eager warp completes before building.
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    fireEvent.click(q('[data-page-next]'));
     await screen.findByText('Page 2 of 2');
-    fireEvent.click(screen.getByText('Looks good', { exact: true }));
+    await waitFor(() => expect(mockExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const next = screen.getByText('Next', { exact: true }) as HTMLButtonElement;
+    expect(next.disabled).toBe(false);
+    fireEvent.click(next);
     await screen.findByText('All pages ready');
 
     expect(screen.getByText('Build PDF', { exact: true })).toBeTruthy();
     expect(screen.getByText('Back to camera', { exact: true })).toBeTruthy();
-    expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('2 of 2 reviewed');
 
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
     expect(onCommit).toHaveBeenCalledTimes(1);
@@ -472,13 +488,18 @@ describe('result-FIRST queue', () => {
     expect(pages.map((p) => p.name)).toEqual(['scan-001.jpg', 'scan-002.jpg']);
     expect(pages[0].file.type).toBe('image/png');
     expect(await pages[0].file.text()).toBe('png-bytes');
+    expect(pages[1].file.type).toBe('image/png');
+    expect(await pages[1].file.text()).toBe('png-bytes');
   });
 
-  it('commits the byte-identical original on "Use original"', async () => {
+  it('Use original toggles to the byte-identical original', async () => {
     const onCommit = vi.fn();
     render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [7, 7, 7]));
     fireEvent.click(screen.getByText('Use original', { exact: true }));
+    // Toggle verdict: stays on the same page (no auto-advance to done).
+    expect(screen.getByText('Page 1 of 1')).toBeTruthy();
+    fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
@@ -486,6 +507,27 @@ describe('result-FIRST queue', () => {
     expect(pages[0].name).toBe('scan-001.jpg');
     expect(pages[0].file.type).toBe('image/jpeg');
     expect(Array.from(new Uint8Array(await pages[0].file.arrayBuffer()))).toEqual([7, 7, 7]);
+  });
+
+  it('Use original toggles back to warped', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
+    const onCommit = vi.fn();
+    render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [7, 7, 7]));
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    // Warped -> original -> warped: two toggles land back on the crop.
+    fireEvent.click(screen.getByText('Use original', { exact: true }));
+    fireEvent.click(screen.getByText('Use original', { exact: true }));
+    expect(screen.getByText('Page 1 of 1')).toBeTruthy();
+    fireEvent.click(screen.getByText('Next', { exact: true }));
+    await screen.findByText('All pages ready');
+    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
+    expect(pages).toHaveLength(1);
+    expect(pages[0].file.type).toBe('image/png');
+    expect(await pages[0].file.text()).toBe('png-bytes');
   });
 
   it('discards a page from the queue', async () => {
@@ -512,19 +554,21 @@ describe('result-FIRST queue', () => {
 });
 
 describe('eager warp', () => {
-  it('warps a pending page with corners immediately, without deciding', async () => {
+  it('warps a page with corners immediately, with no accept click', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['png-bytes'], { type: 'image/png' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
-    // Eager warp fills the single canvas while the decision stays pending.
+    // Eager warp fills the single canvas; implicit accept needs no click.
     const img = (await findQ('[data-crop-result-img]')) as HTMLImageElement;
     expect(img.src).toMatch(/^blob:mock-/);
     await waitFor(() => expect(mockExtract).toHaveBeenCalled());
-    // Still pending: review CTA counts it, Next stays gated.
-    expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('0 of 1 reviewed');
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+    // Visited on show; Next is gated open (>=1 page) without any accept.
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 1 viewed');
+    });
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('warps once per quad — no re-warp loop for the same corners', async () => {
@@ -704,7 +748,7 @@ describe('capture mode + gallery cluster', () => {
 });
 
 describe('review filmstrip + batch bar', () => {
-  it('renders numbered thumbs, add-back, and a gated Next that reaches done', async () => {
+  it('renders numbered thumbs, pager, add-back, and an ungated Next that reaches done', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['png-bytes'], { type: 'image/png' }));
     };
@@ -714,19 +758,38 @@ describe('review filmstrip + batch bar', () => {
     expect(document.body.querySelectorAll('[data-film-thumb]').length).toBe(2);
     expect(q('[data-scan-add]').getAttribute('aria-label')).toBe('Back to camera');
     expect(q('[data-batch-bar]')).toBeTruthy();
-    // Nothing accepted yet — Next stays disabled.
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+    // Implicit accept: Next is gated open (>=1 page) with zero accept clicks.
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    // Initial show visits page 1.
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 2 viewed');
+    });
 
-    // Accept one page, then jump back via the numbered thumb.
-    fireEvent.click(screen.getByText('Looks good', { exact: true }));
+    // Pager next visits page 2; prev is 44px and disabled at the ends.
+    const prev = q('[data-page-prev]') as HTMLButtonElement;
+    const pagerNext = q('[data-page-next]') as HTMLButtonElement;
+    expect(prev.disabled).toBe(true);
+    expect(pagerNext.disabled).toBe(false);
+    for (const btn of [prev, pagerNext]) {
+      expect(btn.className).toMatch('min-h-[44px]');
+      expect(btn.className).toMatch('min-w-[44px]');
+    }
+    fireEvent.click(pagerNext);
     await screen.findByText('Page 2 of 2');
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('2 of 2 viewed');
+    });
+    expect((q('[data-page-prev]') as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
+
+    // Filmstrip tap jumps back without any accept click.
     fireEvent.click(document.body.querySelectorAll('[data-film-thumb]')[0] as HTMLElement);
     await screen.findByText('Page 1 of 2');
+    // Both visited: progress stays full.
+    expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('2 of 2 viewed');
 
-    // One acceptance gates Next open; Next reaches the done screen.
-    const next = screen.getByText('Next', { exact: true }) as HTMLButtonElement;
-    expect(next.disabled).toBe(false);
-    fireEvent.click(next);
+    // Next reaches the done screen.
+    fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');
   });
 
@@ -747,7 +810,29 @@ describe('review filmstrip + batch bar', () => {
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(q('[data-scan-add]'));
     await findQ('[data-scan-capture]');
-    expect(q('[data-review-cta]').textContent).toBe('Review 1 pages');
+    expect(q('[data-review-cta]').textContent).toBe('View 1 pages');
+  });
+});
+
+describe('implicit accept navigation', () => {
+  it('disables both pager buttons on a single page', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    expect((q('[data-page-prev]') as HTMLButtonElement).disabled).toBe(true);
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 1 viewed');
+    });
+  });
+
+  it('discarding the last remaining page returns to the camera', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    fireEvent.click(screen.getByText('Discard', { exact: true }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-scan-queue]')).toBeNull();
+    });
+    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
   });
 });
 
