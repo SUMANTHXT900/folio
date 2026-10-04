@@ -307,3 +307,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** (1) Compact labeled top bar (close/title/flash/flip/mirror with visible labels, camera select on its own slim row — zero overlaps, finder clearance); (2) strip docked to the bottom overlay cluster; (3) thin dotted outline returns (small-circle handles kept); (4) calmer loupe (~1.3x); (5) adjust-next button beside Apply (pure navigation, no warp/decision). Folio theme, 44px targets, no fake controls.
 - **Reason.** User phone screenshot 2026-10-04.
 - **Status.** D42 wave (chrome/review/E2E/docs lanes); verification SCOPED (orchestrator fills scoped numbers; full suite deferred per standing instruction — see WORKLOG); real-device validation pending (user's phone required).
+
+## D43 — Dead controls + preview/drift/loupe fixes (user phone feedback 2026-10-04)
+
+- **Decision.** (1) Camera select hit-test restored (`pointer-events-auto` under the pass-through topbar); mirror toggle disabled-with-explanation on the back camera; facing reconciled from live track settings (label regex stays as fallback); exact-device fallback keeps the pick visible with the note at the select. (2) Result hero constrained to the warped output aspect (centered, no bars; skeleton until first warp). (3) Overlay render + drag unified on one live rect; overlay gated on rect presence. (4) `LOUPE_ZOOM` 1.3 → 1.15. (5) Apply/adjust-entry disabled while `imageWidth/Height <= 0`. Folio theme, 44px targets, no fake controls.
+- **Reason.** User phone feedback 2026-10-04 (dead select/mirror, bar-framed preview feeling shaved vs PDF, handle/output drift, hot loupe).
+- **Status.** D43 wave (two fix lanes, read-only analysis first); verification SCOPED (static gates + build; unit/E2E suites deferred per standing instruction — see WORKLOG); real-device validation pending (user's phone required).

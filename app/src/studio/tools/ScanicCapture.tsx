@@ -438,6 +438,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [paused, setPaused] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  /** Exact-device fallback note surfaced adjacent to the camera select (top chrome). */
+  const [deviceFallbackNote, setDeviceFallbackNote] = useState<string | null>(null);
   const [cardError, setCardError] = useState<string | null>(null);
   const [redetecting, setRedetecting] = useState(false);
   /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
@@ -714,6 +716,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       chosenDeviceIdRef.current = next;
       setSelectedDeviceId(next);
       setCaptureError(null);
+      setDeviceFallbackNote(null);
       stopTracks();
     },
     [stopTracks],
@@ -748,23 +751,26 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       const openStream = async (video: MediaTrackConstraints): Promise<MediaStream> =>
         navigator.mediaDevices.getUserMedia({ video, audio: false });
       try {
+        let usedExactFallback = false;
         try {
           stream = await openStream(wanted);
         } catch (first) {
           // Exact-device failure: fall back to the facingMode ideals once,
-          // honestly (clear the failed pick so state matches the live
-          // stream), then continue below on the fallback stream.
+          // honestly — the pick stays visibly selected with a fallback note
+          // adjacent to the select (top chrome) plus the shutter-area
+          // error, so the recovery never reads as "nothing happened".
           const hasExactPick =
             activeDeviceId !== null && activeDeviceId !== undefined && activeDeviceId !== '';
           const firstKind = classifyCameraError(first);
           if (hasExactPick && firstKind !== 'denied') {
             try {
               stream = await openStream(buildVideoConstraints(facing, null));
+              usedExactFallback = true;
               if (!cancelled) {
-                persistedCameraDeviceId = null;
-                chosenDeviceIdRef.current = null;
-                setSelectedDeviceId(null);
                 setCamErrorKind('overconstrained');
+                setDeviceFallbackNote(
+                  'That camera could not be opened — using the default camera instead.',
+                );
                 setCaptureError(
                   'That camera could not be opened — using the default camera instead. You can pick another camera above.',
                 );
@@ -797,6 +803,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           for (const track of stream.getTracks()) track.stop();
           return;
         }
+        if (!usedExactFallback && !cancelled) {
+          setDeviceFallbackNote(null);
+        }
         streamRef.current = stream;
         const video = videoRef.current;
         if (video) {
@@ -822,7 +831,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         // webcam renders landscape instead of a blurry zoomed portrait crop.
         try {
           const settings = track?.getSettings?.() as
-            { width?: number; height?: number } | undefined;
+            { width?: number; height?: number; facingMode?: string } | undefined;
           if (
             !cancelled &&
             typeof settings?.width === 'number' &&
@@ -831,6 +840,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             settings.height > 0
           ) {
             setLiveAspect(`${settings.width} / ${settings.height}`);
+          }
+          // Reconcile facing from the live track when exposed (labelless OEM
+          // ids defeat label-sniffing on pick); the label regex on pick stays
+          // as the fallback when facingMode is unexposed.
+          if (
+            !cancelled &&
+            (settings?.facingMode === 'user' || settings?.facingMode === 'environment')
+          ) {
+            setFacing(settings.facingMode);
           }
         } catch {
           // Settings unreadable — the full-bleed layer already avoids any
@@ -1404,12 +1422,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 aria-pressed={mirrored}
                 aria-label="Mirror front-camera preview"
                 title={
-                  mirrored
-                    ? 'Front preview mirrored (captures stay unmirrored)'
-                    : 'Front preview unmirrored'
+                  facing !== 'user'
+                    ? 'Mirror applies to the front camera only'
+                    : mirrored
+                      ? 'Front preview mirrored (captures stay unmirrored)'
+                      : 'Front preview unmirrored'
                 }
+                disabled={facing !== 'user'}
                 onClick={() => setMirrored((v) => !v)}
-                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <span aria-hidden className="text-sm leading-none">
                   {mirrored ? '◐' : '◑'}
@@ -1418,7 +1439,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               </button>
             </div>
             {cameras.length > 0 && (
-              <div data-camera-select-row className="relative flex w-full justify-center">
+              <div
+                data-camera-select-row
+                className="pointer-events-auto relative flex w-full flex-col items-center justify-center gap-1"
+              >
                 <select
                   data-camera-select
                   aria-label="Choose camera"
@@ -1428,7 +1452,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     // Keep the mirror semantics honest when the OS label
                     // names a side: a picked front lens mirrors the
                     // preview, a picked back lens never does. Unknown
-                    // labels leave the facing toggle untouched.
+                    // labels leave the facing toggle untouched (the live
+                    // track's facingMode reconciles after start when
+                    // exposed).
                     const picked = cameras.find((c) => c.deviceId === id);
                     const lbl = (picked?.label ?? '').toLowerCase();
                     if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
@@ -1436,7 +1462,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                       setFacing('environment');
                     chooseCamera(id);
                   }}
-                  className="camera-select-compact inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]"
+                  className="camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]"
                 >
                   <option value="">Default camera</option>
                   {cameras.map((c, i) => (
@@ -1445,6 +1471,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     </option>
                   ))}
                 </select>
+                {deviceFallbackNote !== null && (
+                  <p
+                    data-camera-fallback-note
+                    role="status"
+                    className="max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur"
+                  >
+                    {deviceFallbackNote}
+                  </p>
+                )}
               </div>
             )}
           </>

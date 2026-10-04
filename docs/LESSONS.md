@@ -139,3 +139,15 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** D40 deleted the per-page Looks-good accept-click: every queued page auto-accepts its current crop (warped when available, else original) and navigation runs via filmstrip/pager/batch-Next with no accept gate.
 - **Why it matters.** Viewing a fine page IS the verdict; forced accept-clicks tax every page to protect against a discard case users already have.
 - **Rule.** Never gate navigation on acceptance — viewing a fine page IS the verdict. Evidence: `docs/DECISIONS.md` D40 (user phone feedback 2026-10-04).
+
+## L-24 — jsdom never hit-tests, so pointer-events bugs ship green
+
+- **Observation.** The camera picker sat under a `pointer-events-none` ancestor with no opt-back-in: dead to every real touch, yet all 47 unit tests passed because `fireEvent` bypasses hit-testing entirely. Found only by reading the ancestor chain (`ScanicCapture.tsx` topbar), never by any suite.
+- **Why it matters.** A whole class of mobile breakage (pointer-events, z-order, overlay coverage) is invisible to jsdom and to synthetic E2E dispatches — only trusted-input probes and real phones see it.
+- **Rule.** Any control added under an overlay/portal must carry an explicit hit-test assertion (computed `pointer-events`, `elementFromPoint` in E2E); icon-only toggles additionally need visible labels. Evidence: `docs/DECISIONS.md` D43 (user phone feedback 2026-10-04).
+
+## L-25 — Render and drag must measure the same rect
+
+- **Observation.** The adjust overlay positioned from async-measured `frameBox` STATE while drag mapped through a live `getBoundingClientRect()` — any layout shift between them offset every handle and sheared the stretched SVG. Fix: measure synchronously in render with state as fallback, so both paths share one rect; and don't render the overlay until the rect exists.
+- **Why it matters.** Two rect sources that agree "almost always" disagree exactly when the user is interacting (scroll, DVH shift, resize) — the drift reports always look like warp bugs but live in the overlay.
+- **Rule.** One live rect source for render + pointer mapping; gate overlay rendering on its presence. Evidence: `docs/DECISIONS.md` D43 (user phone feedback 2026-10-04).

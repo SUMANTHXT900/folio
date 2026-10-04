@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current as of the D42 chrome cleanup + adjust-next redo wave (2026-10-04 — user phone screenshot; package.json stays 1.9.0, v2.0.0 release HELD).
+> Current as of the D43 dead-controls + preview/drift/loupe-fix wave (2026-10-04 — user phone feedback; package.json stays 1.9.0, v2.0.0 release HELD).
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
@@ -40,7 +40,7 @@
 
 ## Current work
 
-- **D42 chrome cleanup + adjust-next redo is in progress**: chrome/review/E2E/docs lanes per D42 in `docs/DECISIONS.md` — verification SCOPED; full suite explicitly deferred per standing instruction (orchestrator fills scoped numbers, see WORKLOG).
+- **D43 dead-controls + preview/drift/loupe fixes are implemented; verification SCOPED**: two analysis-first fix lanes per D43 in `docs/DECISIONS.md` — static gates + build green (unit/E2E suites deferred per standing instruction, see WORKLOG).
 - **Real-device validation is next (not started)**: hit-rate + ML annoyance + handle feel on the user's phone; gates any camera-capture claim.
 - Performance program closed: P0–P4 implemented, P0.2 measured-and-shelved with real-device evidence (see `docs/PERFORMANCE.md`); threaded WASM explicitly gated behind a future decision.
 
@@ -106,4 +106,4 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 
 ## Immediate next steps
 
-1. Real-device validation of the D42 chrome cleanup + adjust-next redo on the user's phone — pending, gates any camera-capture claim.
+1. Real-device validation of the D43 fixes on the user's phone — pending, gates any camera-capture claim.
