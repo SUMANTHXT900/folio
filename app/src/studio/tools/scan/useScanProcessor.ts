@@ -143,10 +143,14 @@ function rewrapOf(client: ScanWorkerClient): RewrapScanFn {
 }
 
 /**
- * Preview budget: debounced queue previews are downscaled to ≤800px on
- * the long edge; full resolution crosses the worker only on "Use crop".
+ * Preview budget: debounced queue previews are downscaled to ≤1600px on
+ * the long edge (raised from 800, 2026-10-03 quality pass — the review
+ * hero must look near-final, not mushy); full resolution crosses the
+ * worker only on "Use crop".
  */
-const VERIFY_PREVIEW_LONG_EDGE = 800;
+const VERIFY_PREVIEW_LONG_EDGE = 1600;
+/** Preview encode quality: near-final look for the review hero. */
+const VERIFY_PREVIEW_JPEG_QUALITY = 0.9;
 /** "Use crop" never hangs the queue: a slow rewarp falls back to the photo. */
 const REWRAP_TIMEOUT_MS = 30000;
 
@@ -193,7 +197,7 @@ async function downscaleForPreview(
     if (ctx === null) return null;
     ctx.drawImage(bitmap, 0, 0, dstW, dstH);
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, 'image/jpeg', 0.8),
+      canvas.toBlob(resolve, 'image/jpeg', VERIFY_PREVIEW_JPEG_QUALITY),
     );
     canvas.width = 0;
     canvas.height = 0;
@@ -551,8 +555,9 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
   /**
    * Queue exit (back arrow / scanner leave): every unreviewed entry
    * commits as its original photo, in capture order. Synchronous by
-   * construction — captures are already budget-clamped JPEGs (see
-   * `captureTargetDims`), so the import normalization skip path always
+   * construction — captures are already budget-clamped JPEGs on the
+   * capture canvas (≤`SCAN_CAPTURE_LONG_EDGE`, see `captureTargetDims`
+   * in CameraCapture.tsx), so the import normalization skip path always
    * applied to them. Preview URLs are revoked; entries are gone.
    */
   const drainQueue = useCallback((): ScanCommit[] => {
@@ -567,7 +572,7 @@ export function useScanProcessor(createWorker?: ScanWorkerFactory) {
 
   /**
    * Debounced crop preview (CropEditor release / 300ms idle): re-warps a
-   * ≤800px downscale of the original with the adjusted quad and shows
+   * ≤1600px downscale of the original with the adjusted quad and shows
    * the result beside the overlay. Best-effort and latest-wins: failures
    * or superseded responses leave the overlay authoritative. Full
    * resolution crosses the worker only on "Use crop".

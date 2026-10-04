@@ -18,13 +18,18 @@
 //! non-bimodal Otsu histogram (research §11 H-B), or a weakly-supported
 //! binary winner (a ring broken by shadow or fused pattern blobs passes
 //! the gates corner-cut; only the local-contrast rungs can out-rank it).
-//! Candidates from every rung share the UNCHANGED gates and the rank
-//! decides — Otsu stays the primary rung, recall candidates must
-//! out-rank it, never wholesale-replace it. Plus 5–8-gon → quad fitting
-//! by turning angle, and a 3-epsilon RDP sweep kept per-contour-best.
-//! Every Canny pass runs on a replicate-padded margin with a
-//! frame-closure stroke (H-A) so pages touching the frame still form
-//! closed rings; contour points return in original coordinates.
+//! Canny thresholds derive from each input's gradient-magnitude
+//! histogram (auto thresholds — fixed 40/120 go blind on low-contrast
+//! real photos), and a TIERED denoised-gray rung (3×3 median) runs only
+//! when every other rung's pool is weakly supported: the median lifts a
+//! noise-buried boundary's signal-to-noise so it becomes the dominant
+//! gradient cluster. Candidates from every rung share the UNCHANGED
+//! gates and the rank decides — Otsu stays the primary rung, recall
+//! candidates must out-rank it, never wholesale-replace it. Plus 5–8-gon
+//! → quad fitting by turning angle, and a 3-epsilon RDP sweep kept
+//! per-contour-best. Every Canny pass runs on a replicate-padded margin
+//! with a frame-closure stroke (H-A) so pages touching the frame still
+//! form closed rings; contour points return in original coordinates.
 
 use std::cmp::Ordering;
 
@@ -94,6 +99,12 @@ const ILLUM_STRENGTH: f64 = 0.5;
 /// cut, fused pattern blobs — and the local-contrast rungs get their
 /// chance to out-rank it. Acceptance gates are untouched.
 const RECALL_SUPPORT_TRIGGER: f64 = 0.85;
+/// Denoised-gray rung trigger (tiered, not an acceptance gate): when
+/// the binary + gray + adaptive pool's best candidate is supported
+/// below this, the boundary is likely buried in the noise floor and
+/// the 3×3-median denoised gray rung gets its chance. Clean scenes
+/// with well-supported candidates never run or change on this rung.
+const DENOISE_SUPPORT_TRIGGER: f64 = 0.8;
 /// Local-adaptive rung: a pixel stays white when it reaches its block
 /// mean minus this offset. Absorbs sensor noise in uniform regions so
 /// only real boundaries (page vs surroundings) leave the moat.
@@ -207,7 +218,7 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
         .iter()
         .any(|c| c.support >= RECALL_SUPPORT_TRIGGER);
     if !bimodal || binary_weak {
-        // Rung 2: grayscale-Canny on the already-normalized gray.
+        // Rung 2: grayscale-Canny on the normalized gray (auto thresholds).
         let gray_pass = edge_pass(&normalized, true);
         maps.push(gray_pass.support_map);
         let gray_idx = (maps.len() - 1) as u8;
@@ -240,6 +251,38 @@ pub fn detect_document(rgb: &[u8], w: u32, h: u32) -> Result<Option<Detection>, 
                 candidates = extra;
             } else {
                 candidates.extend(extra);
+            }
+        }
+        // Denoised-gray rung (TIERED, near-failure-only): the same
+        // grayscale-Canny rung on a 3×3-median copy of the normalized
+        // gray. On low-contrast real photos the page boundary sits
+        // inside the gradient noise floor; the median lifts its
+        // signal-to-noise so auto thresholds can separate it. It runs
+        // ONLY when the pool so far has no well-supported candidate —
+        // clean scenes keep their exact existing pool (and on scenes
+        // with strong interior structure, like dark pages with dense
+        // ink on a bright desk, the median rung's ink edges would
+        // otherwise out-rank the true boundary on the area weight).
+        // Bounded: one extra median + Canny + collect at detection
+        // scale, and only on the weakest-recall tier.
+        let pool_weak =
+            candidates.iter().map(|c| c.support).fold(0.0f64, f64::max) < DENOISE_SUPPORT_TRIGGER;
+        if pool_weak {
+            let denoise_pass = edge_pass(&recall_gray(&normalized), true);
+            maps.push(denoise_pass.support_map);
+            let denoise_idx = (maps.len() - 1) as u8;
+            let denoise_cands = collect_scored_candidates(
+                &denoise_pass.contours,
+                &maps[maps.len() - 1],
+                sw,
+                sh,
+                frame_area,
+                denoise_idx,
+            );
+            if candidates.is_empty() {
+                candidates = denoise_cands;
+            } else {
+                candidates.extend(denoise_cands);
             }
         }
     }
@@ -347,7 +390,14 @@ struct EdgePass {
 fn edge_pass(input: &GrayImage, frame_closure: bool) -> EdgePass {
     let pad = if frame_closure { BORDER_PAD } else { 0 };
     let padded = replicate_pad(input, pad);
-    let edges = imageproc::edges::canny(&padded, 40.0, 120.0);
+    let edges = match auto_canny_thresholds(&padded) {
+        // `None` = featureless input (no gradient mass): skip Canny
+        // entirely — thresholds of 0 would make imageproc's hysteresis
+        // walk to the border and underflow, and Canny would find
+        // nothing anyway. Blank edges flow through the unchanged gates.
+        Some((low, high)) => imageproc::edges::canny(&padded, low, high),
+        None => GrayImage::new(padded.width(), padded.height()),
+    };
     let support_map = crop_gray(&dilate(&edges, DILATE_RADIUS), pad);
     let mut contour_input = edges;
     if frame_closure {
@@ -365,6 +415,76 @@ fn edge_pass(input: &GrayImage, frame_closure: bool) -> EdgePass {
         contours,
         support_map,
     }
+}
+
+/// Auto Canny thresholds from the input's gradient-magnitude histogram —
+/// the classic robust fix for real images. Fixed 40/120 go blind on
+/// low-contrast scenes: a blurred boundary a dozen levels high produces
+/// gradient magnitudes far below the fixed low threshold, so hysteresis
+/// never seeds and the rung returns nothing (the field composite).
+///
+/// Central differences |dx|+|dy| (÷4 to fit a u8 histogram) over the
+/// NON-ZERO magnitudes; Otsu splits the noise floor from the edge peak
+/// → high, low = high/2 (standard hysteresis ratio, always > 0 — a 0
+/// low would let imageproc's hysteresis walk onto the border and
+/// underflow). A single magnitude cluster (uniform weak gradient
+/// everywhere) falls back to the max magnitude so weak-but-real edges
+/// pass. `None` for a featureless image (no gradient mass) — the caller
+/// skips Canny. O(N) at detection scale, transient histogram.
+fn auto_canny_thresholds(img: &GrayImage) -> Option<(f32, f32)> {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let mut hist = [0u64; 256];
+    let px = |x: i32, y: i32| -> i32 {
+        i32::from(
+            img.get_pixel(x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)
+                .0[0],
+        )
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let gx = px(x + 1, y) - px(x - 1, y);
+            let gy = px(x, y + 1) - px(x, y - 1);
+            let mag = (gx.abs() + gy.abs()) / 4;
+            if mag > 0 {
+                hist[mag.clamp(0, 255) as usize] += 1;
+            }
+        }
+    }
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    // Otsu over the positive gradient magnitudes (bin 0 excluded).
+    let mut sum_all = 0u64;
+    for (i, c) in hist.iter().enumerate() {
+        sum_all += i as u64 * c;
+    }
+    let mut sum_bg = 0u64;
+    let mut weight_bg = 0u64;
+    let mut best_var = -1.0f64;
+    let mut threshold = 0u8;
+    for (t, c) in hist.iter().enumerate() {
+        weight_bg += c;
+        if weight_bg == 0 || weight_bg == total {
+            continue;
+        }
+        sum_bg += t as u64 * c;
+        let weight_fg = total - weight_bg;
+        let mean_bg = sum_bg as f64 / weight_bg as f64;
+        let mean_fg = (sum_all - sum_bg) as f64 / weight_fg as f64;
+        let var = weight_bg as f64 * weight_fg as f64 * (mean_bg - mean_fg).powi(2);
+        if var > best_var {
+            best_var = var;
+            threshold = t as u8;
+        }
+    }
+    if best_var < 0.0 {
+        // One magnitude cluster only (uniform weak gradient everywhere):
+        // the largest present magnitude is the honest "edge" level.
+        threshold = hist.iter().rposition(|&c| c > 0).unwrap_or(0) as u8;
+    }
+    let high = f32::from(threshold.max(1));
+    Some((high * 0.5, high))
 }
 
 /// Replicate-border pad of a detection-scale gray image. `pad = 0`
@@ -461,6 +581,16 @@ fn normalize_illumination(gray: &GrayImage) -> GrayImage {
         *px = Luma([v.round().clamp(0.0, 255.0) as u8]);
     }
     out
+}
+
+/// Recall-rung gray input: a 3×3-median-denoised copy of the damped-
+/// normalized gray. Light denoise before the gradient rungs (fix: on
+/// low-contrast real photos the page boundary sits inside the noise
+/// floor in gradient space — the median lifts the signal-to-noise
+/// ratio so the boundary becomes the dominant gradient cluster).
+/// Bounded: one O(N) detection-scale pass, recall path only.
+fn recall_gray(normalized: &GrayImage) -> GrayImage {
+    imageproc::filter::median_filter(normalized, 1, 1)
 }
 
 /// Local-mean adaptive threshold (recall rung only): white where the
@@ -2721,5 +2851,372 @@ mod tests {
         for (got, want) in d.quad.corners().iter().zip(q.corners().iter()) {
             assert!(got.dist(want) < 14.0, "{got:?} vs {want:?}");
         }
+    }
+
+    // ---- Real-world low-contrast fixtures (2026-10-03, Agent A root-cause) ----
+    //
+    // The field report (~99% misses on real pages while every synthetic
+    // fixture passes) isolated four candidate real-world deltas:
+    // (a) WHITE page on LIGHT desk (low luminance contrast — no suite
+    //     fixture exercises this), (b) soft hand shadow across the page,
+    // (c) phone JPEG noise + slight blur, (d) near-frame-filling page on
+    // a light background. One fixture per delta; each runs the CURRENT
+    // pipeline and asserts the page with per-corner error printed
+    // (eprintln — the diagnosis record; silent in normal runs).
+
+    /// Runs a real-world fixture through `detect_document` and reports
+    /// the outcome (confidence + per-corner error), then asserts every
+    /// corner lands within `tol` px of ground truth. The panic messages
+    /// carry the corner errors, so a failure doubles as the diagnosis.
+    fn real_world_report(name: &str, img: &[u8], w: u32, h: u32, want: &Quad, tol: f64) {
+        match detect_document(img, w, h) {
+            Ok(Some(d)) => {
+                let errs: Vec<f64> = d
+                    .quad
+                    .corners()
+                    .iter()
+                    .zip(want.corners().iter())
+                    .map(|(g, t)| g.dist(t))
+                    .collect();
+                let max_err = errs.iter().cloned().fold(0.0f64, f64::max);
+                eprintln!(
+                    "realworld {}: FOUND conf={:.3} max_err={:.1}px errs={:?}",
+                    name, d.confidence, max_err, errs
+                );
+                assert!(
+                    d.confidence >= MIN_EDGE_SUPPORT,
+                    "{name}: conf {}",
+                    d.confidence
+                );
+                for (got, wt) in d.quad.corners().iter().zip(want.corners().iter()) {
+                    assert!(
+                        got.dist(wt) < tol,
+                        "{name}: corner {got:?} vs {wt:?} err={:.1}",
+                        got.dist(wt)
+                    );
+                }
+            }
+            Ok(None) => panic!("realworld {name}: MISS — no detection at all"),
+            Err(e) => panic!("realworld {name}: pipeline error {e:?}"),
+        }
+    }
+
+    #[test]
+    fn detects_white_page_on_light_wood_desk() {
+        let (img, w, h, q) = white_page_light_desk_fixture();
+        real_world_report("white-page-light-desk", &img, w, h, &q, 24.0);
+    }
+
+    /// (a) White page (luma ≈ 234) on a light-wood desk (luma ≈ 170–200,
+    /// slow grain + mild sensor noise), slight perspective, plus a soft
+    /// window-light gradient across the frame (real desk lighting). Low
+    /// LUMINANCE contrast — the boundary is a few dozen gray levels, not
+    /// hundreds — so a global threshold cannot follow it everywhere.
+    fn white_page_light_desk_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(110.0, 100.0),
+            Point::new(520.0, 140.0),
+            Point::new(495.0, 690.0),
+            Point::new(85.0, 650.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                // Wood grain: slow undulation + fine speckle, warm tint.
+                let grain = (hash2(x as i32 / 11, y as i32 / 9) % 15) as i32 - 7;
+                let n = noise(x, y) / 8;
+                let v = (194 + grain + i32::from(n)).clamp(172, 212) as u8;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = v.saturating_add(9);
+                img[o + 1] = v.saturating_sub(15);
+                img[o + 2] = v.saturating_sub(37);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 235u8.saturating_add(n);
+                    img[o + 1] = 233u8.saturating_add(n);
+                    img[o + 2] = 228u8.saturating_add(n);
+                }
+            }
+        }
+        // Soft window-light gradient: up to ±10 luma across the frame.
+        for y in 0..h {
+            for x in 0..w {
+                let g = ((x as i32 - 320) + (y as i32 - 400)) / 48;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                for c in &mut img[o..o + 3] {
+                    *c = (i32::from(*c) + g).clamp(0, 255) as u8;
+                }
+            }
+        }
+        (img, w, h, q)
+    }
+
+    #[test]
+    fn detects_page_under_soft_hand_shadow() {
+        let (img, w, h, q) = hand_shadow_fixture();
+        real_world_report("hand-shadow", &img, w, h, &q, 30.0);
+    }
+
+    /// (b) White page on a mid-gray desk with a soft hand shadow: a
+    /// smooth penumbra darkens the lower-right of frame AND page by up
+    /// to ~35%, pushing shadowed paper near desk luma. Global Otsu
+    /// splits lit-vs-shadowed paper (research §11 H-B trimodal mode):
+    /// the binary ring breaks along the shadow boundary and only the
+    /// local-contrast rungs can recover the true page edges.
+    fn hand_shadow_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(120.0, 110.0),
+            Point::new(530.0, 100.0),
+            Point::new(545.0, 690.0),
+            Point::new(105.0, 700.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 8;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 150u8.saturating_add(n);
+                img[o + 1] = 147u8.saturating_add(n);
+                img[o + 2] = 144u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 238u8.saturating_add(n);
+                    img[o + 1] = 236u8.saturating_add(n);
+                    img[o + 2] = 231u8.saturating_add(n);
+                }
+            }
+        }
+        // Soft shadow anchored off-frame beyond the lower-right corner:
+        // full 35% strength within 150px of the anchor, fading to 0
+        // over a 140px penumbra. Multiplies desk AND page equally, so
+        // local page-vs-desk contrast survives while the GLOBAL split
+        // gains a third mode.
+        let (cx, cy) = (700.0f64, 620.0f64);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((f64::from(x) - cx).powi(2) + (f64::from(y) - cy).powi(2)).sqrt();
+                let t = ((d - 150.0) / 140.0).clamp(0.0, 1.0);
+                let shade = (1.0 - t) * 0.35;
+                if shade > 0.002 {
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    for c in &mut img[o..o + 3] {
+                        *c = (f64::from(*c) * (1.0 - shade)).round() as u8;
+                    }
+                }
+            }
+        }
+        (img, w, h, q)
+    }
+
+    #[test]
+    fn detects_blurred_noisy_phone_capture() {
+        let (img, w, h, q) = blur_noise_capture_fixture();
+        real_world_report("blur-noise-capture", &img, w, h, &q, 48.0);
+    }
+
+    /// (c) Phone-capture path at capture scale (2500px long edge → 1200
+    /// working edge): page on a mid-gray desk, slight Gaussian blur
+    /// (σ=1.4 at capture res) + JPEG-like luma/chroma noise (per-pixel
+    /// luma jitter + per-8×8-block chroma mottle). Detection runs at the
+    /// downscaled working edge; corners must back-map to capture
+    /// coordinates. Weak gradients after blur+downscale are where fixed
+    /// Canny thresholds go blind.
+    fn blur_noise_capture_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (1875u32, 2500u32);
+        let q = Quad::new(
+            Point::new(160.0, 220.0),
+            Point::new(1690.0, 180.0),
+            Point::new(1740.0, 2290.0),
+            Point::new(120.0, 2340.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 4; // ±5 sensor noise
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 122u8.saturating_add(n);
+                img[o + 1] = 118u8.saturating_add(n);
+                img[o + 2] = 114u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 5;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 234u8.saturating_sub(n);
+                    img[o + 1] = 232u8.saturating_sub(n);
+                    img[o + 2] = 227u8.saturating_sub(n);
+                }
+            }
+        }
+        // Slight focus softness: Gaussian blur at capture resolution.
+        let owned = image::RgbImage::from_raw(w, h, img).expect("fixture fits");
+        let blurred = imageproc::filter::gaussian_blur_f32(&owned, 1.4);
+        let mut img = blurred.as_raw().clone();
+        // JPEG-like noise: per-8×8-block chroma mottle (compression
+        // blocking) + mild luma jitter on top of the sensor noise above.
+        for y in 0..h {
+            for x in 0..w {
+                let block = (hash2(x as i32 / 8, y as i32 / 8) % 9) as i32 - 4;
+                let n = i32::from(noise(x, y)) / 10; // ±2
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = (i32::from(img[o]) + block + n).clamp(0, 255) as u8;
+                img[o + 2] = (i32::from(img[o + 2]) - block + n).clamp(0, 255) as u8;
+            }
+        }
+        (img, w, h, q)
+    }
+
+    #[test]
+    fn detects_near_filling_page_on_light_background() {
+        let (img, w, h, q) = near_filling_page_fixture();
+        real_world_report("near-filling-light-bg", &img, w, h, &q, 22.0);
+    }
+
+    /// (d) White page (luma ≈ 243) nearly filling the frame (~92%) on a
+    /// light background (luma ≈ 219). The page dominates the 64px
+    /// illumination thumbnail, so the damped background-divide drags
+    /// the thin desk border toward page luma — the normalization itself
+    /// erases the boundary (research §6 collapse mode). Only a contrast
+    /// stretch on the recall rungs can re-separate them.
+    fn near_filling_page_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(15.0, 15.0),
+            Point::new(625.0, 18.0),
+            Point::new(622.0, 782.0),
+            Point::new(18.0, 779.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let n = noise(x, y) / 8; // ±2
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = 228u8.saturating_add(n);
+                img[o + 1] = 217u8.saturating_add(n);
+                img[o + 2] = 210u8.saturating_add(n);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 245u8.saturating_add(n);
+                    img[o + 1] = 243u8.saturating_add(n);
+                    img[o + 2] = 238u8.saturating_add(n);
+                }
+            }
+        }
+        (img, w, h, q)
+    }
+
+    #[test]
+    fn detects_real_world_stack_white_page_shadow_noise_blur() {
+        // Composite of the four deltas — the ACTUAL real-world scene a
+        // phone sees: white page on a light-wood desk, soft hand shadow,
+        // sensor+JPEG noise, slight focus blur, window-light gradient.
+        // Each delta alone passes (see the four fixtures above); the
+        // superposition is what the field report hits.
+        let (img, w, h, q) = real_world_stack_fixture();
+        real_world_report("real-world-stack", &img, w, h, &q, 28.0);
+    }
+
+    /// All four deltas at once (see the test above). Expected current-
+    /// pipeline failure: the damped divide compresses lit page-vs-desk
+    /// contrast below the bimodal guard, the shadow makes the histogram
+    /// trimodal, the fixed 40/120 Canny sees no gradients in the ~15-
+    /// level boundary, and the adaptive offset (12) sits at the edge of
+    /// the local contrast while noise eats the moat.
+    fn real_world_stack_fixture() -> (Vec<u8>, u32, u32, Quad) {
+        let (w, h) = (640u32, 800u32);
+        let q = Quad::new(
+            Point::new(110.0, 120.0),
+            Point::new(525.0, 105.0),
+            Point::new(540.0, 690.0),
+            Point::new(95.0, 705.0),
+        );
+        let mut img = vec![0u8; w as usize * h as usize * 3];
+        for y in 0..h {
+            for x in 0..w {
+                // Light-wood desk: warm tint, slow grain, sensor noise.
+                let grain = (hash2(x as i32 / 11, y as i32 / 9) % 15) as i32 - 7;
+                let n = noise(x, y) / 8; // ±2
+                let v = (207 + grain + i32::from(n)).clamp(188, 224) as u8;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = v.saturating_add(9);
+                img[o + 1] = v.saturating_sub(1);
+                img[o + 2] = v.saturating_sub(17);
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                if point_in_convex(&p, &q.corners()) {
+                    let n = noise(x, y) / 8;
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    img[o] = 237u8.saturating_add(n);
+                    img[o + 1] = 234u8.saturating_add(n);
+                    img[o + 2] = 229u8.saturating_add(n);
+                }
+            }
+        }
+        // Soft hand shadow: 45% strength over the lower-right, fading
+        // over a wide penumbra.
+        let (cx, cy) = (700.0f64, 640.0f64);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((f64::from(x) - cx).powi(2) + (f64::from(y) - cy).powi(2)).sqrt();
+                let t = ((d - 140.0) / 150.0).clamp(0.0, 1.0);
+                let shade = (1.0 - t) * 0.45;
+                if shade > 0.002 {
+                    let o = (y as usize * w as usize + x as usize) * 3;
+                    for c in &mut img[o..o + 3] {
+                        *c = (f64::from(*c) * (1.0 - shade)).round() as u8;
+                    }
+                }
+            }
+        }
+        // Window-light gradient across the frame.
+        for y in 0..h {
+            for x in 0..w {
+                let g = ((x as i32 - 320) + (y as i32 - 400)) / 48;
+                let o = (y as usize * w as usize + x as usize) * 3;
+                for c in &mut img[o..o + 3] {
+                    *c = (i32::from(*c) + g).clamp(0, 255) as u8;
+                }
+            }
+        }
+        // Slight focus blur, then JPEG-like block/chroma + luma noise.
+        let owned = image::RgbImage::from_raw(w, h, img).expect("fixture fits");
+        let blurred = imageproc::filter::gaussian_blur_f32(&owned, 0.9);
+        let mut img = blurred.as_raw().clone();
+        for y in 0..h {
+            for x in 0..w {
+                let block = (hash2(x as i32 / 8, y as i32 / 8) % 9) as i32 - 4;
+                let n = i32::from(noise(x, y)) / 9; // ±2
+                let o = (y as usize * w as usize + x as usize) * 3;
+                img[o] = (i32::from(img[o]) + block + n).clamp(0, 255) as u8;
+                img[o + 2] = (i32::from(img[o + 2]) - block + n).clamp(0, 255) as u8;
+            }
+        }
+        (img, w, h, q)
     }
 }

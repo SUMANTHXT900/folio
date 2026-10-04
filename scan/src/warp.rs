@@ -16,7 +16,7 @@ use crate::geometry::{apply_homography, homography, invert_homography, Point, Qu
 /// JPEG-generation chain per scan (why 95/95):
 ///
 /// ```text
-/// capture canvas clamp ≤2500px, JPEG q0.95   → generation 1 (app side)
+/// capture canvas clamp ≤3600px, JPEG q0.95   → generation 1 (app side)
 /// scan decode → warp → SCAN_JPEG_QUALITY 95  → generation 2 (here)
 /// images_to_pdf DCT-passthrough embed        → byte-identical (keep!)
 /// ```
@@ -41,9 +41,11 @@ use crate::geometry::{apply_homography, homography, invert_homography, Point, Qu
 /// typically 4:2:0 (capture-side fact, not controllable here).
 pub const SCAN_JPEG_QUALITY: u8 = 95;
 
-/// Output dimensions from quad geometry: mean edge lengths scaled so the
-/// long edge respects `max_long_edge`. Never upscales beyond the source
-/// region's own pixel dimensions (scale ≤ 1 relative to quad size).
+/// Output dimensions from quad geometry: the quad's NATIVE mean edge
+/// lengths, capped at `max_long_edge`. The cap only ever shrinks: a
+/// quad whose long edge is under the cap (small crops, low-res captures)
+/// keeps its native pixel count exactly — no downscale toward the cap,
+/// no upscale (scale ≤ 1 relative to quad size).
 pub fn output_dims(quad: &Quad, max_long_edge: u32) -> (u32, u32) {
     let (mw, mh) = quad.mean_size();
     let longest = mw.max(mh).max(1.0);
@@ -245,7 +247,7 @@ mod tests {
                 }
             }
         }
-        let (out_w, out_h) = output_dims(&q, 2500);
+        let (out_w, out_h) = output_dims(&q, 3600);
         let out = warp_quad(&rgb, w, h, &q, out_w, out_h).expect("warps");
         assert!(out_w > 50 && out_h > 80, "{out_w}x{out_h}");
         let white = out
@@ -268,7 +270,17 @@ mod tests {
             Point::new(4000.0, 3000.0),
             Point::new(0.0, 3000.0),
         );
-        assert_eq!(output_dims(&q, 2500), (2500, 1875));
+        assert_eq!(output_dims(&q, 3600), (3600, 2700));
+        // 3600px capture clamp (app side): a full-frame quad now warps at
+        // its NATIVE captured size — cap == clamp, so pixels captured at
+        // full resolution are never downscaled a second time.
+        let full = Quad::new(
+            Point::new(0.0, 0.0),
+            Point::new(3600.0, 0.0),
+            Point::new(3600.0, 2700.0),
+            Point::new(0.0, 2700.0),
+        );
+        assert_eq!(output_dims(&full, 3600), (3600, 2700));
         let small = Quad::new(
             Point::new(0.0, 0.0),
             Point::new(200.0, 0.0),
@@ -276,17 +288,17 @@ mod tests {
             Point::new(0.0, 100.0),
         );
         // No upscale: small quads keep native size.
-        assert_eq!(output_dims(&small, 2500), (200, 100));
+        assert_eq!(output_dims(&small, 3600), (200, 100));
     }
 
     #[test]
     fn small_crop_keeps_native_resolution_under_cap() {
-        // Crop-review pin: an 800×1000 region of a 2500px capture must
+        // Crop-review pin: an 800×1000 region of a 3600px capture must
         // come out at the region's OWN pixel count — no downscale toward
         // the cap (that is what mushed small crops' text), no fake
-        // upscale. The 2500 cap only ever shrinks regions whose native
+        // upscale. The 3600 cap only ever shrinks regions whose native
         // long edge exceeds it.
-        let (w, h) = (2500, 1250);
+        let (w, h) = (3600, 1800);
         let rgb = solid(w, h, [250, 250, 250]);
         let q = Quad::new(
             Point::new(500.0, 100.0),
@@ -294,8 +306,8 @@ mod tests {
             Point::new(1300.0, 1100.0),
             Point::new(500.0, 1100.0),
         );
-        assert_eq!(output_dims(&q, 2500), (800, 1000));
-        let (jpeg, out_w, out_h) = warp_to_jpeg(&rgb, w, h, &q, 2500).expect("warps");
+        assert_eq!(output_dims(&q, 3600), (800, 1000));
+        let (jpeg, out_w, out_h) = warp_to_jpeg(&rgb, w, h, &q, 3600).expect("warps");
         assert_eq!((out_w, out_h), (800, 1000));
         let back = image::load_from_memory(&jpeg).expect("decodes");
         assert_eq!((back.width(), back.height()), (800, 1000));

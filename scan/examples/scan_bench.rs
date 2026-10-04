@@ -179,24 +179,23 @@ fn main() {
     bench_repeat("phone 12MP original", 4000, 3000, 18, ScanMode::Original, 5);
     bench_repeat("phone 12MP b/w", 4000, 3000, 18, ScanMode::BlackWhite, 5);
     // 5-6 capture-downscale analogues: the SAME framing generated at the
-    // 2500px capture budget (what the capture canvas now emits). Detection
-    // runs at 800px either way so corners/confidence should match the 12MP
-    // rows; the warp OUTPUT is smaller (output size follows input quad
-    // pixels until the 2500px cap binds — the deliberate 5-6 tradeoff:
-    // ~2.5× fewer output pixels for ~3× less scan time, documented at the
-    // capture site).
+    // scan capture budget (3600px — what the capture canvas now emits).
+    // Detection runs at 1200px either way so corners/confidence should
+    // match the 12MP rows; the warp OUTPUT follows input quad pixels
+    // until the 3600px cap binds (the deliberate tradeoff: fewer output
+    // pixels for less scan time, documented at the capture site).
     bench_repeat(
-        "pre-scaled 2500px original",
-        2500,
-        1875,
+        "pre-scaled 3600px original",
+        3600,
+        2700,
         18,
         ScanMode::Original,
         5,
     );
     bench_repeat(
-        "pre-scaled 2500px b/w",
-        2500,
-        1875,
+        "pre-scaled 3600px b/w",
+        3600,
+        2700,
         18,
         ScanMode::BlackWhite,
         5,

@@ -28,15 +28,28 @@ use crate::error::{ScanError, ScanErrorKind};
 use crate::geometry::Point;
 use crate::warp::{encode_jpeg, output_dims, warp_quad, warp_to_jpeg, SCAN_JPEG_QUALITY};
 
-/// Output long-edge cap (px). BENCHMARK CONSTRAINT for M1 (correction 5):
-/// tune after measuring real quality/memory, do not hard-code forever.
+/// Output long-edge cap (px).
+///
+/// QUALITY POLICY: raised 2500 → 3600 to match the capture clamp the app
+/// side emits (3600px long edge). The real-user complaint that scanned
+/// pages looked "not near the original" traced to this cap sitting BELOW
+/// the capture's own resolution: the warp threw away pixels the camera
+/// had already captured. At 3600 == capture clamp, a full-page quad
+/// warps at its native captured size — no second downscale on top of
+/// the capture clamp.
+///
+/// Cost trade (accepted): scan runs in background processing, which
+/// absorbs the larger warp/encode (peak warped RGB buffer ~3 B/px —
+/// ~39 MB at a full-square 3600 page). Under D17 the PDF page is the
+/// DCT-passthrough of this JPEG, so PDF size ≈ JPEG size: larger pages
+/// are the accepted quality trade, not a silent regression.
 ///
 /// Applied exactly once per scan (shutter and crop-review rewarp paths)
 /// via [`crate::warp::output_dims`], which derives output size from the
 /// quad's own pixel dimensions and only ever shrinks — a small crop
 /// region keeps its native resolution (never downscaled toward the cap,
 /// never upscaled).
-pub const MAX_OUTPUT_LONG_EDGE: u32 = 2500;
+pub const MAX_OUTPUT_LONG_EDGE: u32 = 3600;
 
 /// One scan job: owned bytes in, owned outputs out. No I/O, no globals.
 #[derive(Debug, Clone)]

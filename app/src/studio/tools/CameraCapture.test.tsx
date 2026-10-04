@@ -3,12 +3,22 @@
  *
  * Covers: permission-denied failure copy + retry, successful stream with
  * scanner overlay, grid toggle, session strip rendering, Done lifecycle
- * (tracks stopped, onDone called). Real frame capture and capability
- * controls are manual-device-matrix only (Phase 3 adds capability tests).
+ * (tracks stopped, onDone called), auto-capture (motion-gated
+ * auto-shutter: SAD stability gate incl. static feeds, cooldown, toggle). Real frame capture and capability controls are
+ * manual-device-matrix only (Phase 3 adds capability tests).
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CameraCapture, canSkipNormalization, captureTargetDims } from './CameraCapture';
+import {
+  AUTO_CAPTURE_SAD_THRESHOLD,
+  AUTO_CAPTURE_STABLE_EDGE,
+  CameraCapture,
+  canSkipNormalization,
+  captureTargetDims,
+  frameMeanSad,
+  SCAN_CAPTURE_LONG_EDGE,
+  toGrayLuma,
+} from './CameraCapture';
 
 const stopTrack = vi.fn();
 function videoTrack(caps?: unknown, applyImpl?: (c: unknown) => Promise<void>) {
@@ -136,6 +146,10 @@ describe('CameraCapture scanner UI', () => {
     // Framing overlay present, grid off by default.
     expect(document.querySelector('[data-scanner-overlay]')).not.toBeNull();
     expect(document.querySelector('[data-scanner-grid]')).toBeNull();
+    // Auto-capture toggle: present in the dock and default ON.
+    const autoToggle = screen.getByLabelText('Auto capture');
+    expect(autoToggle.getAttribute('aria-pressed')).toBe('true');
+    expect(autoToggle.getAttribute('data-auto-capture')).toBe('on');
     fireEvent.click(screen.getByLabelText('Show alignment grid'));
     expect(document.querySelector('[data-scanner-grid]')).not.toBeNull();
     // Session strip: newest last, count visible.
@@ -235,6 +249,11 @@ describe('CameraCapture scanner surface (M3.x)', () => {
     );
     await screen.findByLabelText('Capture page');
     expect(screen.getByLabelText('Import images from files')).toBeTruthy();
+    // Fixed viewfinder: the session strip container is ALWAYS rendered
+    // (its height reserved) even before the first capture, so the
+    // measured viewport rect never changes when pages land.
+    expect(screen.getByLabelText('Pages captured this session')).toBeTruthy();
+    expect(screen.getByText('Captured pages appear here')).toBeTruthy();
     // The mode selector is gone entirely: no Original/Document/
     // Grayscale/B&W group anywhere in the scanner.
     expect(screen.queryByLabelText('Capture mode')).toBeNull();
@@ -879,21 +898,41 @@ describe('CameraCapture facing-toggle device semantics (AGENT11)', () => {
   });
 });
 
-describe('CameraCapture capture/scan budgets (5-4/5-6)', () => {
+describe('CameraCapture capture/scan budgets (5-4/5-6, 3600px scan-capture policy)', () => {
   it('captureTargetDims keeps small frames untouched (no upscale)', () => {
     expect(captureTargetDims(1920, 1080)).toEqual({ width: 1920, height: 1080 });
     expect(captureTargetDims(2500, 1406)).toEqual({ width: 2500, height: 1406 });
+    expect(captureTargetDims(3600, 2025)).toEqual({ width: 3600, height: 2025 });
   });
 
-  it('captureTargetDims clamps 12MP-class frames to the 2500px budget', () => {
-    expect(captureTargetDims(4000, 3000)).toEqual({ width: 2500, height: 1875 });
-    expect(captureTargetDims(3000, 4000)).toEqual({ width: 1875, height: 2500 });
+  it('captureTargetDims clamps 12MP-class frames to the 3600px scan-capture budget', () => {
+    expect(SCAN_CAPTURE_LONG_EDGE).toBe(3600);
+    expect(captureTargetDims(4000, 3000)).toEqual({ width: 3600, height: 2700 });
+    expect(captureTargetDims(3000, 4000)).toEqual({ width: 2700, height: 3600 });
   });
 
-  it('canSkipNormalization skips within-budget JPEGs with zero decodes', () => {
+  it('canSkipNormalization skips within-budget JPEGs with zero decodes (gallery default)', () => {
     const jpeg = new File(['x'], 'scan-001.jpg', { type: 'image/jpeg' });
     expect(canSkipNormalization({ width: 1920, height: 1080 }, jpeg)).toBe(true);
     expect(canSkipNormalization({ width: 2500, height: 1875 }, jpeg)).toBe(true);
+    // Over the 2500px gallery budget the full path still runs.
+    expect(canSkipNormalization({ width: 3600, height: 2700 }, jpeg)).toBe(false);
+  });
+
+  it('canSkipNormalization takes a maxLongEdge: camera accept keeps 3600px captures', () => {
+    const jpeg = new File(['x'], 'scan-001.jpg', { type: 'image/jpeg' });
+    // The camera accept path passes the scan-capture budget so
+    // budget-clamped captures are NOT re-downscaled.
+    expect(canSkipNormalization({ width: 3200, height: 2400 }, jpeg, SCAN_CAPTURE_LONG_EDGE)).toBe(
+      true,
+    );
+    expect(canSkipNormalization({ width: 3600, height: 2700 }, jpeg, SCAN_CAPTURE_LONG_EDGE)).toBe(
+      true,
+    );
+    // Over budget still normalizes, whatever the budget.
+    expect(canSkipNormalization({ width: 4000, height: 3000 }, jpeg, SCAN_CAPTURE_LONG_EDGE)).toBe(
+      false,
+    );
   });
 
   it('canSkipNormalization keeps PNGs and oversized frames on the full path', () => {
@@ -903,5 +942,304 @@ describe('CameraCapture capture/scan budgets (5-4/5-6)', () => {
     expect(canSkipNormalization({ width: 1280, height: 960 }, png)).toBe(false);
     expect(canSkipNormalization({ width: 1280, height: 960 }, extPng)).toBe(false);
     expect(canSkipNormalization({ width: 4000, height: 3000 }, jpeg)).toBe(false);
+    expect(canSkipNormalization({ width: 1280, height: 960 }, png, SCAN_CAPTURE_LONG_EDGE)).toBe(
+      false,
+    );
+  });
+});
+
+describe('CameraCapture auto-capture (motion-gated shutter)', () => {
+  /** RGBA frame where every pixel is the same gray `value`. */
+  const grayFrame = (value: number, pixels: number): Uint8ClampedArray => {
+    const data = new Uint8ClampedArray(pixels * 4);
+    for (let i = 0; i < pixels; i += 1) {
+      data[i * 4] = value;
+      data[i * 4 + 1] = value;
+      data[i * 4 + 2] = value;
+      data[i * 4 + 3] = 255;
+    }
+    return data;
+  };
+
+  /** Pixels in the stability canvas for the default 1920×1080 stream. */
+  const stabPixels = (videoW = 1920, videoH = 1080): number => {
+    const long = Math.max(videoW, videoH);
+    const w = Math.max(1, Math.round((videoW * AUTO_CAPTURE_STABLE_EDGE) / long));
+    const h = Math.max(1, Math.round((videoH * AUTO_CAPTURE_STABLE_EDGE) / long));
+    return w * h;
+  };
+
+  interface FakeCanvasStub {
+    /** `null` → default all-zero frames. */
+    setProvider: (fn: ((call: number) => Uint8ClampedArray) | null) => void;
+  }
+
+  /**
+   * jsdom has no canvas 2D context: installs fake canvas/video plumbing
+   * so the live tick can draw, read pixels, and encode. `getImageData`
+   * serves frames from the test-controlled provider (one call per
+   * stability tick — the detection tick never reads pixels).
+   */
+  function installFakeCanvas(videoW = 1920, videoH = 1080): FakeCanvasStub {
+    let calls = 0;
+    let provider: ((call: number) => Uint8ClampedArray) | null = null;
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      getImageData: vi.fn((_x: number, _y: number, w: number, h: number) => {
+        calls += 1;
+        return { data: provider !== null ? provider(calls) : grayFrame(0, w * h) };
+      }),
+    };
+    Object.defineProperty(window.HTMLCanvasElement.prototype, 'getContext', {
+      value: () => fakeCtx,
+      configurable: true,
+    });
+    Object.defineProperty(window.HTMLCanvasElement.prototype, 'toBlob', {
+      value: (cb: (b: Blob | null) => void) => cb(new Blob(['jpeg'], { type: 'image/jpeg' })),
+      configurable: true,
+    });
+    Object.defineProperty(window.HTMLVideoElement.prototype, 'videoWidth', {
+      value: videoW,
+      configurable: true,
+    });
+    Object.defineProperty(window.HTMLVideoElement.prototype, 'videoHeight', {
+      value: videoH,
+      configurable: true,
+    });
+    return {
+      setProvider: (fn) => {
+        calls = 0;
+        provider = fn;
+      },
+    };
+  }
+
+  function restoreFakeCanvas() {
+    const canvasProto = window.HTMLCanvasElement.prototype as unknown as Record<string, unknown>;
+    delete canvasProto['getContext'];
+    delete canvasProto['toBlob'];
+    const videoProto = window.HTMLVideoElement.prototype as unknown as Record<string, unknown>;
+    delete videoProto['videoWidth'];
+    delete videoProto['videoHeight'];
+  }
+
+  const queuedThumbs = () =>
+    document.querySelectorAll('[aria-label="Pages captured this session"] img').length;
+
+  /** Advances fake timers AND drains the microtask chains they start. */
+  const advance = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+  };
+
+  /**
+   * The dock renders synchronously, so the shutter is in the DOM before
+   * `getUserMedia` resolves. `findBy*` is unusable here (its first check
+   * is timer-deferred, and nothing advances the fake clock), so assert
+   * synchronously and flush the getUserMedia → live chain by hand.
+   */
+  const liveCamera = async () => {
+    screen.getByLabelText('Capture page');
+    await act(async () => {
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+  };
+
+  /** Alternating 40/41 frames: SAD 1 (stable — real sensors have noise). */
+  const steadyProvider = (pixels: number) => (call: number) =>
+    grayFrame(call % 2 === 0 ? 40 : 41, pixels);
+
+  beforeEach(() => {
+    URL.createObjectURL = vi.fn(
+      () => 'blob:capture-thumb',
+    ) as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn() as unknown as typeof URL.revokeObjectURL;
+  });
+
+  it('frameMeanSad/toGrayLuma: the stability math behind the gate', () => {
+    // Pin the documented threshold: stable ticks sit at/below this mean
+    // gray-level diff; SAD 0 (static feed) counts as stable.
+    expect(AUTO_CAPTURE_SAD_THRESHOLD).toBe(2);
+    const gray40 = toGrayLuma(grayFrame(40, 4), 2, 2);
+    expect([...gray40]).toEqual([40, 40, 40, 40]);
+    expect(frameMeanSad(gray40, toGrayLuma(grayFrame(40, 4), 2, 2))).toBe(0);
+    expect(frameMeanSad(gray40, toGrayLuma(grayFrame(41, 4), 2, 2))).toBe(1);
+    expect(frameMeanSad(gray40, toGrayLuma(grayFrame(200, 4), 2, 2))).toBe(160);
+    // Mismatched/incomparable frames are maximally unstable.
+    expect(frameMeanSad(gray40, new Uint8Array(0))).toBe(Number.POSITIVE_INFINITY);
+    expect(frameMeanSad(gray40, new Uint8Array(3))).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('fires the existing shutter after 3 consecutive stable ticks, without detection', async () => {
+    vi.useFakeTimers();
+    try {
+      const pixels = stabPixels();
+      const stub = installFakeCanvas();
+      stub.setProvider(steadyProvider(pixels));
+      mockMedia({ getUserMedia: async () => fakeStream });
+      const onScanAccept = vi.fn();
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={onScanAccept}
+          onRetake={noop}
+          onDone={noop}
+          onBuildNow={noop}
+          sessionPages={[]}
+        />,
+      );
+      await liveCamera();
+      // Tick 1 is the baseline only — nothing queued.
+      await advance(500);
+      expect(queuedThumbs()).toBe(0);
+      // Ticks 2-3: two stable ticks, still short of N=3.
+      await advance(1000);
+      expect(queuedThumbs()).toBe(0);
+      // Tick 4: third consecutive stable tick → the shutter fires and the
+      // capture lands in the session strip (queued for review, never
+      // committed straight to the page collection).
+      await advance(500);
+      expect(queuedThumbs()).toBe(1);
+      expect(screen.getByAltText('Captured page 1: scan-001.jpg')).toBeTruthy();
+      expect(onScanAccept).not.toHaveBeenCalled();
+    } finally {
+      restoreFakeCanvas();
+      vi.useRealTimers();
+    }
+  });
+
+  it('spaces auto-fires by the 1.5s cooldown', async () => {
+    vi.useFakeTimers();
+    try {
+      const pixels = stabPixels();
+      const stub = installFakeCanvas();
+      stub.setProvider(steadyProvider(pixels));
+      mockMedia({ getUserMedia: async () => fakeStream });
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={noop}
+          onRetake={noop}
+          onDone={noop}
+          onBuildNow={noop}
+          sessionPages={[]}
+        />,
+      );
+      await liveCamera();
+      await advance(2000); // First fire at the 4th tick.
+      expect(queuedThumbs()).toBe(1);
+      // A fully stable stream re-arms: the counter restarts after a fire
+      // (2 stable ticks at t=3000 — short of N), and the cooldown holds
+      // until 1.5s after the previous shot.
+      await advance(1000);
+      expect(queuedThumbs()).toBe(1);
+      await advance(500); // t=3500: 3 stable ticks AND cooldown elapsed.
+      expect(queuedThumbs()).toBe(2);
+    } finally {
+      restoreFakeCanvas();
+      vi.useRealTimers();
+    }
+  });
+
+  it('motion resets the stability counter (the page must be held still)', async () => {
+    vi.useFakeTimers();
+    try {
+      const pixels = stabPixels();
+      const stub = installFakeCanvas();
+      stub.setProvider((call) =>
+        call === 3 ? grayFrame(200, pixels) : grayFrame(call % 2 === 0 ? 40 : 41, pixels),
+      );
+      mockMedia({ getUserMedia: async () => fakeStream });
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={noop}
+          onRetake={noop}
+          onDone={noop}
+          onBuildNow={noop}
+          sessionPages={[]}
+        />,
+      );
+      await liveCamera();
+      await advance(2000); // One unstable tick at t=1500 breaks the run.
+      expect(queuedThumbs()).toBe(0);
+      // Three fresh stable ticks (t=2500..3500) fire the shutter.
+      await advance(1500);
+      expect(queuedThumbs()).toBe(1);
+    } finally {
+      restoreFakeCanvas();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fires on a bit-identical (static) stream after N stable ticks', async () => {
+    vi.useFakeTimers();
+    try {
+      const pixels = stabPixels();
+      const stub = installFakeCanvas();
+      // SAD exactly 0 forever: a synthetic/static feed (like the E2E
+      // fake Y4M camera) counts as stable — bounded by cooldown + toggle.
+      stub.setProvider(() => grayFrame(40, pixels));
+      mockMedia({ getUserMedia: async () => fakeStream });
+      const onScanAccept = vi.fn();
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={onScanAccept}
+          onRetake={noop}
+          onDone={noop}
+          onBuildNow={noop}
+          sessionPages={[]}
+        />,
+      );
+      await liveCamera();
+      await advance(5000);
+      // Baseline tick + 3 stable ticks fire at ~1.5s, cooldown spaces the
+      // next fire at ~3s: at least one auto-capture by t=5s.
+      expect(queuedThumbs()).toBeGreaterThanOrEqual(1);
+    } finally {
+      restoreFakeCanvas();
+      vi.useRealTimers();
+    }
+  });
+
+  it('the toggle turns auto-capture off; the manual shutter still works', async () => {
+    vi.useFakeTimers();
+    try {
+      const pixels = stabPixels();
+      const stub = installFakeCanvas();
+      stub.setProvider(steadyProvider(pixels));
+      mockMedia({ getUserMedia: async () => fakeStream });
+      render(
+        <CameraCapture
+          onImportFiles={noopImport}
+          onScanAccept={noop}
+          onRetake={noop}
+          onDone={noop}
+          onBuildNow={noop}
+          sessionPages={[]}
+        />,
+      );
+      await liveCamera();
+      const toggle = screen.getByLabelText('Auto capture');
+      expect(toggle.getAttribute('aria-pressed')).toBe('true');
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-pressed')).toBe('false');
+      expect(toggle.getAttribute('data-auto-capture')).toBe('off');
+      // A fully stable stream no longer fires anything.
+      await advance(5000);
+      expect(queuedThumbs()).toBe(0);
+      // The manual shutter always works.
+      fireEvent.click(screen.getByLabelText('Capture page'));
+      await act(async () => {
+        for (let i = 0; i < 12; i += 1) await Promise.resolve();
+      });
+      expect(queuedThumbs()).toBe(1);
+    } finally {
+      restoreFakeCanvas();
+      vi.useRealTimers();
+    }
   });
 });

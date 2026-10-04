@@ -222,6 +222,7 @@ async function reviewQueueState(page) {
     open: document.querySelector('[data-scan-queue]') !== null,
     header: document.querySelector('[data-scan-queue] p[role="status"]')?.textContent ?? '',
     handles: document.querySelectorAll('[data-crop-handle]').length,
+    midHandles: document.querySelectorAll('[data-crop-handle-mid]').length,
     resultShown: document.querySelector('[data-crop-result]') !== null,
     progress: document.querySelector('[data-review-progress]')?.getAttribute('aria-label') ?? '',
   }));
@@ -243,30 +244,208 @@ async function clickReviewCta(page) {
   await page.evaluate(() => document.querySelector('[data-review-cta]')?.click());
 }
 
-/** Drag the top-left handle (pointer path) + arrow-key the top-right (slider path). */
+/**
+ * Drag the top-left corner (pointer path), arrow-key the top-right
+ * (slider path), then drag the TOP EDGE MIDPOINT (pointer path) and
+ * measure whether BOTH adjacent corners translated together — the
+ * "different direction/angle" adjustment of the 8-handle editor.
+ */
 async function exerciseCropHandles(page) {
-  return page.evaluate(() => {
-    const tl = document.querySelector('[data-crop-handle="tl"]');
-    const tr = document.querySelector('[data-crop-handle="tr"]');
-    if (tl === null || tr === null) return false;
-    const r = tl.getBoundingClientRect();
-    const startX = r.x + r.width / 2;
-    const startY = r.y + r.height / 2;
-    tl.dispatchEvent(
-      new PointerEvent('pointerdown', { bubbles: true, clientX: startX, clientY: startY }),
-    );
-    window.dispatchEvent(
-      new PointerEvent('pointermove', {
-        bubbles: true,
-        clientX: startX + 20,
-        clientY: startY + 12,
-      }),
-    );
-    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-    tr.focus();
-    tr.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
-    return document.activeElement === tr;
+  // Async-aware: React flushes setQuad AFTER the evaluate returns, so each
+  // dispatch-then-measure round trip goes through Node with a
+  // waitForFunction in between. The previous single-evaluate version read
+  // the handle center synchronously (before React re-rendered) and always
+  // reported cornerDrag:false.
+  const centerOf = (sel) =>
+    page.evaluate((s) => {
+      try {
+        const el = document.querySelector(s);
+        if (el === null) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      } catch {
+        return null;
+      }
+    }, sel);
+  const start = await centerOf('[data-crop-handle="tl"]');
+  if (start === null) return null;
+  await page.evaluate(() => {
+    try {
+      const tl = document.querySelector('[data-crop-handle="tl"]');
+      if (tl === null) return;
+      const r = tl.getBoundingClientRect();
+      const x = r.x + r.width / 2;
+      const y = r.y + r.height / 2;
+      tl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y }));
+      window.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, clientX: x + 20, clientY: y + 12 }),
+      );
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    } catch {
+      /* total predicate: never throw */
+    }
   });
+  try {
+    await page.waitForFunction(
+      (sx, sy) => {
+        try {
+          const el = document.querySelector('[data-crop-handle="tl"]');
+          if (el === null) return false;
+          const r = el.getBoundingClientRect();
+          const cx = r.x + r.width / 2;
+          const cy = r.y + r.height / 2;
+          return cx > sx + 5 && cy > sy + 5;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 10000 },
+      start.x,
+      start.y,
+    );
+  } catch {
+    /* measured below as cornerDrag:false */
+  }
+  const movedTl = await centerOf('[data-crop-handle="tl"]');
+  if (movedTl === null) return null;
+  // Keyboard: the top-right corner steps left (slider path).
+  await page.evaluate(() => {
+    try {
+      const tr = document.querySelector('[data-crop-handle="tr"]');
+      if (tr === null) return;
+      tr.focus();
+      tr.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowLeft' }));
+    } catch {
+      /* total: never throw */
+    }
+  });
+  const keyboard = await page.evaluate(() => {
+    try {
+      const tr = document.querySelector('[data-crop-handle="tr"]');
+      return { focused: document.activeElement === tr };
+    } catch {
+      return { focused: false };
+    }
+  });
+  // Edge-midpoint drag: the top edge translates as a whole — both tl
+  // and tr must move by the same delta while the pointer moves the
+  // midpoint handle.
+  const before = await page.evaluate(() => {
+    try {
+      const pos = (s) => {
+        const el = document.querySelector(s);
+        if (el === null) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      };
+      const tl = pos('[data-crop-handle="tl"]');
+      const tr = pos('[data-crop-handle="tr"]');
+      const mid = pos('[data-crop-handle-mid="top"]');
+      if (tl === null || tr === null || mid === null) return null;
+      return { tl, tr, mid };
+    } catch {
+      return null;
+    }
+  });
+  if (before === null) return { cornerDrag: false, keyboard, mid: null };
+  await page.evaluate((b) => {
+    try {
+      const mid = document.querySelector('[data-crop-handle-mid="top"]');
+      if (mid === null) return;
+      mid.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, clientX: b.mid.x, clientY: b.mid.y }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', {
+          bubbles: true,
+          clientX: b.mid.x,
+          clientY: b.mid.y + 24,
+        }),
+      );
+      window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    } catch {
+      /* total: never throw */
+    }
+  }, before);
+  try {
+    await page.waitForFunction(
+      (by) => {
+        try {
+          const el = document.querySelector('[data-crop-handle-mid="top"]');
+          if (el === null) return false;
+          const r = el.getBoundingClientRect();
+          return r.y + r.height / 2 > by + 5;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 10000 },
+      before.mid.y,
+    );
+  } catch {
+    /* measured below as moved:false */
+  }
+  const after = await page.evaluate(() => {
+    try {
+      const pos = (s) => {
+        const el = document.querySelector(s);
+        if (el === null) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      };
+      const tl = pos('[data-crop-handle="tl"]');
+      const tr = pos('[data-crop-handle="tr"]');
+      const mid = pos('[data-crop-handle-mid="top"]');
+      if (tl === null || tr === null || mid === null) return null;
+      return { tl, tr, mid };
+    } catch {
+      return null;
+    }
+  });
+  if (after === null) return { cornerDrag: false, keyboard, mid: null };
+  const round1 = (v) => Math.round(v * 10) / 10;
+  return {
+    cornerDrag: movedTl.x > start.x + 5 && movedTl.y > start.y + 5,
+    keyboard,
+    mid: {
+      moved: after.mid.y > before.mid.y + 5,
+      tlDy: round1(after.tl.y - before.tl.y),
+      trDy: round1(after.tr.y - before.tr.y),
+      midDy: round1(after.mid.y - before.mid.y),
+    },
+  };
+}
+
+/** Reads the auto-capture toggle state (button toggle or checkbox). */
+async function autoCaptureState(page) {
+  await page.waitForSelector('[data-auto-capture]', { timeout: 30000 });
+  return page.evaluate(() => {
+    const t = document.querySelector('[data-auto-capture]');
+    if (t === null) return { present: false, on: null };
+    const pressed = t.getAttribute('aria-pressed');
+    const checked = t.getAttribute('aria-checked');
+    if (pressed !== null) return { present: true, on: pressed === 'true' };
+    if (checked !== null) return { present: true, on: checked === 'true' };
+    if (t instanceof HTMLInputElement) return { present: true, on: t.checked };
+    return { present: true, on: null };
+  });
+}
+
+/**
+ * Turns auto-capture OFF when it is ON (one click). Clicks unless the
+ * toggle POSITIVELY reads OFF — fresh scanner sessions default the
+ * toggle ON, so an unreadable state still gets the OFF click, while a
+ * persisted OFF state is left alone (idempotent across remounts).
+ */
+async function autoCaptureOff(page) {
+  const before = await autoCaptureState(page);
+  if (before.on !== false) {
+    await page.evaluate(() => {
+      document.querySelector('[data-auto-capture]')?.click();
+    });
+  }
+  const after = await autoCaptureState(page);
+  return { before: before.on, after: after.on };
 }
 
 /** Clicks one per-page queue decision by its exact label ("Looks good" / "Apply" / "Use original" / "Back to camera" / "Build PDF"). */
@@ -1057,6 +1236,101 @@ async function main() {
         { timeout: 120000 },
         n,
       );
+    /** Current strip count — the base for relative capture waits (the
+     *  strip shows committed session pages too, so absolute counts race). */
+    const stripCount = () =>
+      page.evaluate(
+        () => document.querySelectorAll('[aria-label="Pages captured this session"] img').length,
+      );
+    // Frozen B1 contract: the auto-capture toggle exists and defaults ON.
+    const autoDefault = await autoCaptureState(page);
+    check(
+      'images scanner auto-capture toggle is present and defaults ON',
+      autoDefault.present && autoDefault.on,
+      JSON.stringify(autoDefault),
+    );
+    // Dedicated auto-capture check (fresh session, toggle ON, static
+    // document Y4M): the scan worker must auto-fire a capture into the
+    // session strip WITHOUT any manual shutter click.
+    let autoFired = null;
+    try {
+      await stripThumbs(1);
+      autoFired = true;
+    } catch {
+      autoFired = false;
+    }
+    check('images auto-capture fires into the queue without a manual click', autoFired === true);
+    // One click turns it OFF — every later manual-capture step in this
+    // section runs with auto-capture OFF.
+    const autoOff = await autoCaptureOff(page);
+    check(
+      'images auto-capture toggle turns OFF on click',
+      autoOff.before === true && autoOff.after === false,
+      JSON.stringify(autoOff),
+    );
+    const autoPages = await page.evaluate(
+      () => document.querySelectorAll('[aria-label="Pages captured this session"] img').length,
+    );
+    check('images auto-capture queued at least one page', autoPages >= 1, `${autoPages} page(s)`);
+    // Review the auto-captured page(s) through the existing result-first
+    // flow (Looks good on each), then return to the live camera for the
+    // manual-capture flow below.
+    await clickReviewCta(page);
+    await page.waitForFunction(() => document.querySelector('[data-scan-queue]') !== null, {
+      timeout: 30000,
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Page 1 of'), {
+      timeout: 30000,
+    });
+    for (let i = 0; i < autoPages; i += 1) {
+      await waitForResultPreview(page);
+      await page.waitForFunction(
+        () => {
+          const b = [...document.querySelectorAll('[data-scan-queue] button')].find(
+            (x) => (x.textContent ?? '').trim() === 'Looks good',
+          );
+          return b !== undefined && !b.disabled;
+        },
+        { timeout: 120000 },
+      );
+      await clickQueueAction(page, 'Looks good');
+      if (i < autoPages - 1) {
+        await page.waitForFunction(
+          () => document.body.innerText.includes(`Page ${i + 2} of ${autoPages}`),
+          { timeout: 120000 },
+        );
+      }
+    }
+    await page.waitForFunction(() => document.body.innerText.includes('All pages ready'), {
+      timeout: 120000,
+    });
+    check('images auto-captured pages review via Looks good', true, `${autoPages} page(s)`);
+    await clickQueueAction(page, 'Back to camera');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-scan-queue]') === null &&
+        document.querySelector('video') !== null,
+      { timeout: 30000 },
+    );
+    // Clean up completely: the committed auto page would shift every
+    // downstream page-count assertion. Leave camera mode through the
+    // empty-queue CTA, clear the collection, and re-enter fresh so the
+    // manual-capture flow below starts from the same empty session it
+    // always has (strip counts, CTA labels, and card order stay exact).
+    await page.evaluate(() => document.querySelector('[data-review-cta]')?.click());
+    await page.waitForFunction(() => document.querySelector('[data-scanner-root]') === null, {
+      timeout: 30000,
+    });
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Clear all')?.click();
+    });
+    await page.waitForFunction(() => document.body.innerText.includes('Add pages'), {
+      timeout: 30000,
+    });
+    await scanWithCamera();
+    // Manual captures (fresh camera mounts with auto-capture ON — turn
+    // it OFF right after start, as every manual section does).
+    await autoCaptureOff(page);
     await capturePage();
     await stripThumbs(1);
     const liveAfterCapture = await page.evaluate(() => {
@@ -1133,7 +1407,8 @@ async function main() {
         reviewActions.adjust &&
         reviewActions.useOriginal &&
         reviewActions.discard &&
-        resultFirst.handles === 0,
+        resultFirst.handles === 0 &&
+        resultFirst.midHandles === 0,
       JSON.stringify({ resultFirst, reviewActions }),
     );
     check(
@@ -1158,18 +1433,22 @@ async function main() {
       progressAfterOne.includes('1 of 2 reviewed'),
       progressAfterOne,
     );
-    // Page 2: "Adjust corners" → photo + quad editor (instruction +
-    // handles), drag + keyboard work, "Apply" returns to the result view.
-    // The page may still be preparing; wait for its result view first.
+    // Page 2: "Adjust corners" → photo + quad editor with 8 handles
+    // (4 corners + 4 edge midpoints), drag + keyboard work, "Apply"
+    // returns to the result view. The page may still be preparing; wait
+    // for its result view first.
     await page.waitForFunction(() => document.querySelector('[data-crop-result]') !== null, {
       timeout: 120000,
     });
     await clickQueueAction(page, 'Adjust corners');
-    await page.waitForFunction(() => document.querySelectorAll('[data-crop-handle]').length === 4, {
-      timeout: 30000,
-    });
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-crop-handle]').length === 4 &&
+        document.querySelectorAll('[data-crop-handle-mid]').length === 4,
+      { timeout: 30000 },
+    );
     const adjustUi = await page.evaluate(() => ({
-      instruction: document.body.innerText.includes('Drag the corners to fit the page'),
+      instruction: document.body.innerText.includes('Drag the handles to fit the page'),
       resetToAuto: [...document.querySelectorAll('[data-scan-queue] button')].some(
         (b) => (b.textContent ?? '').trim() === 'Reset to auto',
       ),
@@ -1179,13 +1458,34 @@ async function main() {
       adjustUi.instruction && adjustUi.resetToAuto,
       JSON.stringify(adjustUi),
     );
-    const interacted = await exerciseCropHandles(page);
-    check('images crop handles respond to drag + keyboard', interacted);
+    const eightHandles = await reviewQueueState(page);
+    check(
+      'images adjust mode shows 8 handles (4 corners + 4 edge midpoints)',
+      eightHandles.handles === 4 && eightHandles.midHandles === 4,
+      JSON.stringify(eightHandles),
+    );
+    const cropDrag = await exerciseCropHandles(page);
+    check(
+      'images crop handles respond to drag + keyboard',
+      cropDrag !== null && cropDrag.cornerDrag && cropDrag.keyboard.focused,
+      JSON.stringify(cropDrag),
+    );
+    check(
+      'images edge-midpoint drag translates the whole edge (both corners together)',
+      cropDrag !== null &&
+        cropDrag.mid !== null &&
+        cropDrag.mid.moved &&
+        cropDrag.mid.tlDy > 4 &&
+        cropDrag.mid.trDy > 4 &&
+        Math.abs(cropDrag.mid.tlDy - cropDrag.mid.trDy) < 2,
+      JSON.stringify(cropDrag?.mid ?? null),
+    );
     await clickQueueAction(page, 'Apply');
     await page.waitForFunction(
       () =>
         document.querySelector('[data-crop-result]') !== null &&
-        document.querySelectorAll('[data-crop-handle]').length === 0,
+        document.querySelectorAll('[data-crop-handle]').length === 0 &&
+        document.querySelectorAll('[data-crop-handle-mid]').length === 0,
       { timeout: 120000 },
     );
     await clickQueueAction(page, 'Looks good');
@@ -1286,6 +1586,9 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
+    // Manual captures: turn auto-capture OFF right after camera start so
+    // the static fake camera cannot surprise the capture count.
+    await autoCaptureOff(page);
     await page.waitForFunction(
       () => {
         const v = document.querySelector('video');
@@ -1293,8 +1596,9 @@ async function main() {
       },
       { timeout: 30000 },
     );
+    const scanMoreBase = await stripCount();
     await capturePage();
-    await stripThumbs(1);
+    await stripThumbs(scanMoreBase + 1);
     // Scanner surface: mode selector is gone; Import lives in the bar.
     // Desktop keeps a bounded, centered panel (not a full-bleed phone
     // layout); the phone-width geometry check follows below. Runs once
@@ -1383,6 +1687,8 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
+    // Manual capture session: auto-capture OFF right after camera start.
+    await autoCaptureOff(page);
     await page.waitForFunction(
       () => {
         const v = document.querySelector('video');
@@ -1448,6 +1754,9 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
+    // Geometry checks only: auto-capture OFF so no surprise capture can
+    // race the "Back to pages" exit below.
+    await autoCaptureOff(page);
     await page.waitForFunction(
       () => {
         const v = document.querySelector('video');
@@ -1479,6 +1788,8 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Scan more')?.click();
     });
+    // Manual capture session: auto-capture OFF right after camera start.
+    await autoCaptureOff(page);
     await page.waitForFunction(
       () => {
         const v = document.querySelector('video');
@@ -1489,9 +1800,23 @@ async function main() {
     const viewportH = () =>
       page.evaluate(() => {
         const v = document.querySelector('video');
-        return v?.parentElement?.getBoundingClientRect().height ?? 0;
+        // video is always mounted while streaming; only the measurement can
+        // lag a remount — retry once so a transient detach never reads 0.
+        let r = v?.parentElement?.getBoundingClientRect().height ?? 0;
+        if (r <= 0) r = v?.getBoundingClientRect().height ?? 0;
+        return r;
       });
+    // Wait for the viewport to have a real (nonzero) height after the
+    // phone-width resize + camera start before measuring the baseline.
+    await page.waitForFunction(
+      () => {
+        const v = document.querySelector('video');
+        return v !== null && (v.parentElement?.getBoundingClientRect().height ?? 0) > 0;
+      },
+      { timeout: 30000 },
+    );
     const beforeCaptureH = await viewportH();
+    const phoneStripBase = await stripCount();
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.getAttribute('aria-label') === 'Capture page')
@@ -1499,10 +1824,14 @@ async function main() {
     });
     // The queued capture's thumb lands in the session strip by itself —
     // the viewfinder must not collapse when it appears (real-phone
-    // report). No review step happens during capture.
+    // report). No review step happens during capture. (Auto-capture is
+    // OFF here, so exactly this one capture can affect the geometry.)
     await page.waitForFunction(
-      () => document.querySelectorAll('[aria-label="Pages captured this session"] img').length >= 1,
+      (expected) =>
+        document.querySelectorAll('[aria-label="Pages captured this session"] img').length >=
+        expected,
       { timeout: 120000 },
+      phoneStripBase + 1,
     );
     const afterCaptureH = await viewportH();
     check(
@@ -1702,12 +2031,19 @@ async function main() {
         .find((b) => b.textContent?.includes('Scan with camera'))
         ?.click();
     });
+    // Manual capture section: auto-capture OFF right after camera start
+    // (blank frames could never auto-fire, but every manual-capture
+    // section runs with the toggle OFF by contract).
+    await autoCaptureOff(page);
     await page.waitForFunction(
       () => {
         const v = document.querySelector('video');
         return v !== null && v.videoWidth > 100;
       },
       { timeout: 30000 },
+    );
+    const fallbackStripBase = await page.evaluate(
+      () => document.querySelectorAll('[aria-label="Pages captured this session"] img').length,
     );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
@@ -1716,8 +2052,11 @@ async function main() {
     });
     // Queued silently: the thumb appears, no blocking decision, camera live.
     await page.waitForFunction(
-      () => document.querySelectorAll('[aria-label="Pages captured this session"] img').length >= 1,
+      (expected) =>
+        document.querySelectorAll('[aria-label="Pages captured this session"] img').length >=
+        expected,
       { timeout: 120000 },
+      fallbackStripBase + 1,
     );
     const queuedQuietly = await page.evaluate(() => ({
       queueOpen: document.querySelector('[data-scan-queue]') !== null,
@@ -1733,8 +2072,8 @@ async function main() {
       JSON.stringify(queuedQuietly),
     );
     // The queue is the crop opportunity: result-first, then the fallback
-    // capture is croppable via the 90% inset quad (4 handles) in adjust
-    // mode — like any other photo.
+    // capture is croppable via the 90% inset quad (8 handles — 4 corners
+    // + 4 edge midpoints) in adjust mode — like any other photo.
     await clickReviewCta(page);
     await page.waitForFunction(() => document.body.innerText.includes('Page 1 of 1'), {
       timeout: 30000,
@@ -1746,13 +2085,16 @@ async function main() {
       timeout: 120000,
     });
     await clickQueueAction(page, 'Adjust corners');
-    await page.waitForFunction(() => document.querySelectorAll('[data-crop-handle]').length === 4, {
-      timeout: 30000,
-    });
+    await page.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-crop-handle]').length === 4 &&
+        document.querySelectorAll('[data-crop-handle-mid]').length === 4,
+      { timeout: 30000 },
+    );
     const fallbackQueue = await reviewQueueState(page);
     check(
-      'images fallback capture enters the review queue croppable (4 handles)',
-      fallbackQueue.open && fallbackQueue.handles === 4,
+      'images fallback capture enters the review queue croppable (8 handles)',
+      fallbackQueue.open && fallbackQueue.handles === 4 && fallbackQueue.midHandles === 4,
       JSON.stringify(fallbackQueue),
     );
     // Queue exit without a decision: the entry commits as the photo with

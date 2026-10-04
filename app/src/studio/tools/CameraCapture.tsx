@@ -25,6 +25,15 @@
  * and after the last page the end screen builds the PDF right there
  * (`onBuildNow`) instead of walking back to the Images tool.
  *
+ * Capture policy (2026-10-03): captures clamp to
+ * `SCAN_CAPTURE_LONG_EDGE` (3600px — above the 2500px gallery import
+ * budget) for sharper rewraps and near-final review previews. An
+ * auto-capture toggle (default ON) fires the SAME shutter path when the
+ * live frame stays motion-stable for 3 ticks (SAD gate — detection
+ * stays a guidance pill, never a trigger); the manual shutter always
+ * works. The session strip reserves its height unconditionally so the
+ * viewfinder rect is constant for the whole session.
+ *
  * State machine (local, explicit — no ambiguous "stream exists but dead"
  * states): `starting` → `live` → (`disconnected` | `preview-blocked` |
  * `failed`), with `live` re-entered via Try again. Every async
@@ -117,26 +126,24 @@ function stopStream(stream: MediaStream | null) {
 }
 
 /**
- * Capture target dimensions (5-6): the frame is clamped to the shared
- * 2500px import/scan pixel budget ON the capture canvas, before any
- * scan bytes exist. Detection is unaffected (the worker downscales to
- * 800px either way — confidence is identical at both scales in the
- * `scan_bench` comparison). The tradeoff is deliberate and measured
- * (release, synthetic 12MP framing, min of 5):
- *
- * ```text
- * full 12MP input  → out 2435×2322 (5.65 MP), conf 0.82
- * pre-scaled input → out 1522×1451 (2.20 MP), conf 0.81–0.82
- * ```
- *
- * Warp output size follows input quad pixels until the 2500px cap
- * binds, so pre-scaling yields ~2.5× fewer output pixels — still ~10″
- * wide at 150 DPI, inside the project's documented budgets. Wall time
- * is detection-dominated on desktop CPU (color path ≈ unchanged;
- * enhance paths −30%, e.g. 12MP b/w 286ms → 194ms); the reliable wins
- * are memory (one 12MP RGB frame = 36 MB resident → 14 MB), worker
- * transfer bytes, and output JPEG size (157 KB → 65 KB). Absolute
- * browser/WASM wall time needs the device matrix (no E2E here).
+ * Scan-capture pixel budget (2026-10-03 quality pass): captures clamp
+ * to this long edge ON the capture canvas — deliberately higher than
+ * the shared gallery import budget (`MAX_IMPORT_LONG_EDGE`, 2500),
+ * because captures feed the review queue's full-res crop/rewarp path
+ * where the extra pixels buy sharper processed pages and a near-final
+ * review preview. Gallery imports keep 2500 (`imageImport.ts`).
+ */
+export const SCAN_CAPTURE_LONG_EDGE = 3600;
+
+/**
+ * Capture target dimensions (5-6, updated 2026-10-03): the frame is
+ * clamped to `SCAN_CAPTURE_LONG_EDGE` ON the capture canvas, before any
+ * scan bytes exist. Detection is unaffected — the worker downscales to
+ * ~800px internally either way. Warp output size follows the capture
+ * quad pixels until the budget binds. The deliberate tradeoff is
+ * memory: a 12MP-class frame clamped to 3600 is ~29 MB of raw RGB
+ * pixels inside the worker vs ~14 MB at 2500 — bounded by the budget
+ * and released per job (the queue never holds decoded bytes).
  */
 export function captureTargetDims(
   videoWidth: number,
@@ -144,7 +151,7 @@ export function captureTargetDims(
 ): { width: number; height: number } {
   const target = planNormalization(
     { width: videoWidth, height: videoHeight },
-    MAX_IMPORT_LONG_EDGE,
+    SCAN_CAPTURE_LONG_EDGE,
   );
   return target ?? { width: videoWidth, height: videoHeight };
 }
@@ -156,9 +163,67 @@ export function captureTargetDims(
  * Within-budget JPEGs skip `prepareImportFile` entirely (zero decodes,
  * zero re-encodes — previously one decode + a possible re-encode);
  * PNGs and oversized frames still normalize through the full path.
+ *
+ * `maxLongEdge` defaults to the gallery import budget (2500); the
+ * camera accept path passes `SCAN_CAPTURE_LONG_EDGE` (3600) so accepted
+ * captures — already budget-clamped on the capture canvas — are never
+ * re-downscaled.
  */
-export function canSkipNormalization(dims: { width: number; height: number }, file: File): boolean {
-  return planNormalization(dims, MAX_IMPORT_LONG_EDGE) === null && !isPngFile(file);
+export function canSkipNormalization(
+  dims: { width: number; height: number },
+  file: File,
+  maxLongEdge: number = MAX_IMPORT_LONG_EDGE,
+): boolean {
+  return planNormalization(dims, maxLongEdge) === null && !isPngFile(file);
+}
+
+/**
+ * Auto-capture (motion-gated auto-shutter, 2026-10-03 real-user
+ * request): "we should not detect the page while capturing; we should
+ * automatically capture it; after capturing all the things we
+ * review/readjust". Detection fails too often to gate a shot, so
+ * MOTION gates it instead: every live tick downsamples the frame to a
+ * ~96px grayscale canvas and compares it with the previous tick's
+ * frame. A mean absolute difference (SAD) below
+ * `AUTO_CAPTURE_SAD_THRESHOLD` counts as one stable tick, and
+ * `AUTO_CAPTURE_STABLE_TICKS` stable ticks in a row fire the EXISTING
+ * shutter path. The page never has to be detected to be captured; the
+ * live detection pill stays purely informational.
+ *
+ * Static-frame policy: a bit-identical stream (SAD exactly 0) DOES
+ * count as stable — a perfectly held camera on a clean sensor can
+ * produce identical frames, and the E2E fake camera is static. Repeat
+ * fires are bounded by the cooldown, the toggle, and the document-hidden
+ * guard, so a genuinely frozen feed can never machine-gun indefinitely.
+ *
+ * Calibration note: 3 ticks at the 500ms tick cadence = 1.5s of
+ * observed stillness; the cooldown spaces a multi-page session. The
+ * threshold/cooldown numbers are engineering picks, not measured
+ * device data — real-device validation is still pending.
+ */
+export const AUTO_CAPTURE_STABLE_EDGE = 96;
+export const AUTO_CAPTURE_STABLE_TICKS = 3;
+export const AUTO_CAPTURE_SAD_THRESHOLD = 2;
+export const AUTO_CAPTURE_COOLDOWN_MS = 1500;
+
+/** Mean absolute gray-level difference per pixel (0–255 scale). */
+export function frameMeanSad(prev: Uint8Array, next: Uint8Array): number {
+  if (prev.length === 0 || prev.length !== next.length) return Number.POSITIVE_INFINITY;
+  let sum = 0;
+  for (let i = 0; i < prev.length; i += 1) sum += Math.abs(prev[i] - next[i]);
+  return sum / prev.length;
+}
+
+/**
+ * RGBA bytes → luminance grayscale (Rec. 601 luma), one byte per
+ * pixel. `data.length` must be `w * h * 4` (canvas `getImageData`).
+ */
+export function toGrayLuma(data: Uint8ClampedArray, w: number, h: number): Uint8Array {
+  const gray = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    gray[p] = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+  }
+  return gray;
 }
 
 /**
@@ -262,6 +327,9 @@ export function CameraCapture({
   const streamRef = useRef<MediaStream | null>(null);
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const counterRef = useRef(0);
+  // Tick-readable capture-in-flight flag: the 500ms interval's closure
+  // must see the CURRENT value, never a render-stale `capturing`.
+  const capturingRef = useRef(false);
   const focusTimer = useRef<number | null>(null);
   const [status, setStatus] = useState<CameraStatus>('starting');
   const [failure, setFailure] = useState<string | null>(null);
@@ -269,6 +337,11 @@ export function CameraCapture({
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string>('');
   const [capturing, setCapturing] = useState(false);
+  // Auto-capture (motion-gated auto-shutter) toggle — default ON. The
+  // manual shutter always works either way.
+  const [autoCapture, setAutoCapture] = useState(true);
+  const autoCaptureRef = useRef(autoCapture);
+  autoCaptureRef.current = autoCapture;
   const [grid, setGrid] = useState(false);
   // Shutter-confirmation blink generation: each accepted capture bumps
   // this, remounting a one-shot opacity-only flash over the viewport.
@@ -666,10 +739,11 @@ export function CameraCapture({
   };
 
   /**
-   * Shutter: captures the frame ALREADY clamped to the 2500px budget
-   * (5-6, see `captureTargetDims`), then queues it for the review
-   * queue (`useScanProcessor.enqueueCapture`) — the queue entry carries
-   * the capture dims as the quad coordinate space.
+   * Shutter: captures the frame ALREADY clamped to the scan-capture
+   * budget (`SCAN_CAPTURE_LONG_EDGE` = 3600, see `captureTargetDims`),
+   * then queues it for the review queue (`useScanProcessor.enqueueCapture`)
+   * — the queue entry carries the capture dims as the quad coordinate
+   * space.
    *
    * The JPEG encode runs in `imageEncode.worker.ts` (P2 item 11) when
    * available: the frame is snapshotted via `createImageBitmap` (the
@@ -678,7 +752,7 @@ export function CameraCapture({
    * below — the live video element still holds the frame, so the retry
    * re-reads it with identical pixels, quality (q0.95), and mirroring.
    * Both paths encode the BUDGET-CLAMPED size, never full sensor
-   * resolution: a 12MP sensor frame becomes a ≤2500px JPEG either way.
+   * resolution: a 12MP sensor frame becomes a ≤3600px JPEG either way.
    */
   const captureFrame = async (): Promise<{
     file: File;
@@ -688,6 +762,7 @@ export function CameraCapture({
     const video = videoRef.current;
     if (!video || video.videoWidth === 0 || capturing) return null;
     setCapturing(true);
+    capturingRef.current = true;
     try {
       const target = captureTargetDims(video.videoWidth, video.videoHeight);
       const { width, height } = target;
@@ -725,6 +800,7 @@ export function CameraCapture({
       setFailure(error instanceof Error ? error.message : 'Capture failed.');
       return null;
     } finally {
+      capturingRef.current = false;
       setCapturing(false);
     }
   };
@@ -885,15 +961,93 @@ export function CameraCapture({
    * mid-encode would blank the pending blob) — skipped ticks are pure
    * guidance loss, never correctness loss. All pre-existing guards
    * (processing / pending / hidden-tab) are unchanged.
+   *
+   * Auto-capture rides the SAME tick (2026-10-03): before the detection
+   * encode, a second reused canvas downsamples the frame to
+   * `AUTO_CAPTURE_STABLE_EDGE` (96px), converts it to grayscale and
+   * SAD-compares it with the previous tick — motion gates the shutter,
+   * never detection. Runs BEFORE the busy check on purpose: the small
+   * canvas is synchronous and independent of the detection encode, so
+   * the auto-shutter cadence does not stall behind a slow `toBlob`.
    */
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveBusyRef = useRef(false);
+  // Auto-capture stability state. Refs, not state: the tick reads and
+  // writes these every 500ms and must never restart the interval (the
+  // effect deps stay the stable primitives).
+  const stabCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const prevGrayRef = useRef<Uint8Array | null>(null);
+  const stableTicksRef = useRef(0);
+  const lastAutoFireRef = useRef(0);
+  // Latest `capture` closure: the interval effect may not depend on
+  // `capture` (it would restart every render), so the tick calls the
+  // fresh shutter through this mirror.
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
   useEffect(() => {
     if (status !== 'live') return;
+    // Fresh camera/session: no baseline frame, no accumulated stillness.
+    prevGrayRef.current = null;
+    stableTicksRef.current = 0;
     const id = window.setInterval(() => {
       const video = videoRef.current;
       if (video === null || video.videoWidth === 0 || scan.processing || document.hidden) {
         return;
+      }
+      // --- Auto-shutter (motion gate, independent of detection) ------
+      // Skipped while a capture is already in flight or the review queue
+      // is open (a shot queued behind the review surface would be a page
+      // the user never saw being taken). The toggle gates it entirely.
+      if (autoCaptureRef.current && !capturingRef.current && reviewRef.current === null) {
+        const stabLong = Math.max(video.videoWidth, video.videoHeight);
+        const stabScale = AUTO_CAPTURE_STABLE_EDGE / stabLong;
+        const stabW = Math.max(1, Math.round(video.videoWidth * stabScale));
+        const stabH = Math.max(1, Math.round(video.videoHeight * stabScale));
+        let stabCanvas = stabCanvasRef.current;
+        if (stabCanvas === null) {
+          stabCanvas = document.createElement('canvas');
+          stabCanvasRef.current = stabCanvas;
+        }
+        if (stabCanvas.width !== stabW || stabCanvas.height !== stabH) {
+          // Re-sizing clears the bitmap (intended — a fresh frame is
+          // drawn below) and invalidates the SAD baseline: the pixel
+          // grid itself changed, so the previous frame is not comparable.
+          stabCanvas.width = stabW;
+          stabCanvas.height = stabH;
+          prevGrayRef.current = null;
+          stableTicksRef.current = 0;
+        }
+        const stabCtx = stabCanvas.getContext('2d');
+        if (stabCtx !== null) {
+          // Without a 2D context (jsdom, exotic browsers) auto-capture
+          // is inert — the detection tick and manual shutter are
+          // unaffected.
+          stabCtx.drawImage(video, 0, 0, stabW, stabH);
+          const imageData = stabCtx.getImageData(0, 0, stabW, stabH);
+          const gray = toGrayLuma(imageData.data, stabW, stabH);
+          const prev = prevGrayRef.current;
+          // SAD == 0 counts as stable (static feed or a perfectly held
+          // camera): bounded by cooldown + toggle + hidden-guard, never a
+          // machine-gun. SAD > threshold resets the run.
+          const sad = prev === null ? Number.POSITIVE_INFINITY : frameMeanSad(prev, gray);
+          const stable = sad <= AUTO_CAPTURE_SAD_THRESHOLD;
+          prevGrayRef.current = gray;
+          if (stable) {
+            stableTicksRef.current += 1;
+            if (
+              stableTicksRef.current >= AUTO_CAPTURE_STABLE_TICKS &&
+              Date.now() - lastAutoFireRef.current >= AUTO_CAPTURE_COOLDOWN_MS
+            ) {
+              lastAutoFireRef.current = Date.now();
+              stableTicksRef.current = 0;
+              // The EXISTING shutter path: same flash, same queue, same
+              // review backlog as the manual button.
+              void captureRef.current();
+            }
+          } else {
+            stableTicksRef.current = 0;
+          }
+        }
       }
       if (liveBusyRef.current) return; // Previous tick still encoding.
       const scale = 320 / Math.max(video.videoWidth, video.videoHeight);
@@ -1225,8 +1379,9 @@ export function CameraCapture({
             {/* Viewport: the wrapper flexes to leftover space; the content
               box is MEASURED (see scanViewport.ts) so video and overlay
               always share the exact painted rect — zero letterbox bars by
-              construction, guide always registered. Shrinks instead of
-              pushing content off-screen when the strip/review appear. */}
+              construction, guide always registered. The session strip
+              below reserves its height unconditionally, so this rect is
+              CONSTANT for the whole session — captures never squeeze it. */}
             <div
               ref={viewport.ref}
               className="flex min-h-[12rem] flex-1 items-center justify-center landscape:min-h-[8rem]"
@@ -1321,16 +1476,48 @@ export function CameraCapture({
                 : 'Fit page inside guide, leave a small margin'}
             </span>
 
-            {/* Camera dock: three equal cells (torch · Capture · Undo) so the
-              shutter sits truly centered. Torch renders ONLY when the active
-              track reports it; a rejected apply disables the control with a
-              note. Safe-area padded. (Zoom control removed — see BUGS F-11.) */}
+            {/* Camera dock: three equal cells (auto/torch · Capture · Undo) so
+              the shutter sits truly centered. The left cell holds the
+              Auto-capture toggle (always) and Torch (only when the active
+              track reports it; a rejected apply disables it with a note).
+              Safe-area padded. (Zoom control removed — see BUGS F-11.) */}
             <div
               role="group"
               aria-label="Camera controls"
               className="mt-3 grid grid-cols-3 items-center gap-2 landscape:mt-1 landscape:gap-1 sm:flex sm:justify-center sm:gap-5"
             >
-              <div className="flex justify-start sm:order-1">
+              <div className="flex items-center justify-start gap-1 sm:order-1">
+                {/* Auto capture (motion-gated shutter): default ON. Fires
+                  the existing shutter path automatically once the live
+                  frame stays stable for 3 ticks (SAD below threshold,
+                  1.5s cooldown) — motion triggers the shot, never
+                  detection. The manual shutter always works. */}
+                <button
+                  onClick={() => setAutoCapture((a) => !a)}
+                  data-auto-capture={autoCapture ? 'on' : 'off'}
+                  aria-pressed={autoCapture}
+                  aria-label="Auto capture"
+                  title="Auto capture"
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                    autoCapture
+                      ? 'border-brass-400/50 text-brass-600 dark:text-brass-300'
+                      : 'border-paper-300 text-ink-500 dark:border-ink-700 dark:text-ink-300'
+                  }`}
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />
+                    <path d="M19 15l.7 2.1 2.3.9-2.3.9L19 21l-.7-2.1L16 18l2.3-.9L19 15z" />
+                  </svg>
+                </button>
                 {caps.torch && !torchDead && (
                   <button
                     onClick={() => void toggleTorch()}
@@ -1410,14 +1597,22 @@ export function CameraCapture({
               shot is visible the moment its brief detect job lands).
               Lives at the very bottom (below the dock) with horizontal
               scroll only, so captured pages never squeeze the viewport.
-              Compact cells + no extra safe-area padding (the root already
-              carries it) keep the viewport stable once pages exist. */}
-            {stripPages.length > 0 && (
-              <div
-                className="flex gap-1.5 overflow-x-auto landscape:gap-1"
-                aria-label="Pages captured this session"
-              >
-                {stripPages.map((thumb, i) => (
+              ALWAYS rendered at fixed cell height (fixed viewfinder,
+              2026-10-03): the strip's height is reserved before the
+              first capture, so the measured viewport rect never changes
+              when shots land — the framing box stays put for the whole
+              session. Compact cells + no extra safe-area padding (the
+              root already carries it) keep the viewport stable. */}
+            <div
+              className="flex h-12 gap-1.5 overflow-x-auto landscape:gap-1 sm:h-16"
+              aria-label="Pages captured this session"
+            >
+              {stripPages.length === 0 ? (
+                <span className="flex h-12 shrink-0 items-center px-1 text-xs text-ink-400 dark:text-ink-300 sm:h-16">
+                  Captured pages appear here
+                </span>
+              ) : (
+                stripPages.map((thumb, i) => (
                   <div
                     key={thumb.id}
                     className={`relative h-12 w-9 shrink-0 overflow-hidden rounded-lg border bg-ink-950 sm:h-16 sm:w-12 ${
@@ -1443,9 +1638,9 @@ export function CameraCapture({
                       {i + 1}
                     </span>
                   </div>
-                ))}
-              </div>
-            )}
+                ))
+              )}
+            </div>
 
             {(caps.supportsTapToFocus || devices.length > 1) && (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">

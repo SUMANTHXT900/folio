@@ -219,8 +219,8 @@ fn rewarp_document(
     //
     // Resolution fidelity: the FULL capture bytes were decoded above at
     // native size and the warp runs at the quad's own native resolution
-    // (`warp::output_dims` caps at 2500 but never downscales a region
-    // below its own pixel count). No ≤800px verify-preview path exists
+    // (`warp::output_dims` caps at 3600 but never downscales a region
+    // below its own pixel count). No verify-preview path exists
     // in this crate — that downscale lives app-side and only feeds the
     // debounced preview URL, never accepted pages — and the long-edge
     // cap is applied exactly once, here.

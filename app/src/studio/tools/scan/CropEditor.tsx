@@ -22,16 +22,26 @@
  * fresh preview + returns to the result view) and "Reset to auto"
  * (reseeds from `initialCorners`, disabled when detection found none).
  *
- * Interaction contract (unchanged):
+ * Interaction contract (8 handles — real-user request "adjustment only
+ * has four dots; we should have many dots to adjust in different
+ * direction/angle"):
  * - Four draggable corner handles (pointer events, `touch-action: none`,
- *   44px targets). Roles TL/TR/BR/BL are fixed — the detected corner
- *   order is normalized ONCE at seed time and never re-run mid-drag
- *   (role swapping under the finger is the classic bug).
+ *   44px targets) PLUS four edge-midpoint handles (`data-crop-handle-mid`)
+ *   at the same 44px target size with a subtler 14px dot. Corner drag
+ *   moves that corner alone (existing); MIDPOINT drag translates the
+ *   WHOLE edge — both adjacent corners move together by the same clamped
+ *   delta, so a dragged edge never shears and the quad stays a quad
+ *   (the warp model remains a homography; no N-point polygon).
+ * - Roles TL/TR/BR/BL are fixed — the detected corner order is
+ *   normalized ONCE at seed time and never re-run mid-drag (role
+ *   swapping under the finger is the classic bug). Edge roles map to
+ *   fixed corner-index pairs, also never reordered.
  * - Convexity is enforced on every move via a cross-product-sign check
  *   (TS port of the `validate_quad` idea): positions are clamped to the
  *   image bounds, convexity flips are rejected (the handle stays put).
- * - Keyboard steppers live on the same handles (`role="slider"`, arrow
- *   keys, Shift for large steps, `role="status"` announcements).
+ * - Keyboard steppers live on the corner handles (`role="slider"`,
+ *   arrow keys, Shift for large steps, `role="status"` announcements);
+ *   midpoint handles are pointer-only.
  * - Overlay-only feedback during drag (free polygon redraw — no worker
  *   traffic while the pointer is down); the editor fires the debounced
  *   re-warp preview on release / 300ms idle.
@@ -51,6 +61,10 @@ import type { ScanCorner } from './scanWorkerClient';
 export const CROP_HANDLE_ROLES = ['tl', 'tr', 'br', 'bl'] as const;
 export type CropHandleRole = (typeof CROP_HANDLE_ROLES)[number];
 
+/** Edge-midpoint handle roles, in quad order. */
+export const CROP_EDGE_ROLES = ['top', 'right', 'bottom', 'left'] as const;
+export type CropEdgeRole = (typeof CROP_EDGE_ROLES)[number];
+
 /** Quad with fixed roles: [top-left, top-right, bottom-right, bottom-left]. */
 export type CropQuad = [ScanCorner, ScanCorner, ScanCorner, ScanCorner];
 
@@ -59,6 +73,21 @@ const ROLE_LABEL: Record<CropHandleRole, string> = {
   tr: 'top-right',
   br: 'bottom-right',
   bl: 'bottom-left',
+};
+
+const EDGE_LABEL: Record<CropEdgeRole, string> = {
+  top: 'top edge',
+  right: 'right edge',
+  bottom: 'bottom edge',
+  left: 'left edge',
+};
+
+/** Edge → the two corner indices it joins (TL/TR/BR/BL order). */
+const EDGE_CORNERS: Record<CropEdgeRole, readonly [number, number]> = {
+  top: [0, 1],
+  right: [1, 2],
+  bottom: [2, 3],
+  left: [3, 0],
 };
 
 /** Debounced preview delay after release / idle (spec: 300ms). */
@@ -201,7 +230,6 @@ export function CropEditor({
   const [dragging, setDragging] = useState(false);
   const quadRef = useRef(quad);
   quadRef.current = quad;
-  const dragIndexRef = useRef<number | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(false);
   const previewRef = useRef(onPreviewRequest);
@@ -228,7 +256,7 @@ export function CropEditor({
 
   const pointFromClient = (clientX: number, clientY: number): ScanCorner | null => {
     const el = frameRef.current;
-    if (el === null) return null;
+    if (el === null || !el.isConnected) return null;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return null;
     return {
@@ -250,33 +278,68 @@ export function CropEditor({
     setQuad(next);
   };
 
+  /**
+   * Edge-midpoint drag: translates the WHOLE edge. Both adjacent corners
+   * move together by one clamped delta (the midpoint follows the pointer;
+   * the delta is constrained so the edge can never shear at the image
+   * bounds), then convexity is verified exactly like a corner move.
+   */
+  const moveEdge = (edge: CropEdgeRole, raw: ScanCorner): void => {
+    const quad = quadRef.current;
+    const [a, b] = EDGE_CORNERS[edge];
+    const midX = (quad[a].x + quad[b].x) / 2;
+    const midY = (quad[a].y + quad[b].y) / 2;
+    const target = {
+      x: Math.min(Math.max(raw.x, 0), imageWidth),
+      y: Math.min(Math.max(raw.y, 0), imageHeight),
+    };
+    // Rigid translation: clamp the DELTA (not each corner) so both
+    // corners stay in bounds and the edge keeps its exact length/angle.
+    const dx = Math.min(
+      Math.max(target.x - midX, -Math.min(quad[a].x, quad[b].x)),
+      Math.min(imageWidth - quad[a].x, imageWidth - quad[b].x),
+    );
+    const dy = Math.min(
+      Math.max(target.y - midY, -Math.min(quad[a].y, quad[b].y)),
+      Math.min(imageHeight - quad[a].y, imageHeight - quad[b].y),
+    );
+    const next = [...quad] as CropQuad;
+    next[a] = { x: next[a].x + dx, y: next[a].y + dy };
+    next[b] = { x: next[b].x + dx, y: next[b].y + dy };
+    if (!isConvexQuad(next)) return;
+    quadRef.current = next;
+    setQuad(next);
+  };
+
+  /**
+   * Shared drag plumbing: window listeners (not pointer capture) keep
+   * moves flowing for mouse, touch, and pen alike even when the pointer
+   * leaves the 44px target mid-drag. `onMove` closes over its role, so
+   * roles never reorder mid-drag.
+   */
   const beginDrag =
-    (index: number): React.PointerEventHandler<HTMLButtonElement> =>
+    (onMove: (pt: ScanCorner) => void): React.PointerEventHandler<HTMLButtonElement> =>
     (e) => {
-      // Window listeners (not pointer capture): robust for mouse, touch,
-      // and pen alike — moves keep flowing even if the pointer leaves the
-      // 44px target mid-drag.
       e.preventDefault();
-      dragIndexRef.current = index;
       setDragging(true);
-      const onMove = (ev: PointerEvent) => {
-        const active = dragIndexRef.current;
-        if (active === null) return;
+      const handleMove = (ev: PointerEvent) => {
         const pt = pointFromClient(ev.clientX, ev.clientY);
-        if (pt !== null) moveCorner(active, pt);
+        if (pt !== null) onMove(pt);
       };
-      const onUp = () => {
-        dragIndexRef.current = null;
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onUp);
+      const handleUp = () => {
+        window.removeEventListener('pointermove', handleMove);
+        window.removeEventListener('pointerup', handleUp);
+        window.removeEventListener('pointercancel', handleUp);
         // Release: the debounce effect below fires the preview request.
         setDragging(false);
       };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
+      window.addEventListener('pointermove', handleMove);
+      window.addEventListener('pointerup', handleUp);
+      window.addEventListener('pointercancel', handleUp);
     };
+
+  const beginCornerDrag = (index: number) => beginDrag((pt) => moveCorner(index, pt));
+  const beginEdgeDrag = (edge: CropEdgeRole) => beginDrag((pt) => moveEdge(edge, pt));
 
   const stepCorner = (index: number, dx: number, dy: number): void => {
     const cur = quadRef.current[index];
@@ -442,7 +505,7 @@ export function CropEditor({
   return (
     <div data-crop-page data-crop-adjust className="flex min-h-0 flex-1 flex-col">
       <p data-crop-instruction className="mb-2 text-center text-xs text-ink-500 dark:text-ink-300">
-        Drag the corners to fit the page
+        Drag the handles to fit the page — corners move singly, edge dots move the whole edge
       </p>
       {/* Photo LARGE (portrait full-height): a dedicated child owns the
         measured contain box, so the frame measures when adjust mode first
@@ -455,7 +518,8 @@ export function CropEditor({
         frameRef={frameRef}
         polyPoints={polyPoints}
         holePath={holePath}
-        beginDrag={beginDrag}
+        onCornerDrag={beginCornerDrag}
+        onEdgeDrag={beginEdgeDrag}
         onHandleKey={onHandleKey}
       />
       {/* Screen-reader mirror of the quad geometry. */}
@@ -487,11 +551,11 @@ export function CropEditor({
 
 /**
  * Adjust-mode canvas: the measured contain frame (original photo + quad
- * overlay + 44px drag handles). Kept as its own component so the
- * `useContainBox` measurement happens while the frame is mounted — the
- * result view renders before adjust mode ever appears, so an inline
- * measurement would miss the frame's first mount and fall back to raw
- * CSS sizing (overflowing the queue on wide screens).
+ * overlay + 44px drag handles — 4 corners plus 4 edge midpoints). Kept
+ * as its own component so the `useContainBox` measurement happens while
+ * the frame is mounted — the result view renders before adjust mode ever
+ * appears, so an inline measurement would miss the frame's first mount
+ * and fall back to raw CSS sizing (overflowing the queue on wide screens).
  */
 function AdjustCanvas({
   photoUrl,
@@ -501,7 +565,8 @@ function AdjustCanvas({
   frameRef,
   polyPoints,
   holePath,
-  beginDrag,
+  onCornerDrag,
+  onEdgeDrag,
   onHandleKey,
 }: {
   photoUrl: string;
@@ -511,7 +576,8 @@ function AdjustCanvas({
   frameRef: React.RefObject<HTMLDivElement | null>;
   polyPoints: string;
   holePath: string;
-  beginDrag: (index: number) => React.PointerEventHandler<HTMLButtonElement>;
+  onCornerDrag: (index: number) => React.PointerEventHandler<HTMLButtonElement>;
+  onEdgeDrag: (edge: CropEdgeRole) => React.PointerEventHandler<HTMLButtonElement>;
   onHandleKey: (index: number) => React.KeyboardEventHandler<HTMLButtonElement>;
 }) {
   // Exact painted-frame mapping (same helper as the viewfinder): the
@@ -520,6 +586,14 @@ function AdjustCanvas({
   const viewport = useContainBox<HTMLDivElement>(imageWidth / imageHeight);
   return (
     <div ref={viewport.ref} className="flex min-h-[12rem] flex-1 items-center justify-center">
+      {/* Draggable handles (buttons so they are keyboard focusable).
+        Pointer model (deliberately single-path): the drag plumbing above
+        is full pointer-events (down/move/up) — mouse, touch, AND pen all
+        flow through beginDrag, including synthetic PointerEvents from
+        tests/E2E (no hardware pointer id, isPrimary false). There is no
+        separate mouse/pen fallback branch to drift apart from the real
+        path (2026-10-03: a well-meaning "pen responds" branch broke E2E
+        drag while unit tests stayed green). */}
       <div
         ref={frameRef}
         data-crop-frame
@@ -532,7 +606,7 @@ function AdjustCanvas({
       >
         <img
           src={photoUrl}
-          alt="Original photo — drag the corner handles to the page edges"
+          alt="Original photo — drag the corner handles to the page edges, edge dots move a whole edge"
           draggable={false}
           className="absolute inset-0 h-full w-full"
         />
@@ -565,7 +639,7 @@ function AdjustCanvas({
               aria-valuemax={Math.round(imageWidth)}
               aria-valuenow={Math.round(pt.x)}
               aria-valuetext={`${ROLE_LABEL[role]} corner at ${Math.round(pt.x)}, ${Math.round(pt.y)} of ${Math.round(imageWidth)} by ${Math.round(imageHeight)}`}
-              onPointerDown={beginDrag(i)}
+              onPointerDown={onCornerDrag(i)}
               onKeyDown={onHandleKey(i)}
               className="absolute flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 touch-none items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-300"
               style={{
@@ -576,6 +650,35 @@ function AdjustCanvas({
               <span
                 aria-hidden
                 className="h-5 w-5 rounded-full border-2 border-paper-50 bg-brass-500 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
+              />
+            </button>
+          );
+        })}
+        {/* Edge-midpoint handles: same 44px target, subtler 14px dot —
+          dragging one translates the WHOLE edge (both adjacent corners
+          move together). Pointer-only: keyboard steppers stay on the
+          corners. */}
+        {CROP_EDGE_ROLES.map((edge) => {
+          const [a, b] = EDGE_CORNERS[edge];
+          const mx = (quad[a].x + quad[b].x) / 2;
+          const my = (quad[a].y + quad[b].y) / 2;
+          return (
+            <button
+              key={`mid-${edge}`}
+              type="button"
+              data-crop-handle-mid={edge}
+              aria-label={`Move ${EDGE_LABEL[edge]}`}
+              title={`Move the ${EDGE_LABEL[edge]} (both corners together)`}
+              onPointerDown={onEdgeDrag(edge)}
+              className="absolute flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 touch-none items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-300"
+              style={{
+                left: `${(mx / imageWidth) * 100}%`,
+                top: `${(my / imageHeight) * 100}%`,
+              }}
+            >
+              <span
+                aria-hidden
+                className="h-3.5 w-3.5 rounded-full border-2 border-brass-500/90 bg-paper-50 shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
               />
             </button>
           );
