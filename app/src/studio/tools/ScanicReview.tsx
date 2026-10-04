@@ -73,6 +73,12 @@ export interface ScanicReviewProps {
   onDiscard(): void;
   onRedetect(): void;
   redetecting: boolean;
+  /**
+   * Optional batch navigation for adjust mode. When present, adjust mode
+   * shows a "Next page" button (`[data-adjust-next]`) beside Apply that
+   * calls this and nothing else — no warp, no verdict, no Apply.
+   */
+  onNextPage?(): void;
 }
 
 type HandleKey = 'tl' | 'tr' | 'br' | 'bl';
@@ -177,11 +183,11 @@ function clampPoint(x: number, y: number, w: number, h: number): { x: number; y:
 }
 
 export const LOUPE_SIZE = 96;
-export const LOUPE_ZOOM = 1.6;
+export const LOUPE_ZOOM = 1.3;
 const LOUPE_OFFSET = 16;
 
 /**
- * Source rect (natural image pixels) for the 1.6x loupe, centered EXACTLY
+ * Source rect (natural image pixels) for the 1.3x loupe, centered EXACTLY
  * on the active corner. Accuracy contract: rect center == corner position
  * (before edge clamping); clamping only shifts the rect to stay in bounds.
  */
@@ -255,6 +261,7 @@ export default function ScanicReview({
   onRedetect,
   redetecting,
   verdict,
+  onNextPage,
 }: ScanicReviewProps) {
   const [adjusting, setAdjusting] = useState(false);
   const [draft, setDraft] = useState<ScanicCorners | null>(null);
@@ -563,7 +570,7 @@ export default function ScanicReview({
     }
   }, [photoUrl]);
 
-  // Paint the 1.6x zoom centered EXACTLY on the active corner. Guards make
+  // Paint the 1.3x zoom centered EXACTLY on the active corner. Guards make
   // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
   useEffect(() => {
     if (loupeImagePoint === null || loupeHandle === null) return;
@@ -659,8 +666,10 @@ export default function ScanicReview({
               points={quadPointsAttr(draft)}
               fill="none"
               stroke="#c97a1f"
-              strokeWidth={2}
+              strokeWidth={1.5}
               strokeLinejoin="round"
+              strokeLinecap="round"
+              strokeDasharray="1 4"
               vectorEffect="non-scaling-stroke"
             />
           </svg>
@@ -950,7 +959,7 @@ export default function ScanicReview({
       )}
 
       <div className="space-y-2">
-        {adjusting && (
+        {adjusting && onNextPage === undefined && (
           <button
             type="button"
             onClick={applyDraft}
@@ -958,6 +967,28 @@ export default function ScanicReview({
           >
             Apply
           </button>
+        )}
+        {adjusting && onNextPage !== undefined && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={applyDraft}
+              className="inline-flex min-h-[44px] flex-1 items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+            >
+              Apply
+            </button>
+            <button
+              type="button"
+              data-adjust-next
+              aria-label="Next page"
+              onClick={() => {
+                onNextPage?.();
+              }}
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-4 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            >
+              Next page
+            </button>
+          </div>
         )}
         <div className="grid grid-cols-4 gap-2" role="group" aria-label="Review actions">
           {!adjusting ? (

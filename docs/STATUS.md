@@ -1,11 +1,11 @@
 # Folio — Status
 
-> Current as of the D41 original-feed capture + camera picker + thin handles redo wave (2026-10-04 — user feedback + document-capture UX article grounding; package.json stays 1.9.0, v2.0.0 release HELD).
+> Current as of the D42 chrome cleanup + adjust-next redo wave (2026-10-04 — user phone screenshot; package.json stays 1.9.0, v2.0.0 release HELD).
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
 
-**Pre-v2.0 (`dev`).** Original-feed capture + camera picker + thin handles redo wave (D41, 2026-10-04, user feedback + document-capture UX article grounding: real-time feedback, plain-language specific errors, minimized steps, progress visibility): (1) ImageCapture takePhoto native-blob capture (zero encode/decode; canvas fallback only when unavailable); (2) camera picker over enumerateDevices (front/back/multi/desktop, persisted per session) + quick facing flip kept; (3) orientation-honest constraints + stream-matched preview (no forced ratio — fixes the blurry zoomed laptop webcam); (4) single-line thin outline + small circle handles (44px hits preserved); (5) standing test policy — scoped feature tests per iteration, full suite only at final validation (user instruction). Folio paper/ink/brass theme throughout, 44px targets, no fake controls. The D40 auto-accept review + precision tuning redo, D39 loupe + fullscreen finder redo, D38 portrait-geometry + compact-review redo, D37 single-canvas-review + 8-handle-adjust redo, D36 Google-pattern redo, D35 scanner redo, D34 scanic integration, and D33 strip history are preserved in `docs/DECISIONS.md` D33–D41 and `docs/BUGS.md` F-21. Retained on `dev`: performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix). Wave-A app finish (`e74e71b`: studioThumb removal, merge-readiness honesty, local-phase copy, About 44px targets, disabled-card focus, nav affordance, K4 from_bytes alignment) and the portal-AnimatePresence regression fix (`3ccabeb`, E2E-caught pre-ship) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.0 (waves 1–7 metadata marker per `docs/CHANGELOG.md`) and the v2.0.0 release is HELD (see the release checklist below). F-21 is superseded by D33 for the deleted pipeline; the field gate re-arms on scanic in D34 (see `docs/BUGS.md` F-21).
+**Pre-v2.0 (`dev`).** Chrome cleanup + adjust-next redo wave (D42, 2026-10-04, user phone screenshot): (1) compact labeled top bar (close/title/flash/flip/mirror with visible labels, camera select on its own slim row — zero overlaps, finder clearance); (2) strip docked to the bottom overlay cluster; (3) thin dotted outline returns (small-circle handles kept); (4) calmer loupe (~1.3x); (5) adjust-next button beside Apply (pure navigation, no warp/decision). Folio theme, 44px targets, no fake controls. The D41 original-feed capture + camera picker + thin handles redo, D40 auto-accept review + precision tuning redo, D39 loupe + fullscreen finder redo, D38 portrait-geometry + compact-review redo, D37 single-canvas-review + 8-handle-adjust redo, D36 Google-pattern redo, D35 scanner redo, D34 scanic integration, and D33 strip history are preserved in `docs/DECISIONS.md` D33–D42 and `docs/BUGS.md` F-21. Retained on `dev`: performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix). Wave-A app finish (`e74e71b`: studioThumb removal, merge-readiness honesty, local-phase copy, About 44px targets, disabled-card focus, nav affordance, K4 from_bytes alignment) and the portal-AnimatePresence regression fix (`3ccabeb`, E2E-caught pre-ship) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.0 (waves 1–7 metadata marker per `docs/CHANGELOG.md`) and the v2.0.0 release is HELD (see the release checklist below). F-21 is superseded by D33 for the deleted pipeline; the field gate re-arms on scanic in D34 (see `docs/BUGS.md` F-21).
 
 ## Completed work
 
@@ -40,7 +40,7 @@
 
 ## Current work
 
-- **D41 original-feed capture + camera picker + thin handles redo is in progress**: pipeline/handles/E2E-sync/docs lanes per D41 in `docs/DECISIONS.md` — scoped verification per iteration; full suite explicitly deferred per user instruction (orchestrator fills scoped numbers, see WORKLOG).
+- **D42 chrome cleanup + adjust-next redo is in progress**: chrome/review/E2E/docs lanes per D42 in `docs/DECISIONS.md` — verification SCOPED; full suite explicitly deferred per standing instruction (orchestrator fills scoped numbers, see WORKLOG).
 - **Real-device validation is next (not started)**: hit-rate + ML annoyance + handle feel on the user's phone; gates any camera-capture claim.
 - Performance program closed: P0–P4 implemented, P0.2 measured-and-shelved with real-device evidence (see `docs/PERFORMANCE.md`); threaded WASM explicitly gated behind a future decision.
 
@@ -62,9 +62,9 @@ None. No blocked items.
 - **`pdf.images_to_pdf` accepts JPEG/PNG only**; anything else fails as `UNSUPPORTED_FORMAT`.
 - About-page future items live in one unversioned **Coming soon** card (Compress, sharing/annotation ideas — aspirations, never promises; verified in `app/src/studio/About.tsx`). The versioned _planned_ entries ("v1.2.0 · Sign & annotate", "v2.0.0 · Batch & OCR") were removed 2026-09-27; the tree itself retains real history, closing the numbering collision with scanner v2.0 (checklist gate 5).
 
-## Validated baseline (D40 auto-accept review + precision tuning, `dev` @ integration commit, 2026-10-04 — lead-verified; last full green — D41 under scoped re-verification, full suite explicitly deferred per user instruction; checklist gate 2 still runs on the release commit)
+## Validated baseline (D40 auto-accept review + precision tuning, `dev` @ integration commit, 2026-10-04 — lead-verified; last full green — D42 under scoped re-verification, full suite explicitly deferred per standing instruction; checklist gate 2 still runs on the release commit)
 
-> D40 numbers verified below (92/92 + 4 SKIP). D41 re-verification is scoped per iteration — no new full-suite numbers are claimed here.
+> D40 numbers verified below (92/92 + 4 SKIP). D42 re-verification is scoped per iteration — no new full-suite numbers are claimed here.
 
 | Check                                                         | Result                                                                                                           |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
@@ -106,4 +106,4 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 
 ## Immediate next steps
 
-1. Real-device validation of the D41 original-feed capture + camera picker + thin handles redo on the user's phone — pending, gates any camera-capture claim.
+1. Real-device validation of the D42 chrome cleanup + adjust-next redo on the user's phone — pending, gates any camera-capture claim.

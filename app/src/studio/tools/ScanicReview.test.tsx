@@ -507,10 +507,10 @@ describe('ScanicReview', () => {
 });
 
 describe('ScanicReview handles + loupe', () => {
-  it('handles use thin solid brass-ring small circles with a center micro-dot (44px hit preserved)', () => {
+  it('handles use thin dotted brass-ring small circles with a center micro-dot (44px hit preserved)', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
-    // Single-line outline: thin solid 1.5–2px brass, never dotted.
+    // Single-line outline: thin dotted 1.5–2px brass.
     const outline = container.querySelector(
       '[data-crop-adjust] polygon',
     ) as unknown as SVGPolygonElement | null;
@@ -518,7 +518,8 @@ describe('ScanicReview handles + loupe', () => {
     const strokeWidth = parseFloat(outline!.getAttribute('stroke-width') ?? '');
     expect(strokeWidth).toBeGreaterThanOrEqual(1.5);
     expect(strokeWidth).toBeLessThanOrEqual(2);
-    expect(outline!.getAttribute('stroke-dasharray')).toBeNull();
+    expect(outline!.getAttribute('stroke-dasharray')).not.toBeNull();
+    expect(outline!.getAttribute('stroke-dasharray')!.trim().length).toBeGreaterThan(0);
     for (const key of ['tl', 'tr', 'br', 'bl']) {
       const h = document.querySelector(`[data-crop-handle="${key}"]`) as HTMLElement;
       expect(h.getAttribute('role')).toBe('slider');
@@ -611,12 +612,12 @@ describe('ScanicReview handles + loupe', () => {
     expect(container.querySelector('[data-loupe]')).toBeNull();
   });
 
-  it('loupe uses the calm 1.6x zoom with a 96px lens', () => {
-    expect(LOUPE_ZOOM).toBe(1.6);
+  it('loupe uses the calm 1.3x zoom with a 96px lens', () => {
+    expect(LOUPE_ZOOM).toBe(1.3);
     expect(LOUPE_SIZE).toBe(96);
   });
 
-  it('loupe source rect centers exactly on the active corner (1.6x zoom)', () => {
+  it('loupe source rect centers exactly on the active corner (1.3x zoom)', () => {
     // Interior corner: rect center == corner, size == lens/zoom.
     const r = loupeSourceRect(50, 40, 100, 100);
     expect(r.sw).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
@@ -674,5 +675,47 @@ describe('ScanicReview handles + loupe', () => {
     } finally {
       proto['getContext'] = original;
     }
+  });
+});
+
+describe('ScanicReview adjust-next', () => {
+  it('hides the Next-page button when onNextPage is absent', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    // Result view: no adjust-next.
+    expect(container.querySelector('[data-adjust-next]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Next page' })).toBeNull();
+    // Adjust mode without the prop: Apply stays, Next page stays hidden.
+    enterAdjust();
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeTruthy();
+    expect(container.querySelector('[data-adjust-next]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Next page' })).toBeNull();
+  });
+
+  it('shows Next page beside Apply in adjust mode only, and navigates without applying', () => {
+    const props = baseProps({ onNextPage: vi.fn() });
+    const { container } = render(<ScanicReview {...props} />);
+    // Result view never shows it — adjust mode only.
+    expect(container.querySelector('[data-adjust-next]')).toBeNull();
+    enterAdjust();
+    const next = container.querySelector('[data-adjust-next]');
+    expect(next).not.toBeNull();
+    const nextBtn = screen.getByRole('button', { name: 'Next page' });
+    expect(nextBtn.textContent).toBe('Next page');
+    // 44px target.
+    expect(nextBtn.className).toMatch('min-h-[44px]');
+    expect(nextBtn.className).toMatch('min-w-[44px]');
+    // Apply is still beside it.
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeTruthy();
+    const before = container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points');
+    fireEvent.click(nextBtn);
+    expect(props.onNextPage).toHaveBeenCalledTimes(1);
+    // Pure navigation: no warp emission, no verdict/decision side effects.
+    expect(props.onAdjustApply).not.toHaveBeenCalled();
+    expect(props.onUseOriginal).not.toHaveBeenCalled();
+    expect(props.onDiscard).not.toHaveBeenCalled();
+    expect(props.onRedetect).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points')).toBe(
+      before,
+    );
   });
 });

@@ -301,3 +301,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** (1) ImageCapture takePhoto native-blob capture (zero encode/decode; canvas fallback only when unavailable); (2) camera picker over enumerateDevices (front/back/multi/desktop, persisted per session) + quick facing flip kept; (3) orientation-honest constraints + stream-matched preview (no forced ratio — fixes the blurry zoomed laptop webcam); (4) single-line thin outline + small circle handles (44px hits preserved); (5) standing test policy — scoped feature tests per iteration, full suite only at final validation (user instruction). Folio theme, 44px targets, no fake controls.
 - **Reason.** User feedback 2026-10-04 + document-capture UX article grounding: real-time feedback, plain-language specific errors, minimized steps, progress visibility.
 - **Status.** D41 wave (pipeline/handles/E2E-sync/docs lanes); scoped verification per iteration, full suite only at final validation per user instruction (orchestrator fills scoped numbers — see WORKLOG); real-device validation pending (user's phone required).
+
+## D42 — Chrome cleanup + adjust-next (user phone screenshot 2026-10-04)
+
+- **Decision.** (1) Compact labeled top bar (close/title/flash/flip/mirror with visible labels, camera select on its own slim row — zero overlaps, finder clearance); (2) strip docked to the bottom overlay cluster; (3) thin dotted outline returns (small-circle handles kept); (4) calmer loupe (~1.3x); (5) adjust-next button beside Apply (pure navigation, no warp/decision). Folio theme, 44px targets, no fake controls.
+- **Reason.** User phone screenshot 2026-10-04.
+- **Status.** D42 wave (chrome/review/E2E/docs lanes); verification SCOPED (orchestrator fills scoped numbers; full suite deferred per standing instruction — see WORKLOG); real-device validation pending (user's phone required).

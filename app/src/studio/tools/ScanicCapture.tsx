@@ -430,7 +430,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [liveAspect, setLiveAspect] = useState<string | null>(null);
   const [mirrored, setMirrored] = useState(true);
   const [torchOn, setTorchOn] = useState(false);
-  const [torchSupported, setTorchSupported] = useState(false);
+  // Visible unless hard-unsupported: inconclusive capabilities (no
+  // getCapabilities, throws, or no `torch` field) default to SHOWING the
+  // flash toggle — only an explicit `torch: false` (or a failed
+  // applyConstraints) hides it.
+  const [torchSupported, setTorchSupported] = useState(true);
   const [paused, setPaused] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -853,13 +857,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         } catch {
           // Enumeration failure leaves the facing quick-flip working.
         }
-        let supportsTorch = false;
+        let supportsTorch = true;
         try {
           const caps = track?.getCapabilities?.() as
             (MediaTrackCapabilities & { torch?: boolean }) | undefined;
-          supportsTorch = caps?.torch === true;
+          // Hard-unsupported ONLY when the track explicitly reports
+          // `torch: false`. Missing API, throws, or a caps object without
+          // the torch field is inconclusive — keep the toggle visible.
+          if (caps && 'torch' in caps) {
+            supportsTorch = caps?.torch === true;
+          } else {
+            supportsTorch = true;
+          }
         } catch {
-          supportsTorch = false;
+          supportsTorch = true;
         }
         if (!cancelled) {
           setTorchSupported(supportsTorch);
@@ -1321,59 +1332,149 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       data-detector={DEFAULT_DETECTOR}
       className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 dark:bg-ink-900 dark:text-paper-100"
     >
-      {/* Top chrome: floating over the full-bleed video in camera phase
-          (top scrim gradient, pointer-events-none except the controls),
-          docked solid bar otherwise. Buttons/titles go light over video. */}
+      {/* Top chrome: camera phase is a slim two-row overlay (top bar +
+          compact camera-select row) floating over the full-bleed video with
+          a top scrim; review/done keep the docked solid bar. The finder
+          frame below carries top clearance for both rows so no row ever
+          overlaps the corner ticks. */}
       <div
+        data-scanner-topbar
         className={
           isCamera
-            ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-2 px-3 pb-6 pt-[max(0.5rem,env(safe-area-inset-top))]'
+            ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col gap-1 px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]'
             : 'flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 dark:border-ink-700/70 dark:bg-ink-900/95'
         }
       >
         {isCamera && (
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-ink-950/60 to-transparent"
+            className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink-950/60 to-transparent"
           />
         )}
-        <button
-          type="button"
-          aria-label="Close scanner"
-          onClick={onExit}
-          className={
-            isCamera
-              ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 py-2 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
-              : 'inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700'
-          }
-        >
-          ✕
-        </button>
-        <p
-          className={
-            isCamera
-              ? 'relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow'
-              : 'min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100'
-          }
-        >
-          Scan documents
-        </p>
-        {torchSupported ? (
-          <button
-            type="button"
-            aria-label="Toggle torch"
-            aria-pressed={torchOn}
-            onClick={() => void toggleTorch()}
-            className={
-              isCamera
-                ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 py-2 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
-                : 'inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700'
-            }
-          >
-            {torchOn ? '🔦' : '💡'}
-          </button>
+        {isCamera ? (
+          <>
+            <div className="relative flex w-full items-center gap-1">
+              <button
+                type="button"
+                aria-label="Close scanner"
+                onClick={onExit}
+                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+              >
+                ✕
+              </button>
+              <p className="relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow">
+                Scan documents
+              </p>
+              {torchSupported ? (
+                <button
+                  type="button"
+                  aria-label="Toggle torch"
+                  aria-pressed={torchOn}
+                  onClick={() => void toggleTorch()}
+                  className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                >
+                  <span aria-hidden className="text-sm leading-none">
+                    {torchOn ? '🔦' : '💡'}
+                  </span>
+                  <span className="text-[10px] font-medium leading-none">Flash</span>
+                </button>
+              ) : (
+                <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+              )}
+              <button
+                type="button"
+                aria-label="Switch camera"
+                onClick={() => {
+                  // Quick flip alongside the picker: clears any explicit
+                  // device pick (exact selection would otherwise ignore
+                  // facingMode) so the flip always takes effect.
+                  chooseCamera(null);
+                  setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+                }}
+                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+              >
+                <span aria-hidden className="text-sm leading-none">
+                  ⇄
+                </span>
+                <span className="text-[10px] font-medium leading-none">Flip</span>
+              </button>
+              <button
+                type="button"
+                data-mirror-toggle
+                aria-pressed={mirrored}
+                aria-label="Mirror front-camera preview"
+                title={
+                  mirrored
+                    ? 'Front preview mirrored (captures stay unmirrored)'
+                    : 'Front preview unmirrored'
+                }
+                onClick={() => setMirrored((v) => !v)}
+                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+              >
+                <span aria-hidden className="text-sm leading-none">
+                  {mirrored ? '◐' : '◑'}
+                </span>
+                <span className="text-[10px] font-medium leading-none">Mirror</span>
+              </button>
+            </div>
+            {cameras.length > 0 && (
+              <div data-camera-select-row className="relative flex w-full justify-center">
+                <select
+                  data-camera-select
+                  aria-label="Choose camera"
+                  value={selectedDeviceId ?? ''}
+                  onChange={(e) => {
+                    const id = e.target.value === '' ? null : e.target.value;
+                    // Keep the mirror semantics honest when the OS label
+                    // names a side: a picked front lens mirrors the
+                    // preview, a picked back lens never does. Unknown
+                    // labels leave the facing toggle untouched.
+                    const picked = cameras.find((c) => c.deviceId === id);
+                    const lbl = (picked?.label ?? '').toLowerCase();
+                    if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
+                    else if (id !== null && /back|rear|environment/.test(lbl))
+                      setFacing('environment');
+                    chooseCamera(id);
+                  }}
+                  className="camera-select-compact inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]"
+                >
+                  <option value="">Default camera</option>
+                  {cameras.map((c, i) => (
+                    <option key={c.deviceId} value={c.deviceId}>
+                      {cameraDisplayName(c, i)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </>
         ) : (
-          <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+          <>
+            <button
+              type="button"
+              aria-label="Close scanner"
+              onClick={onExit}
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+            >
+              ✕
+            </button>
+            <p className="min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+              Scan documents
+            </p>
+            {torchSupported ? (
+              <button
+                type="button"
+                aria-label="Toggle torch"
+                aria-pressed={torchOn}
+                onClick={() => void toggleTorch()}
+                className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+              >
+                {torchOn ? '🔦' : '💡'}
+              </button>
+            ) : (
+              <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+            )}
+          </>
         )}
       </div>
 
@@ -1414,13 +1515,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   className="absolute inset-0 h-full w-full object-cover"
                 />
                 {/* Finder guidance frame: rounded-rect overlay with corner
-                    ticks. Full-screen with top clearance for the floating
-                    top bar + status pill; the bottom scrim stays translucent
-                    so the corner ticks read through at the screen edges. */}
+                    ticks. Top clearance (pt-36/sm:pt-40) clears the slim
+                    top bar + compact camera-select row above, so no chrome
+                    row ever overlaps the ticks; the bottom scrim stays
+                    translucent so the corner ticks read through. */}
                 <div
                   data-finder-frame
                   aria-hidden
-                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-24 sm:p-10 sm:pt-28"
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-36 sm:p-10 sm:pt-40"
                 >
                   <div className="relative h-full w-full rounded-2xl">
                     <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
@@ -1429,76 +1531,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
                   </div>
                 </div>
-                {/* Status pill rides top-center below the floating top bar so
-                    the bottom overlay can never cover it. Dwell text logic
+                {/* Status pill rides top-center below the slim top bar +
+                    compact select row (top-36 clears both) so the bottom
+                    overlay can never cover it. Dwell text logic
                     (finderStatus) is unchanged. */}
                 <p
                   data-finder-status
                   role="status"
-                  className="absolute left-1/2 top-24 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
+                  className="absolute left-1/2 top-36 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
                 >
                   {finderStatus}
                 </p>
-                <div className="absolute right-3 top-24 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center justify-end gap-2">
-                  {cameras.length > 0 && (
-                    <select
-                      data-camera-select
-                      aria-label="Choose camera"
-                      value={selectedDeviceId ?? ''}
-                      onChange={(e) => {
-                        const id = e.target.value === '' ? null : e.target.value;
-                        // Keep the mirror semantics honest when the OS label
-                        // names a side: a picked front lens mirrors the
-                        // preview, a picked back lens never does. Unknown
-                        // labels leave the facing toggle untouched.
-                        const picked = cameras.find((c) => c.deviceId === id);
-                        const lbl = (picked?.label ?? '').toLowerCase();
-                        if (id !== null && /front|user|facetime|selfie/.test(lbl))
-                          setFacing('user');
-                        else if (id !== null && /back|rear|environment/.test(lbl))
-                          setFacing('environment');
-                        chooseCamera(id);
-                      }}
-                      className="inline-flex min-h-[44px] max-w-44 truncate rounded-xl border border-paper-50/20 bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                    >
-                      <option value="">Default camera</option>
-                      {cameras.map((c, i) => (
-                        <option key={c.deviceId} value={c.deviceId}>
-                          {cameraDisplayName(c, i)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <button
-                    type="button"
-                    aria-label="Switch camera"
-                    onClick={() => {
-                      // Quick flip alongside the picker: clears any explicit
-                      // device pick (exact selection would otherwise ignore
-                      // facingMode) so the flip always takes effect.
-                      chooseCamera(null);
-                      setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
-                    }}
-                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                  >
-                    ⇄
-                  </button>
-                  <button
-                    type="button"
-                    data-mirror-toggle
-                    aria-pressed={mirrored}
-                    aria-label="Mirror front-camera preview"
-                    title={
-                      mirrored
-                        ? 'Front preview mirrored (captures stay unmirrored)'
-                        : 'Front preview unmirrored'
-                    }
-                    onClick={() => setMirrored((v) => !v)}
-                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                  >
-                    {mirrored ? '◐' : '◑'}
-                  </button>
-                </div>
               </div>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center bg-ink-950 p-4 pb-72 pt-20">
@@ -1713,6 +1756,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             onRedetect={() => void redetectEntry(current)}
             redetecting={redetecting}
             verdict={current.decision}
+            // Pure navigation beside Apply: advance reviewIndex only — no
+            // warp, no decision change, no verdict touch. Visited marking
+            // flows through the reviewIndex change like filmstrip/pager taps.
+            onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
           />
           {/* Review filmstrip (owned here — ScanicReview renders the single
               card only): numbered thumbs jump to a page, + returns to camera. */}

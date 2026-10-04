@@ -879,6 +879,23 @@ describe('ML detector default', () => {
     const reset = await screen.findByRole('button', { name: 'Reset to auto' });
     expect((reset as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it('adjust-next advances the page with no warp and no verdict change', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
+    const nextBtn = await screen.findByRole('button', { name: 'Next page' });
+    fireEvent.click(nextBtn);
+    // Page 2 shows (its first eager warp may legitimately run once).
+    expect(await screen.findByText('Page 2 of 2')).toBeTruthy();
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    const settled = mockExtract.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 300));
+    // Steady state: the tap itself warped nothing and decided nothing.
+    expect(mockExtract.mock.calls.length).toBe(settled);
+    expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+  });
 });
 
 describe('original-blob capture (ImageCapture)', () => {
@@ -1294,5 +1311,140 @@ describe('honest camera errors', () => {
     await waitFor(() => {
       expect(q('[data-finder-status]').textContent).toMatch(/requested resolution/);
     });
+  });
+});
+
+describe('camera-phase chrome (slim top bar)', () => {
+  function mockCameraWithCaps(caps: unknown) {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: caps === 'missing' ? undefined : () => caps as Record<string, unknown>,
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => stream),
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Front Cam', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+  }
+
+  it('labels every top-bar toggle so purpose is obvious without pressing', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // Icon + tiny visible labels (additive, aria names unchanged).
+    expect(screen.getByText('Flash', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Flip', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
+    expect(screen.getByLabelText('Switch camera')).toBeTruthy();
+    expect(q('[data-mirror-toggle]').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByLabelText('Toggle torch')).toBeTruthy();
+  });
+
+  it('shows flash on explicit torch support', async () => {
+    mockCameraWithCaps({ torch: true });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(screen.getByLabelText('Toggle torch')).toBeTruthy();
+    expect(screen.getByText('Flash', { exact: true })).toBeTruthy();
+  });
+
+  it('shows flash when capabilities are inconclusive (no torch field)', async () => {
+    mockCameraWithCaps({});
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(screen.getByLabelText('Toggle torch')).toBeTruthy();
+  });
+
+  it('shows flash when getCapabilities is missing entirely', async () => {
+    mockCameraWithCaps('missing');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(screen.getByLabelText('Toggle torch')).toBeTruthy();
+  });
+
+  it('hides flash only on hard-unsupported (torch: false)', async () => {
+    mockCameraWithCaps({ torch: false });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(screen.queryByLabelText('Toggle torch')).toBeNull();
+    expect(screen.queryByText('Flash', { exact: true })).toBeNull();
+    // Flip + Mirror stay regardless of torch support.
+    expect(screen.getByText('Flip', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
+  });
+
+  it('keeps the top bar, select row, and finder frame in distinct non-overlapping zones', async () => {
+    mockCameraWithCaps({});
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const topbar = q('[data-scanner-topbar]');
+    const finder = q('[data-finder-frame]');
+    expect(topbar).not.toBe(finder);
+    expect(finder.contains(topbar)).toBe(false);
+    expect(topbar.contains(finder)).toBe(false);
+    // Top bar stacks vertically (slim row + select row below it).
+    expect(topbar.className).toMatch('flex-col');
+    // Finder frame carries top clearance below both chrome rows.
+    expect(finder.className).toMatch('pt-36');
+    // Camera select lives in its own compact row below the top bar,
+    // never inside (over) the finder frame.
+    const selectRow = q('[data-camera-select-row]');
+    expect(selectRow).toBeTruthy();
+    expect(topbar.contains(selectRow)).toBe(true);
+    expect(finder.contains(selectRow)).toBe(false);
+    const select = q('[data-camera-select]');
+    expect(finder.contains(select)).toBe(false);
+  });
+
+  it('renders the camera select as a compact slim row (bounded, small text)', async () => {
+    mockCameraWithCaps({});
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    expect(select.getAttribute('aria-label')).toBe('Choose camera');
+    // 44px target kept, compactness additive: small text + max-width bound.
+    expect(select.className).toMatch('min-h-[44px]');
+    expect(select.className).toMatch('text-xs');
+    expect(select.className).toMatch('max-w-');
+    expect(select.className).toMatch('camera-select-compact');
+  });
+
+  it('docks the session strip in the bottom overlay cluster above the shutter row', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const strip = q('[data-scan-strip]');
+    // Compact floating filmstrip keeps its height contract.
+    expect(strip.className).toContain('h-16');
+    // Docked-bottom: an absolute bottom-0 ancestor carries the overlay.
+    const dock = strip.closest('div.absolute');
+    expect(dock).not.toBeNull();
+    expect((dock as HTMLElement).className).toMatch('bottom-0');
+    // Same overlay cluster also carries the shutter row below the strip.
+    const cluster = dock as HTMLElement;
+    expect(cluster.querySelector('[data-scan-strip]')).not.toBeNull();
+    expect(cluster.querySelector('[data-scan-capture]')).not.toBeNull();
+    // Strip sits above the shutter in DOM order.
+    const stripIndex = Array.from(cluster.querySelectorAll('*')).findIndex(
+      (el) => el === strip || (el as Element).querySelector?.('[data-scan-strip]'),
+    );
+    expect(stripIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      strip.compareDocumentPosition(q('[data-scan-capture]') as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

@@ -1439,6 +1439,128 @@ async function main() {
         topBar !== null && topBar.closePresent && topBar.titlePresent,
         JSON.stringify(topBar),
       );
+      // Top-bar non-overlap contract: close, truncating title, labeled
+      // Flash/Flip/Mirror toggles, and the camera select sit pairwise
+      // disjoint, all inside the viewport, and clear of the finder TICKS.
+      // Flash/Flip/Mirror match by VISIBLE text label only (icon-only buttons
+      // fail honestly — the label is the contract). Flash is torch-gated in
+      // the app (fake-camera devices expose no torch, same as the probe
+      // above), so it joins the disjoint set only when rendered — its absence
+      // is reported, never failed on. `[data-finder-frame]` itself is a
+      // full-bleed positioning wrapper (inset-0, pointer-events-none), so the
+      // overlap bar is its INNER tick box (firstElementChild): chrome
+      // overlapping a transparent full-screen wrapper is meaningless, chrome
+      // covering the visible ticks is the real defect. All predicates total.
+      const topBarGeometry = await page.evaluate(() => {
+        try {
+          const root = document.querySelector('[data-scanner-root]');
+          if (!root) return null;
+          const rectOf = (el) => {
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return null;
+            return {
+              left: Math.round(r.left),
+              top: Math.round(r.top),
+              right: Math.round(r.left + r.width),
+              bottom: Math.round(r.top + r.height),
+            };
+          };
+          const close = root.querySelector('[aria-label="Close scanner"]');
+          const title =
+            [...root.querySelectorAll('p')].find((p) =>
+              /Scan documents/.test(p.textContent ?? ''),
+            ) ?? null;
+          const byVisibleText = (re) =>
+            [...root.querySelectorAll('button')].find((b) => re.test(b.textContent ?? '')) ?? null;
+          const flash = byVisibleText(/flash/i);
+          const flip = byVisibleText(/flip/i);
+          const mirrorRaw = root.querySelector('[data-mirror-toggle]');
+          const mirror =
+            mirrorRaw !== null && /mirror/i.test(mirrorRaw.textContent ?? '') ? mirrorRaw : null;
+          const select = root.querySelector('[data-camera-select]');
+          const selectRow = root.querySelector('[data-camera-select-row]');
+          const finder = root.querySelector('[data-finder-frame]');
+          const finderTicks = finder?.firstElementChild ?? null;
+          const bar = close?.parentElement ?? null;
+          return {
+            close: rectOf(close),
+            title: rectOf(title),
+            flash: rectOf(flash),
+            flashRendered: flash !== null,
+            flip: rectOf(flip),
+            mirror: rectOf(mirror),
+            select: rectOf(select),
+            selectRow: rectOf(selectRow),
+            bar: rectOf(bar),
+            finderTicks: rectOf(finderTicks),
+            viewport: { w: window.innerWidth, h: window.innerHeight },
+          };
+        } catch {
+          return null;
+        }
+      });
+      let topBarDisjoint = false;
+      let selectBelowBar = false;
+      if (topBarGeometry !== null) {
+        const required = [
+          topBarGeometry.close,
+          topBarGeometry.title,
+          topBarGeometry.flip,
+          topBarGeometry.mirror,
+          topBarGeometry.select,
+        ];
+        // Flash joins only when the device exposes torch (fake camera does
+        // not — same environmental gate as the probe above).
+        const controls =
+          topBarGeometry.flash !== null ? [...required, topBarGeometry.flash] : required;
+        const hits = (a, b) =>
+          a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+        const allPresent = required.every((r) => r !== null) && topBarGeometry.finderTicks !== null;
+        const inViewport = allPresent
+          ? controls.every(
+              (r) =>
+                r.left >= 0 &&
+                r.top >= 0 &&
+                r.right <= topBarGeometry.viewport.w &&
+                r.bottom <= topBarGeometry.viewport.h,
+            )
+          : false;
+        let pairwise = allPresent;
+        if (allPresent) {
+          for (let i = 0; i < controls.length && pairwise; i += 1) {
+            for (let j = i + 1; j < controls.length && pairwise; j += 1) {
+              if (hits(controls[i], controls[j])) pairwise = false;
+            }
+            if (pairwise && hits(controls[i], topBarGeometry.finderTicks)) pairwise = false;
+          }
+        }
+        topBarDisjoint = allPresent && inViewport && pairwise;
+        selectBelowBar =
+          topBarGeometry.bar !== null &&
+          topBarGeometry.select !== null &&
+          topBarGeometry.selectRow !== null &&
+          topBarGeometry.select.top >= topBarGeometry.bar.bottom &&
+          topBarGeometry.selectRow.top >= topBarGeometry.bar.bottom;
+      }
+      check(
+        'scanner top bar controls never overlap (close/title/flip/mirror/select + torch-gated flash pairwise disjoint, in viewport, clear of finder ticks)',
+        topBarDisjoint,
+        JSON.stringify(topBarGeometry),
+      );
+      check(
+        'scanner camera select sits on its own slim row below the top bar (select.top ≥ bar.bottom)',
+        selectBelowBar,
+        JSON.stringify(
+          topBarGeometry
+            ? {
+                bar: topBarGeometry.bar,
+                select: topBarGeometry.select,
+                selectRow: topBarGeometry.selectRow,
+              }
+            : null,
+        ),
+      );
       // Capture mode segmented control: Manual default, Auto selectable (click
       // Auto and assert selected — never wait for auto-fire on synthetic feed),
       // then restore Manual so the captures below stay deterministic.
@@ -1711,6 +1833,37 @@ async function main() {
           queueState.silent &&
           queueState.live,
         JSON.stringify(queueState),
+      );
+      // Strip docked-bottom contract: the camera-phase `[data-scan-strip]`
+      // lives in the bottom overlay cluster — its rect sits in the lower
+      // third of the scanner surface (never mid-screen). Missing strip fails
+      // honestly. The zero-shift gate below is kept as-is.
+      const stripDocked = await page.evaluate(() => {
+        try {
+          const root = document.querySelector('[data-scanner-root]');
+          const strip = document.querySelector('[data-scan-strip]');
+          if (!root || !strip) return null;
+          const s = root.getBoundingClientRect();
+          const r = strip.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || s.height <= 0) return null;
+          return {
+            surfaceTop: Math.round(s.top),
+            surfaceH: Math.round(s.height),
+            surfaceBottom: Math.round(s.bottom),
+            stripTop: Math.round(r.top),
+            stripBottom: Math.round(r.bottom),
+            lowerThirdTop: Math.round(s.top + (s.height * 2) / 3),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner strip is docked in the bottom overlay (lower third of the surface)',
+        stripDocked !== null &&
+          stripDocked.stripTop >= stripDocked.lowerThirdTop - 4 &&
+          stripDocked.stripBottom <= stripDocked.surfaceBottom + 2,
+        JSON.stringify(stripDocked),
       );
       // No-shift gate: the same viewfinder container keeps its pixel height
       // across captures (reserved strip slot — zero layout shift).
@@ -2193,6 +2346,163 @@ async function main() {
         progressEntry !== null && /1 of 2 viewed/.test(progressEntry),
         JSON.stringify(progressEntry),
       );
+      // Adjust-next contract: `[data-adjust-next]` "Next page" beside Apply
+      // navigates WITHOUT warp/decision change — the open draft is dropped,
+      // the hero becomes the other page's canvas, progress advances (visited
+      // grows 1→2 of 2 viewed), and batch Next stays armed on the ≥1-page
+      // gate only (no warp decision consumed). L-12: dispatch, waitForFunction
+      // the post-condition, measure in a LATER evaluate. Missing hook fails
+      // honestly (never falls back to pager/filmstrip). After measuring, step
+      // back to page 1 via the pager so the filmstrip/pager checks below keep
+      // their shape (visited is sticky, so their 2-of-2 predicates still hold;
+      // no warp was applied, so the page-1 src is byte-identical).
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent === 'Adjust corners')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              return document.querySelector('[data-crop-adjust]') !== null;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+      } catch {
+        /* measured below */
+      }
+      const adjustNextInfo = await page.evaluate(() => {
+        try {
+          const next = document.querySelector('[data-adjust-next]');
+          const apply =
+            [...document.querySelectorAll('button')].find((b) => b.textContent === 'Apply') ?? null;
+          if (!next) return { present: false };
+          const nr = next.getBoundingClientRect();
+          const ar = apply?.getBoundingClientRect() ?? null;
+          return {
+            present: true,
+            text: (next.textContent ?? '').trim(),
+            visible: nr.width > 0 && nr.height > 0,
+            applyPresent: apply !== null,
+            besideApply:
+              ar !== null &&
+              Math.abs(nr.top + nr.height / 2 - (ar.top + ar.height / 2)) <= 80 &&
+              nr.left >= ar.left,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner adjust-next offers Next page beside Apply ([data-adjust-next], same row)',
+        adjustNextInfo !== null &&
+          adjustNextInfo.present === true &&
+          adjustNextInfo.text === 'Next page' &&
+          adjustNextInfo.visible === true &&
+          adjustNextInfo.applyPresent === true &&
+          adjustNextInfo.besideApply === true,
+        JSON.stringify(adjustNextInfo),
+      );
+      const adjustNextClicked = adjustNextInfo !== null && adjustNextInfo.present === true;
+      let adjustNextAdvanced = false;
+      if (adjustNextClicked) {
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-adjust-next]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            (before) => {
+              try {
+                const img = document.querySelector('[data-crop-result-img]');
+                const src = img ? img.getAttribute('src') : null;
+                const p = document.querySelector('[data-review-progress]');
+                const label = p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : '';
+                return (
+                  typeof src === 'string' &&
+                  src.length > 0 &&
+                  src !== before &&
+                  /2 of 2 viewed/.test(label)
+                );
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+            heroSrcPage1,
+          );
+          adjustNextAdvanced = true;
+        } catch {
+          adjustNextAdvanced = false;
+        }
+      }
+      const adjustNextState = await page.evaluate((before) => {
+        try {
+          const img = document.querySelector('[data-crop-result-img]');
+          const src = img ? img.getAttribute('src') : null;
+          const p = document.querySelector('[data-review-progress]');
+          const bar = document.querySelector('[data-batch-bar]');
+          const batchNext =
+            [...(bar?.querySelectorAll('button') ?? [])].find(
+              (x) => x.textContent?.trim() === 'Next',
+            ) ?? null;
+          return {
+            srcSwapped: typeof src === 'string' && src.length > 0 && src !== before,
+            label: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
+            adjustClosed: document.querySelector('[data-crop-adjust]') === null,
+            batchNextPresent: batchNext !== null,
+            batchNextEnabled: batchNext !== null && batchNext.disabled === false,
+          };
+        } catch {
+          return null;
+        }
+      }, heroSrcPage1);
+      check(
+        'scanner adjust-next advances page without warp/decision change (other canvas, progress 1→2 of 2 viewed, batch Next still armed)',
+        adjustNextAdvanced &&
+          adjustNextState !== null &&
+          adjustNextState.srcSwapped === true &&
+          adjustNextState.label !== null &&
+          /2 of 2 viewed/.test(adjustNextState.label) &&
+          adjustNextState.batchNextEnabled === true,
+        JSON.stringify(adjustNextState),
+      );
+      if (adjustNextClicked) {
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-page-prev]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            (before) => {
+              try {
+                const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src');
+                return typeof src === 'string' && src.length > 0 && src === before;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+            heroSrcPage1,
+          );
+        } catch {
+          /* the filmstrip tap below re-measures from whatever page is current */
+        }
+      }
       // Filmstrip tap to page 2: the hero src must swap and progress must
       // increment to 2 of 2 viewed — with zero accept clicks anywhere.
       await page.evaluate(() => {
@@ -2585,9 +2895,11 @@ async function main() {
         JSON.stringify(adjustState),
       );
       // Reworked hero contract: the quad polygon lives INSIDE adjust (it is
-      // absent pre-adjust per the hero check above) — 4 points, measured after
-      // the handles above rendered. Scoped to `[data-crop-adjust]`: the old
-      // `[data-detect-overlay]` wrapper no longer exists anywhere.
+      // absent pre-adjust per the hero check above) — 4 points, thin DOTTED
+      // brass (stroke-dasharray present; the solid-line rendering is gone).
+      // Scoped to `[data-crop-adjust]`: the old `[data-detect-overlay]`
+      // wrapper no longer exists anywhere. Dasharray reads the presentation
+      // attribute first, computed style second (either proves dotted).
       const adjustPoly = await page.evaluate(() => {
         try {
           const adjust = document.querySelector('[data-crop-adjust]');
@@ -2597,18 +2909,40 @@ async function main() {
             .trim()
             .split(/[\s,]+/)
             .filter((t) => t.length > 0);
+          let dashComputed = '';
+          try {
+            dashComputed = poly !== null ? (getComputedStyle(poly).strokeDasharray ?? '') : '';
+          } catch {
+            dashComputed = '';
+          }
           return {
             adjustPresent: adjust !== null,
             polygonPresent: poly !== null,
             pointPairs: pts.length / 2,
+            stroke: poly?.getAttribute('stroke') ?? null,
+            strokeWidth: poly?.getAttribute('stroke-width') ?? null,
+            strokeDasharrayAttr: poly?.getAttribute('stroke-dasharray') ?? null,
+            strokeDasharrayComputed: dashComputed,
           };
         } catch {
           return null;
         }
       });
+      const adjustPolyDotted =
+        adjustPoly !== null &&
+        typeof adjustPoly.strokeDasharrayAttr === 'string' &&
+        adjustPoly.strokeDasharrayAttr.trim().length > 0
+          ? true
+          : adjustPoly !== null &&
+            typeof adjustPoly.strokeDasharrayComputed === 'string' &&
+            adjustPoly.strokeDasharrayComputed.trim().length > 0 &&
+            adjustPoly.strokeDasharrayComputed.trim() !== 'none';
       check(
-        'scanner adjust mode shows editable quad polygon (4 points)',
-        adjustPoly !== null && adjustPoly.polygonPresent && adjustPoly.pointPairs === 4,
+        'scanner adjust mode shows dotted editable quad polygon (4 points, stroke-dasharray present)',
+        adjustPoly !== null &&
+          adjustPoly.polygonPresent &&
+          adjustPoly.pointPairs === 4 &&
+          adjustPolyDotted === true,
         JSON.stringify(adjustPoly),
       );
       // Adjust accuracy contract: every handle center lies INSIDE the photo
