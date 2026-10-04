@@ -19,6 +19,21 @@
  * then convexity-checked like a corner move (D32 semantics). Apply emits the
  * 8-point quad as 4 corners — midpoints are derived, never stored.
  *
+ * Content-box-exact overlay: the photo renders `object-contain` (never
+ * cropped), so a wide/tall frame letterboxes it. The SVG quad + handles are
+ * positioned STRICTLY inside the computed `object-contain` content rect
+ * (`containContentRect` from frame box + natural aspect — the single source
+ * of truth shared by render positioning and `clientToImage` drag mapping),
+ * never full-frame %. Handle hit targets stay 44px (a11y) while the visual
+ * dot scales with display size. The quad maps 1:1 to displayed pixels.
+ *
+ * Compact action bar: primary `Looks good` / `Apply` full-width-ish plus ONE
+ * icon-button row (Adjust / Reset, Re-detect, Use original, Discard). Icons
+ * are visible SVGs; each icon button keeps its EXACT text label inside a
+ * `<span className="sr-only">` so `textContent` matching (unit + E2E) is
+ * byte-identical. All stay real `<button>`s with aria-labels, 44px targets,
+ * and unchanged disabled states (`[data-redetect]` kept).
+ *
  * Runtime-dependency-free: no scanic worker/client import (type-only
  * `ScanicCorners` from `./scan/index`), pointer drag on the overlay
  * coordinate space with clamp + convex-guard, arrow-key stepping on all
@@ -33,6 +48,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { ScanicCorners } from './scan/index';
 
 export interface ScanicReviewProps {
@@ -108,6 +124,28 @@ function cloneCorners(corners: ScanicCorners): ScanicCorners {
   };
 }
 
+/**
+ * `object-contain` content rect of the photo inside its frame — the single
+ * source of truth shared by overlay render positioning and `clientToImage`
+ * drag mapping. Never reads black bars as photo pixels.
+ */
+export function containContentRect(
+  frameW: number,
+  frameH: number,
+  naturalW: number,
+  naturalH: number,
+): { left: number; top: number; width: number; height: number } {
+  const fw = Math.max(0, frameW);
+  const fh = Math.max(0, frameH);
+  const nw = Math.max(1, naturalW);
+  const nh = Math.max(1, naturalH);
+  if (fw === 0 || fh === 0) return { left: 0, top: 0, width: fw, height: fh };
+  const scale = Math.min(fw / nw, fh / nh);
+  const width = nw * scale;
+  const height = nh * scale;
+  return { left: (fw - width) / 2, top: (fh - height) / 2, width, height };
+}
+
 /** Strictly convex (same-sign turns, non-zero area) in TL→TR→BR→BL order. */
 function isConvexQuad(corners: ScanicCorners): boolean {
   const pts = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft];
@@ -161,6 +199,7 @@ export default function ScanicReview({
   const [adjusting, setAdjusting] = useState(false);
   const [draft, setDraft] = useState<ScanicCorners | null>(null);
   const [useOriginalView, setUseOriginalView] = useState(false);
+  const [frameBox, setFrameBox] = useState<{ w: number; h: number } | null>(null);
   const heroRef = useRef<HTMLDivElement>(null);
   const dragKeyRef = useRef<HandleKey | null>(null);
   const midDragRef = useRef<{
@@ -177,8 +216,78 @@ export default function ScanicReview({
     setUseOriginalView(false);
   }, [photoUrl]);
 
+  // Measure the adjust frame so the overlay can use content-box-exact rects.
+  // ResizeObserver + window resize cover real browsers; the every-render
+  // check catches letterboxed mocks applied after mount in tests.
+  useEffect(() => {
+    if (!adjusting) {
+      setFrameBox(null);
+      return;
+    }
+    const host = heroRef.current;
+    const read = (): void => {
+      const el = heroRef.current;
+      if (el === null) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setFrameBox((prev) => {
+          if (
+            prev !== null &&
+            Math.abs(prev.w - rect.width) < 0.5 &&
+            Math.abs(prev.h - rect.height) < 0.5
+          ) {
+            return prev;
+          }
+          return { w: rect.width, h: rect.height };
+        });
+      }
+    };
+    read();
+    const onResize = (): void => {
+      read();
+    };
+    window.addEventListener('resize', onResize);
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && host !== null) {
+      ro = new ResizeObserver(onResize);
+      ro.observe(host);
+    }
+    return () => {
+      window.removeEventListener('resize', onResize);
+      ro?.disconnect();
+    };
+  }, [adjusting]);
+
+  // Re-check after every render while adjusting (test mocks + layout shifts).
+  useEffect(() => {
+    if (!adjusting) return;
+    const host = heroRef.current;
+    if (host === null) return;
+    const rect = host.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      setFrameBox((prev) => {
+        if (
+          prev !== null &&
+          Math.abs(prev.w - rect.width) < 0.5 &&
+          Math.abs(prev.h - rect.height) < 0.5
+        ) {
+          return prev;
+        }
+        return { w: rect.width, h: rect.height };
+      });
+    }
+  });
+
   const safeW = imageWidth > 0 ? imageWidth : 1;
   const safeH = imageHeight > 0 ? imageHeight : 1;
+
+  const contentRect =
+    frameBox !== null && frameBox.w > 0 && frameBox.h > 0
+      ? containContentRect(frameBox.w, frameBox.h, safeW, safeH)
+      : null;
+  const contentMin = contentRect !== null ? Math.min(contentRect.width, contentRect.height) : 0;
+  // Proportionate visual dot; the 44px hit target is preserved via padding.
+  const handleVisual = Math.min(28, Math.max(18, contentMin * 0.07));
 
   const enterAdjust = () => {
     setDraft(cloneCorners(corners ?? fullFrameCorners(safeW, safeH)));
@@ -273,9 +382,14 @@ export default function ScanicReview({
     if (host === null) return { x: 0, y: 0 };
     const rect = host.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
+    // SAME content rect as render: never map black-bar pixels to image space.
+    const content = containContentRect(rect.width, rect.height, safeW, safeH);
+    if (content.width === 0 || content.height === 0) return { x: 0, y: 0 };
+    const cx = clientX - rect.left - content.left;
+    const cy = clientY - rect.top - content.top;
     return {
-      x: ((clientX - rect.left) / rect.width) * safeW,
-      y: ((clientY - rect.top) / rect.height) * safeH,
+      x: (cx / content.width) * safeW,
+      y: (cy / content.height) * safeH,
     };
   };
 
@@ -307,6 +421,31 @@ export default function ScanicReview({
     return {
       x: (draft[n1].x + draft[n2].x) / 2,
       y: (draft[n1].y + draft[n2].y) / 2,
+    };
+  };
+
+  const overlaySvgStyle: CSSProperties | undefined =
+    contentRect !== null
+      ? {
+          left: contentRect.left,
+          top: contentRect.top,
+          width: contentRect.width,
+          height: contentRect.height,
+        }
+      : undefined;
+
+  const handlePosStyle = (x: number, y: number): CSSProperties => {
+    if (contentRect !== null) {
+      return {
+        left: contentRect.left + (x / safeW) * contentRect.width,
+        top: contentRect.top + (y / safeH) * contentRect.height,
+        touchAction: 'none',
+      };
+    }
+    return {
+      left: `${(x / safeW) * 100}%`,
+      top: `${(y / safeH) * 100}%`,
+      touchAction: 'none',
     };
   };
 
@@ -342,7 +481,12 @@ export default function ScanicReview({
             preserveAspectRatio="none"
             aria-hidden={false}
             aria-label="Adjustable crop outline"
-            className="pointer-events-none absolute inset-0 h-full w-full"
+            style={overlaySvgStyle}
+            className={
+              contentRect !== null
+                ? 'pointer-events-none absolute'
+                : 'pointer-events-none absolute inset-0 h-full w-full'
+            }
           >
             <path
               d={
@@ -408,11 +552,7 @@ export default function ScanicReview({
                   aria-valuemax={100}
                   aria-valuenow={pctX}
                   aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                  style={{
-                    left: `${(point.x / safeW) * 100}%`,
-                    top: `${(point.y / safeH) * 100}%`,
-                    touchAction: 'none',
-                  }}
+                  style={handlePosStyle(point.x, point.y)}
                   className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
                   onPointerDown={(e) => {
                     e.preventDefault();
@@ -456,7 +596,11 @@ export default function ScanicReview({
                     }
                   }}
                 >
-                  <span aria-hidden className="h-2.5 w-2.5 rounded-full bg-brass-400" />
+                  <span
+                    aria-hidden
+                    className="rounded-full bg-brass-400"
+                    style={{ width: handleVisual, height: handleVisual }}
+                  />
                 </button>
               );
             })}
@@ -476,11 +620,7 @@ export default function ScanicReview({
                   aria-valuemax={100}
                   aria-valuenow={pctX}
                   aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                  style={{
-                    left: `${(mid.x / safeW) * 100}%`,
-                    top: `${(mid.y / safeH) * 100}%`,
-                    touchAction: 'none',
-                  }}
+                  style={handlePosStyle(mid.x, mid.y)}
                   className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
                   onPointerDown={(e) => {
                     e.preventDefault();
@@ -530,7 +670,11 @@ export default function ScanicReview({
                     }
                   }}
                 >
-                  <span aria-hidden className="h-2.5 w-2.5 rounded-[3px] bg-brass-400" />
+                  <span
+                    aria-hidden
+                    className="rounded-[3px] bg-brass-400"
+                    style={{ width: handleVisual, height: handleVisual }}
+                  />
                 </button>
               );
             })}
@@ -576,9 +720,24 @@ export default function ScanicReview({
               )}
             </>
           ) : corners === null ? (
-            <p className="px-4 py-8 text-center text-xs text-paper-100/90">
-              Auto-detect found no page — adjust to crop manually.
-            </p>
+            // No detection and no warp yet: show the ORIGINAL photo as the
+            // single canvas (same one-img contract) with the honest caption.
+            // A review with no image is a dead end — waitForResultImg,
+            // adjust seeding, and the user's own eyes all need pixels.
+            // (Distinct from the Use-original verdict above: no chip here.)
+            <>
+              <img
+                key="photo-fallback"
+                data-crop-result-img
+                src={photoUrl}
+                alt="Original photo — no auto-crop found"
+                className="block max-h-[50dvh] w-full object-contain"
+                draggable={false}
+              />
+              <p className="px-4 py-2 text-center text-xs text-paper-100/90">
+                Auto-detect found no page — adjust to crop manually.
+              </p>
+            </>
           ) : (
             <p
               role="status"
@@ -598,35 +757,63 @@ export default function ScanicReview({
         </p>
       )}
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled={verdictDisabled}
-          onClick={onLooksGood}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-wait disabled:opacity-50 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-        >
-          Looks good
-        </button>
+      <div className="space-y-2">
         {!adjusting ? (
           <button
             type="button"
             disabled={verdictDisabled}
-            onClick={enterAdjust}
-            className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            onClick={onLooksGood}
+            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-wait disabled:opacity-50 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
           >
-            Adjust corners
+            Looks good
           </button>
         ) : (
-          <>
+          <button
+            type="button"
+            onClick={applyDraft}
+            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+          >
+            Apply
+          </button>
+        )}
+        {adjusting && (
+          <button
+            type="button"
+            disabled={verdictDisabled}
+            onClick={onLooksGood}
+            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+          >
+            Looks good
+          </button>
+        )}
+        <div className="grid grid-cols-4 gap-2" role="group" aria-label="Review actions">
+          {!adjusting ? (
             <button
               type="button"
-              onClick={applyDraft}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+              aria-label="Adjust corners"
+              disabled={verdictDisabled}
+              onClick={enterAdjust}
+              className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
-              Apply
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className="h-5 w-5"
+              >
+                <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+                <path d="M2 6h14a2 2 0 0 1 2 2v14" />
+              </svg>
+              <span className="sr-only">Adjust corners</span>
             </button>
+          ) : (
             <button
               type="button"
+              aria-label="Reset to auto"
               disabled={corners === null}
               title={
                 corners === null ? 'No auto-detection for this page' : 'Reseed from auto-detection'
@@ -634,36 +821,93 @@ export default function ScanicReview({
               onClick={() => {
                 if (corners !== null) setDraft(cloneCorners(corners));
               }}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+              className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
-              Reset to auto
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className="h-5 w-5"
+              >
+                <path d="M3 12a9 9 0 1 0 2.64-6.36" />
+                <path d="M3 3v6h6" />
+              </svg>
+              <span className="sr-only">Reset to auto</span>
             </button>
-          </>
-        )}
-        <button
-          type="button"
-          data-redetect
-          disabled={redetecting}
-          onClick={redetect}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-wait disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-        >
-          Re-detect
-        </button>
-        <button
-          type="button"
-          disabled={verdictDisabled}
-          onClick={chooseOriginal}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-        >
-          Use original
-        </button>
-        <button
-          type="button"
-          onClick={onDiscard}
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-red-600/30 px-5 py-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:hover:bg-red-950/30"
-        >
-          Discard
-        </button>
+          )}
+          <button
+            type="button"
+            aria-label="Re-detect"
+            data-redetect
+            disabled={redetecting}
+            onClick={redetect}
+            className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-wait disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className="h-5 w-5"
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+            <span className="sr-only">Re-detect</span>
+          </button>
+          <button
+            type="button"
+            aria-label="Use original"
+            disabled={verdictDisabled}
+            onClick={chooseOriginal}
+            className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className="h-5 w-5"
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="9" cy="9" r="2" />
+              <path d="m21 15-4.5-4.5L6 21" />
+            </svg>
+            <span className="sr-only">Use original</span>
+          </button>
+          <button
+            type="button"
+            aria-label="Discard"
+            onClick={onDiscard}
+            className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-red-600/30 text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:hover:bg-red-950/30"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className="h-5 w-5"
+            >
+              <path d="M3 6h18" />
+              <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+            </svg>
+            <span className="sr-only">Discard</span>
+          </button>
+        </div>
       </div>
     </div>
   );

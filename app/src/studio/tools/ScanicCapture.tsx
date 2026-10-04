@@ -540,17 +540,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     (async () => {
       try {
         const front = facing === 'user';
+        // Portrait ideals: phone cameras deliver a tall frame, so the
+        // viewfinder (a 9:16 box) previews what the capture path stores.
         stream = await navigator.mediaDevices.getUserMedia({
           video: front
             ? {
                 facingMode: { ideal: facing },
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
+                width: { ideal: 720 },
+                height: { ideal: 1280 },
               }
             : {
                 facingMode: { ideal: facing },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
+                width: { ideal: 1080 },
+                height: { ideal: 1920 },
               },
           audio: false,
         });
@@ -1012,10 +1014,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         )}
       </div>
 
-      {/* session strip — always rendered */}
+      {/* session strip — ALWAYS rendered at a FIXED height (h-20) so the
+          first capture never shrinks the viewfinder below it. The empty
+          placeholder occupies the same slot; the slot never collapses. */}
       <div
         data-scan-strip
-        className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
+        className="flex h-20 shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
       >
         {queue.length === 0 ? (
           <p className="text-xs text-ink-400 dark:text-ink-300">
@@ -1057,86 +1061,106 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       </div>
 
       {phase === 'camera' && (
+        // FIXED camera grid: strip (fixed h-20 above) / viewfinder (flex-1,
+        // the ONLY flexible row) / controls (shrink-0, fixed). Enqueueing
+        // pages must not move the viewfinder by a single pixel.
         <div className="flex min-h-0 flex-1 flex-col">
           {camState === 'live' || camState === 'requesting' ? (
-            <div className="relative min-h-0 flex-1 overflow-hidden bg-ink-950">
-              <video
-                ref={videoRef}
-                muted
-                playsInline
-                autoPlay
-                aria-label="Camera preview"
-                style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
-                className="absolute inset-0 h-full w-full object-cover"
-              />
-              {/* Finder guidance frame: rounded-rect overlay with corner ticks. */}
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-ink-950 p-2">
+              {/* Tall viewfinder: portrait 9:16 box, centered, width-driven so
+                  the ratio is EXACT (height derives from width via
+                  aspect-ratio; `h-full` + aspect together let flex stretch
+                  break the ratio). Capped by 55dvh-equivalent width so the
+                  controls below always fit without scroll. The video covers
+                  the tall box — never a landscape-cropped-wide frame. */}
               <div
-                data-finder-frame
-                aria-hidden
-                className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 sm:p-10"
+                data-viewfinder
+                className="relative aspect-[9/16] w-full max-w-[calc(55dvh*9/16)] shrink-0 overflow-hidden rounded-xl bg-black"
               >
-                <div className="relative h-full max-h-[70dvh] w-full max-w-md rounded-2xl">
-                  <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
-                  <span className="absolute right-0 top-0 h-9 w-9 rounded-tr-2xl border-r-4 border-t-4 border-paper-50/90" />
-                  <span className="absolute bottom-0 left-0 h-9 w-9 rounded-bl-2xl border-b-4 border-l-4 border-paper-50/90" />
-                  <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
+                <video
+                  ref={videoRef}
+                  muted
+                  playsInline
+                  autoPlay
+                  aria-label="Camera preview"
+                  style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
+                  className="absolute inset-0 h-full w-full object-cover"
+                />
+                {/* Finder guidance frame: rounded-rect overlay with corner ticks. */}
+                <div
+                  data-finder-frame
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 sm:p-10"
+                >
+                  <div className="relative h-full w-full rounded-2xl">
+                    <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
+                    <span className="absolute right-0 top-0 h-9 w-9 rounded-tr-2xl border-r-4 border-t-4 border-paper-50/90" />
+                    <span className="absolute bottom-0 left-0 h-9 w-9 rounded-bl-2xl border-b-4 border-l-4 border-paper-50/90" />
+                    <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
+                  </div>
                 </div>
-              </div>
-              <p
-                data-finder-status
-                role="status"
-                className="absolute bottom-3 left-1/2 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
-              >
-                {finderStatus}
-              </p>
-              <div className="absolute right-2 top-2 flex gap-2">
-                <button
-                  type="button"
-                  aria-label="Switch camera"
-                  onClick={() => setFacing((f) => (f === 'environment' ? 'user' : 'environment'))}
-                  className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                <p
+                  data-finder-status
+                  role="status"
+                  className="absolute bottom-3 left-1/2 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
                 >
-                  ⇄
-                </button>
-                <button
-                  type="button"
-                  data-mirror-toggle
-                  aria-pressed={mirrored}
-                  aria-label="Mirror front-camera preview"
-                  title={
-                    mirrored
-                      ? 'Front preview mirrored (captures stay unmirrored)'
-                      : 'Front preview unmirrored'
-                  }
-                  onClick={() => setMirrored((v) => !v)}
-                  className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                >
-                  {mirrored ? '◐' : '◑'}
-                </button>
+                  {finderStatus}
+                </p>
+                <div className="absolute right-2 top-2 flex gap-2">
+                  <button
+                    type="button"
+                    aria-label="Switch camera"
+                    onClick={() => setFacing((f) => (f === 'environment' ? 'user' : 'environment'))}
+                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                  >
+                    ⇄
+                  </button>
+                  <button
+                    type="button"
+                    data-mirror-toggle
+                    aria-pressed={mirrored}
+                    aria-label="Mirror front-camera preview"
+                    title={
+                      mirrored
+                        ? 'Front preview mirrored (captures stay unmirrored)'
+                        : 'Front preview unmirrored'
+                    }
+                    onClick={() => setMirrored((v) => !v)}
+                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
+                  >
+                    {mirrored ? '◐' : '◑'}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
-            <div className="mx-4 mt-4 rounded-xl border border-dashed border-paper-300 px-4 py-6 text-center dark:border-ink-700">
-              <p
-                data-finder-status
-                role="status"
-                className="text-sm text-ink-500 dark:text-ink-300"
-              >
-                {cameraHelp}
-              </p>
-              {camState === 'denied' && (
-                <button
-                  type="button"
-                  onClick={() => setRetryNonce((n) => n + 1)}
-                  className="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-ink-950 p-4">
+              {/* No-preview fallback occupies the SAME flex-1 slot so the
+                  controls below never move between camera states. */}
+              <div className="rounded-xl border border-dashed border-paper-300 bg-paper-50 px-4 py-6 text-center dark:border-ink-700 dark:bg-ink-900">
+                <p
+                  data-finder-status
+                  role="status"
+                  className="text-sm text-ink-500 dark:text-ink-300"
                 >
-                  Retry camera
-                </button>
-              )}
+                  {cameraHelp}
+                </p>
+                {camState === 'denied' && (
+                  <button
+                    type="button"
+                    onClick={() => setRetryNonce((n) => n + 1)}
+                    className="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                  >
+                    Retry camera
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
-          <div className="shrink-0 space-y-2 overflow-y-auto bg-paper-50 px-4 py-3 dark:bg-ink-900">
+          {/* Fixed controls: shrink-0, never scrolls — the viewfinder above
+              absorbs all size pressure (flex-1 min-h-0 + max-h-bounded box). */}
+          <div className="shrink-0 space-y-2 bg-paper-50 px-4 py-3 dark:bg-ink-900">
             {/* Manual/Auto segmented mode pill */}
             <div className="flex justify-center">
               <div
@@ -1239,16 +1263,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
                 On-device ML auto-crop — images never leave this device.
               </p>
-              {queue.length > 0 && (
-                <button
-                  type="button"
-                  data-review-cta
-                  onClick={() => goToReview()}
-                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-                >
-                  {pendingCount > 0 ? `Review ${pendingCount} pages` : `View ${queue.length} pages`}
-                </button>
-              )}
+              {/* Review-CTA slot: ALWAYS rendered at a fixed min-height so the
+                  first capture never grows the controls (and never moves the
+                  viewfinder). The button itself stays queue-gated per the
+                  E2E contract. */}
+              <div className="flex min-h-[52px] items-center justify-center">
+                {queue.length > 0 && (
+                  <button
+                    type="button"
+                    data-review-cta
+                    onClick={() => goToReview()}
+                    className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+                  >
+                    {pendingCount > 0
+                      ? `Review ${pendingCount} pages`
+                      : `View ${queue.length} pages`}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

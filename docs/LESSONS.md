@@ -121,3 +121,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** Eight handles beat four for precise adjust — D32 proved rigid whole-edge midpoints, D35 regressed to corners-only, D37 restores them; and a result view shows exactly one canvas (the verdict), never the evidence beside it.
 - **Why it matters.** Four corner dots cannot push an edge straight without shearing it, so precise adjust needs whole-edge midpoints that translate the full edge by one clamped delta; and a review hero that shows the photo beside the result makes the raw evidence the chore instead of showing what you get — the Use-original path is a verdict state (photo + unprocessed chip), not a second canvas.
 - **Rule.** Adjust modes ship 8 handles (4 corners + 4 convexity-guarded whole-edge midpoints, 44px targets); result views render exactly one canvas (the warped verdict, eager-warped so it is never empty). Evidence: `docs/DECISIONS.md` D32/D37; `app/e2e/studio.e2e.mjs` D37 8-handle + whole-edge checks; `app/src/studio/tools/ScanicReview.tsx` (Use-original verdict with unprocessed chip).
+
+## L-21 — Request the frame you display
+
+- **Observation.** A landscape capture on a portrait phone poisons every downstream surface (viewfinder ratio, layout stability, letterbox bars, handle alignment) — all four were downstream of landscape frames.
+- **Why it matters.** Fixing any one surface leaves the poisoned source in place; each downstream fix re-breaks the moment the frame shape changes.
+- **Rule.** Request the frame you display: set portrait ideals at the constraint level so all four surfaces are fixed at the source. Evidence: `docs/DECISIONS.md` D38 (user phone screenshots 2026-10-04).

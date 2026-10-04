@@ -42,7 +42,7 @@ Most PDF tools upload your documents to a server to process them. **Folio doesn'
 | **Images → PDF** | Build one PDF from JPEG/PNG images — camera capture (scanic, on-device) or upload your photos as fallback |
 | **Compress**     | _Coming in a future update_ — the action stays disabled rather than pretending to work                    |
 
-> **Document scanning runs on [scanic](https://github.com/marquaye/scanic) (MIT © marquaye).** Camera capture runs on-device (ML detection by default, classical as silent fallback) with a Google-pattern capture → single-canvas processed-result review flow (the warped auto-crop canvas only; Use-original is a verdict state, never a second canvas) and an 8-handle adjust mode (4 corners + 4 edge midpoints); uploads still work as fallback.
+> **Document scanning runs on [scanic](https://github.com/marquaye/scanic) (MIT © marquaye).** Camera capture runs on-device (ML detection by default, classical as silent fallback) with portrait capture (tall frames like the phone) → Google-pattern capture → single-canvas processed-result review flow (the warped auto-crop canvas only, compact action bar; Use-original is a verdict state, never a second canvas) and an 8-handle adjust mode (4 corners + 4 edge midpoints); uploads still work as fallback.
 >
 > The About page shows a dev-channel card on dev builds only (never on production) with the version, build time, and per-wave notes — so it answers "did the update land".
 

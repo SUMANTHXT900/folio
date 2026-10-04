@@ -224,10 +224,14 @@ describe('ScanicReview', () => {
     // Warped canvas still single, with the honest caption beneath it.
     expect(result?.querySelectorAll('img').length).toBe(1);
     expect(screen.getByText('Auto-detect found no page — adjust to crop manually.')).toBeTruthy();
-    // No warp at all: skeleton + caption, still no photo canvas.
+    // No warp at all: the ORIGINAL photo is the single canvas (a review with
+    // no image is a dead end), captioned honestly — never an empty box.
     rerender(<ScanicReview {...baseProps({ corners: null, warpedUrl: null })} />);
     const result2 = container.querySelector('[data-crop-result]');
-    expect(result2?.querySelectorAll('img').length).toBe(0);
+    expect(result2?.querySelectorAll('img').length).toBe(1);
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
     expect(screen.getByText('Auto-detect found no page — adjust to crop manually.')).toBeTruthy();
   });
 
@@ -349,5 +353,134 @@ describe('ScanicReview', () => {
     expect(props.onLooksGood).toHaveBeenCalledTimes(1);
     expect(props.onUseOriginal).toHaveBeenCalledTimes(1);
     expect(props.onDiscard).toHaveBeenCalledTimes(1);
+  });
+
+  it('action bar uses compact icon buttons with sr-only labels (textContent byte-identical)', () => {
+    render(<ScanicReview {...baseProps()} />);
+    for (const label of ['Adjust corners', 'Re-detect', 'Use original', 'Discard']) {
+      const btn = screen.getByRole('button', { name: label });
+      expect(btn.tagName).toBe('BUTTON');
+      expect(btn.textContent).toBe(label);
+      const sr = btn.querySelector('span.sr-only');
+      expect(sr).not.toBeNull();
+      expect(sr?.textContent).toBe(label);
+      expect(btn.querySelector('svg')).not.toBeNull();
+      expect(btn.getAttribute('aria-label')).toBe(label);
+    }
+    const primary = screen.getByRole('button', { name: 'Looks good' });
+    expect(primary.textContent).toBe('Looks good');
+    expect(primary.className).toMatch('w-full');
+  });
+
+  it('positions the overlay strictly inside the object-contain content box (no bar overlap)', () => {
+    const { container } = render(
+      <ScanicReview {...baseProps({ imageWidth: 100, imageHeight: 100 })} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust corners' }));
+    const adjust = container.querySelector('[data-crop-adjust]') as HTMLElement;
+    // Letterboxed frame: wide container, square photo → side bars.
+    adjust.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 200,
+        height: 100,
+        right: 200,
+        bottom: 100,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
+    const svg = container.querySelector('[data-crop-adjust] svg') as unknown as HTMLElement;
+    // Contain math: frame 200x100, natural 100x100 → content 100x100 at left 50.
+    expect(svg.style.left).toBe('50px');
+    expect(svg.style.top).toBe('0px');
+    expect(svg.style.width).toBe('100px');
+    expect(svg.style.height).toBe('100px');
+    // Corner handles sit strictly inside the content rect, never on the bars.
+    for (const key of ['tl', 'tr', 'br', 'bl']) {
+      const h = document.querySelector(`[data-crop-handle="${key}"]`) as HTMLElement;
+      const left = parseFloat(h.style.left);
+      const top = parseFloat(h.style.top);
+      expect(left).toBeGreaterThanOrEqual(50);
+      expect(left).toBeLessThanOrEqual(150);
+      expect(top).toBeGreaterThanOrEqual(0);
+      expect(top).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it('maps pointer drag through the same content rect (letterboxed frame)', () => {
+    const { container } = render(
+      <ScanicReview {...baseProps({ imageWidth: 100, imageHeight: 100 })} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust corners' }));
+    const adjust = container.querySelector('[data-crop-adjust]') as HTMLElement;
+    adjust.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 200,
+        height: 100,
+        right: 200,
+        bottom: 100,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
+    const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+    // TL at image (10,10) displays at frame (60,10): content left 50 + 10.
+    fireEvent.pointerDown(tl, { clientX: 60, clientY: 10, pointerId: 1, buttons: 1 });
+    fireEvent.pointerMove(tl, { clientX: 70, clientY: 20, pointerId: 1, buttons: 1 });
+    fireEvent.pointerUp(tl, { pointerId: 1 });
+    expect(container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points')).toBe(
+      '20,20 90,10 90,90 10,90',
+    );
+  });
+
+  it('scales handle visuals with display size while hit targets stay 44px', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust corners' }));
+    const adjust = container.querySelector('[data-crop-adjust]') as HTMLElement;
+    adjust.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
+    const smallDot = document.querySelector(
+      '[data-crop-handle="tl"] > span',
+    ) as unknown as HTMLElement;
+    const smallSize = parseFloat(smallDot.style.width);
+    expect(smallSize).toBe(18);
+    adjust.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 400,
+        height: 400,
+        right: 400,
+        bottom: 400,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
+    const largeDot = document.querySelector(
+      '[data-crop-handle="tl"] > span',
+    ) as unknown as HTMLElement;
+    const largeSize = parseFloat(largeDot.style.width);
+    expect(largeSize).toBe(28);
+    expect(largeSize).toBeGreaterThan(smallSize);
+    for (const h of Array.from(
+      container.querySelectorAll('[data-crop-handle], [data-crop-handle-mid]') ?? [],
+    )) {
+      expect((h as HTMLElement).className).toMatch('min-h-[44px]');
+      expect((h as HTMLElement).className).toMatch('min-w-[44px]');
+    }
   });
 });

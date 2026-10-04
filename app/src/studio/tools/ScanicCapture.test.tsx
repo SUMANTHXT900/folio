@@ -288,7 +288,7 @@ describe('ScanicCapture shell', () => {
 });
 
 describe('viewfinder', () => {
-  it('shows a full-bleed finder frame with honest Point-at-page status when live', async () => {
+  it('shows a tall portrait finder frame with honest Point-at-page status when live', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
@@ -298,7 +298,21 @@ describe('viewfinder', () => {
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
     expect(video).not.toBeNull();
-    expect(video?.className).toMatch('object-cover');
+    expect(video?.className).toContain('object-cover');
+    // Tall viewfinder: the video lives inside a centered portrait 9:16 box
+    // (never a landscape-cropped-wide frame). Width-driven sizing
+    // (aspect-ratio derives height from width) keeps the ratio EXACT —
+    // `h-full` + aspect together let flex stretch break it — capped by the
+    // 55dvh-equivalent width so the controls below always fit without scroll.
+    const box = video?.parentElement;
+    expect(box?.className).toContain('aspect-[9/16]');
+    expect(box?.className).toContain('w-full');
+    expect(box?.className).toContain('max-w-[calc(55dvh');
+    expect(box?.className).not.toContain('h-full');
+    const slot = box?.parentElement;
+    expect(slot?.className).toContain('flex-1');
+    expect(slot?.className).toContain('justify-center');
+    expect(slot?.className).toContain('items-center');
   });
 
   it('requests high-res constraints with a continuous-focus effort', async () => {
@@ -310,11 +324,69 @@ describe('viewfinder', () => {
     const constraints = getUserMedia.mock.calls[0][0] as {
       video: { width?: { ideal: number }; height?: { ideal: number } };
     };
-    // Back camera defaults to 1080p ideals.
-    expect(constraints.video.width).toEqual({ ideal: 1920 });
-    expect(constraints.video.height).toEqual({ ideal: 1080 });
+    // Back camera requests portrait ideals (tall frame for the 9:16 finder).
+    expect(constraints.video.width).toEqual({ ideal: 1080 });
+    expect(constraints.video.height).toEqual({ ideal: 1920 });
     // Continuous focus effort where available (mock accepts anything).
     expect(track.applyConstraints).toHaveBeenCalled();
+
+    // Front camera requests smaller portrait ideals.
+    fireEvent.click(screen.getByLabelText('Switch camera'));
+    await waitFor(() => {
+      expect(getUserMedia.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    const frontConstraints = getUserMedia.mock.calls[getUserMedia.mock.calls.length - 1][0] as {
+      video: { width?: { ideal: number }; height?: { ideal: number } };
+    };
+    expect(frontConstraints.video.width).toEqual({ ideal: 720 });
+    expect(frontConstraints.video.height).toEqual({ ideal: 1280 });
+  });
+});
+
+describe('zero layout shift', () => {
+  function ctaSlot(): HTMLElement {
+    const slot = Array.from(document.querySelectorAll('div')).find((d) =>
+      d.className.includes('min-h-[52px]'),
+    );
+    if (!slot) throw new Error('missing review-CTA slot');
+    return slot as HTMLElement;
+  }
+
+  it('keeps the strip slot, viewfinder slot, and controls fixed across the first capture', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+
+    // Fixed-grid invariants BEFORE any page exists: the strip slot is always
+    // rendered at a fixed height (never collapses to zero when empty).
+    const stripClass = q('[data-scan-strip]').className;
+    expect(stripClass).toContain('h-20');
+    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
+
+    const video = document.querySelector('video[aria-label="Camera preview"]');
+    if (!video) throw new Error('missing preview video');
+    const boxClass = video.parentElement?.className ?? '';
+    expect(boxClass).toContain('aspect-[9/16]');
+    const slotClass = video.parentElement?.parentElement?.className ?? '';
+    expect(slotClass).toContain('flex-1');
+
+    // The review-CTA slot is reserved even with an empty queue (the button
+    // itself stays queue-gated per the E2E contract).
+    const reservedClass = ctaSlot().className;
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
+
+    // First capture: enqueue a page while staying on the camera view.
+    injectFiles(photo('a.jpg', [1, 2]));
+    await findQ('[data-review-cta]');
+
+    // The grid must not move: same containers, same classes, zero shift.
+    expect(q('[data-scan-strip]').className).toBe(stripClass);
+    const videoAfter = document.querySelector('video[aria-label="Camera preview"]');
+    expect(videoAfter?.parentElement?.className).toBe(boxClass);
+    expect(videoAfter?.parentElement?.parentElement?.className).toBe(slotClass);
+    expect(ctaSlot().className).toBe(reservedClass);
+    // The CTA rides inside its reserved slot — present, slot unchanged.
+    expect(q('[data-review-cta]').parentElement?.className).toBe(reservedClass);
   });
 });
 
@@ -530,7 +602,7 @@ describe('corner editor', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
-    const reset = await screen.findByText('Reset to auto', { exact: true });
+    const reset = await screen.findByRole('button', { name: 'Reset to auto' });
     expect((reset as HTMLButtonElement).disabled).toBe(true);
   });
 });
@@ -712,7 +784,7 @@ describe('ML detector default', () => {
     expect(second.detector).toBe('classical');
     // Classical corners land on the page: adjust is seeded, Reset enabled.
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
-    const reset = await screen.findByText('Reset to auto', { exact: true });
+    const reset = await screen.findByRole('button', { name: 'Reset to auto' });
     expect((reset as HTMLButtonElement).disabled).toBe(false);
   });
 });

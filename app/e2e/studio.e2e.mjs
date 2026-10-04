@@ -215,15 +215,26 @@ function writeFakeY4M(filePath, width = 640, height = 480, frames = 12) {
   const uvSize = (width >> 1) * (height >> 1);
   const frameSize = ySize + uvSize * 2;
   const parts = [Buffer.from(header, 'ascii')];
+  // STATIC document-like frame on every frame: dark desk, bright page rect
+  // with a dark border — deliberately frame-independent so edge detection
+  // settles identically no matter which loop frame a capture grabs (the old
+  // drifting square made detection frame-dependent and the suite flaky).
+  const mx = Math.round(width * 0.15);
+  const my = Math.round(height * 0.12);
   for (let f = 0; f < frames; f += 1) {
     parts.push(Buffer.from('FRAME\n', 'ascii'));
-    const y = Buffer.alloc(ySize, 0x80 + ((f * 7) % 64));
-    // A bright square drifting per frame so motion is visible to detectors.
-    const sq = 96;
-    const ox = (f * 24) % (width - sq);
-    const oy = (f * 16) % (height - sq);
-    for (let row = 0; row < sq; row += 1) {
-      y.fill(0xe0, (oy + row) * width + ox, (oy + row) * width + ox + sq);
+    const y = Buffer.alloc(ySize, 0x40);
+    for (let row = my; row < height - my; row += 1) {
+      y.fill(0xe8, row * width + mx, row * width + (width - mx));
+    }
+    // Dark inner border so the page edge reads at any threshold.
+    for (let row = my; row < my + 3; row += 1) {
+      y.fill(0x20, row * width + mx, row * width + (width - mx));
+      y.fill(0x20, (height - 1 - row) * width + mx, (height - 1 - row) * width + (width - mx));
+    }
+    for (let row = my; row < height - my; row += 1) {
+      y.fill(0x20, row * width + mx, row * width + (mx + 3));
+      y.fill(0x20, row * width + (width - mx - 3), row * width + (width - mx));
     }
     parts.push(y);
     parts.push(Buffer.alloc(uvSize, 0x80));
@@ -1183,6 +1194,42 @@ async function main() {
           (finderDetail.mirrorPressed === 'true' || finderDetail.mirrorPressed === 'false'),
         JSON.stringify(finderDetail),
       );
+      // Viewfinder geometry contract: portrait 9:16 container + object-cover
+      // video. Candidate prefers the new `[data-viewfinder]` hook, falling
+      // back to the finder-frame inner box (portrait rounded-rect), then the
+      // frame itself, then the video parent — all total (try/catch).
+      const viewfinderBefore = await page.evaluate(() => {
+        try {
+          const video = document.querySelector('[data-scanner-root] video');
+          const candidate =
+            document.querySelector('[data-viewfinder]') ??
+            document.querySelector('[data-finder-frame] > div') ??
+            document.querySelector('[data-finder-frame]') ??
+            video?.parentElement ??
+            null;
+          if (!candidate) return null;
+          const r = candidate.getBoundingClientRect();
+          return {
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            ratio: r.width > 0 ? r.height / r.width : 0,
+            objectCover:
+              video !== null && video !== undefined
+                ? getComputedStyle(video).objectFit === 'cover'
+                : false,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner viewfinder is portrait 9:16 with object-cover video',
+        viewfinderBefore !== null &&
+          viewfinderBefore.h > viewfinderBefore.w &&
+          Math.abs(viewfinderBefore.ratio - 16 / 9) / (16 / 9) < 0.15 &&
+          viewfinderBefore.objectCover === true,
+        JSON.stringify(viewfinderBefore),
+      );
       // Click in one evaluate, read the flip in a LATER one: React flushes
       // setState after the click returns, so a same-evaluate read always
       // sees the stale value (L-12 family — reads as a dead toggle).
@@ -1535,6 +1582,31 @@ async function main() {
           queueState.live,
         JSON.stringify(queueState),
       );
+      // No-shift gate: the same viewfinder container keeps its pixel height
+      // across captures (reserved strip slot — zero layout shift).
+      const viewfinderAfter = await page.evaluate(() => {
+        try {
+          const video = document.querySelector('[data-scanner-root] video');
+          const candidate =
+            document.querySelector('[data-viewfinder]') ??
+            document.querySelector('[data-finder-frame] > div') ??
+            document.querySelector('[data-finder-frame]') ??
+            video?.parentElement ??
+            null;
+          if (!candidate) return null;
+          const r = candidate.getBoundingClientRect();
+          return { w: Math.round(r.width), h: Math.round(r.height) };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner viewfinder height stable across captures (no-shift gate)',
+        viewfinderBefore !== null &&
+          viewfinderAfter !== null &&
+          Math.abs(viewfinderAfter.h - viewfinderBefore.h) <= 2,
+        JSON.stringify({ before: viewfinderBefore, after: viewfinderAfter }),
+      );
       const ctaText = await page.evaluate(() => {
         try {
           return document.querySelector('[data-review-cta]')?.textContent?.trim() ?? null;
@@ -1876,6 +1948,41 @@ async function main() {
           touchBefore.adjust.h >= 44,
         JSON.stringify(touchBefore),
       );
+      // Review action-bar contract: primary Looks-good + icon row whose
+      // textContent still carries the EXACT labels (sr-only spans) so every
+      // existing label query keeps working unchanged.
+      const actionBar = await page.evaluate(() => {
+        try {
+          const btns = [...document.querySelectorAll('button')];
+          const texts = btns.map((b) => b.textContent ?? '');
+          const has = (label) => texts.some((t) => t.includes(label));
+          const looks = btns.find((b) => (b.textContent ?? '').includes('Looks good'));
+          const r = looks?.getBoundingClientRect() ?? null;
+          return {
+            hasLooksGood: has('Looks good'),
+            looksVisible: r !== null && r.width > 0 && r.height > 0,
+            looksEnabled: looks ? !looks.disabled : false,
+            hasRedetect: has('Re-detect'),
+            hasDiscard: has('Discard'),
+            hasAdjust: has('Adjust'),
+            hasUseOriginal: has('Use original'),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner review action bar shows Looks-good primary + icon labels (Re-detect/Discard/Adjust/Use-original)',
+        actionBar !== null &&
+          actionBar.hasLooksGood &&
+          actionBar.looksVisible &&
+          actionBar.looksEnabled &&
+          actionBar.hasRedetect &&
+          actionBar.hasDiscard &&
+          actionBar.hasAdjust &&
+          actionBar.hasUseOriginal,
+        JSON.stringify(actionBar),
+      );
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')]
@@ -2129,6 +2236,126 @@ async function main() {
         'scanner adjust mode shows editable quad polygon (4 points)',
         adjustPoly !== null && adjustPoly.polygonPresent && adjustPoly.pointPairs === 4,
         JSON.stringify(adjustPoly),
+      );
+      // Adjust accuracy contract: every handle center lies INSIDE the photo
+      // CONTENT box (letterbox-aware object-contain math — never on bars);
+      // the SVG quad bbox must also sit inside the content box.
+      const adjustGeometry = await page.evaluate(() => {
+        try {
+          const adjust = document.querySelector('[data-crop-adjust]');
+          const img = adjust?.querySelector('img') ?? null;
+          if (!adjust || !img) return null;
+          const ir = img.getBoundingClientRect();
+          const nw = img.naturalWidth;
+          const nh = img.naturalHeight;
+          if (ir.width <= 0 || ir.height <= 0 || nw <= 0 || nh <= 0) return null;
+          const scale = Math.min(ir.width / nw, ir.height / nh);
+          const cw = nw * scale;
+          const ch = nh * scale;
+          const cx = ir.left + (ir.width - cw) / 2;
+          const cy = ir.top + (ir.height - ch) / 2;
+          const content = { left: cx, top: cy, right: cx + cw, bottom: cy + ch };
+          const centers = [
+            ...adjust.querySelectorAll('[data-crop-handle],[data-crop-handle-mid]'),
+          ].map((el) => {
+            const r = el.getBoundingClientRect();
+            return {
+              key:
+                el.getAttribute('data-crop-handle') ??
+                el.getAttribute('data-crop-handle-mid') ??
+                '',
+              x: r.left + r.width / 2,
+              y: r.top + r.height / 2,
+            };
+          });
+          const tol = 2;
+          const inside = centers.map(
+            (c) =>
+              c.x >= content.left - tol &&
+              c.x <= content.right + tol &&
+              c.y >= content.top - tol &&
+              c.y <= content.bottom + tol,
+          );
+          const poly = adjust.querySelector('polygon');
+          const pr = poly?.getBoundingClientRect() ?? null;
+          const quadInside =
+            pr !== null
+              ? pr.left >= content.left - tol &&
+                pr.right <= content.right + tol &&
+                pr.top >= content.top - tol &&
+                pr.bottom <= content.bottom + tol
+              : null;
+          return {
+            contentW: Math.round(cw),
+            contentH: Math.round(ch),
+            centers: centers.map((c) => ({ key: c.key, x: Math.round(c.x), y: Math.round(c.y) })),
+            inside,
+            quad:
+              pr !== null
+                ? {
+                    left: Math.round(pr.left),
+                    top: Math.round(pr.top),
+                    right: Math.round(pr.right),
+                    bottom: Math.round(pr.bottom),
+                  }
+                : null,
+            quadInside,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner adjust handles sit on photo content (no letterbox-bar overlap)',
+        adjustGeometry !== null &&
+          adjustGeometry.centers.length === 8 &&
+          adjustGeometry.inside.every(Boolean),
+        JSON.stringify(adjustGeometry),
+      );
+      check(
+        'scanner adjust quad lies inside photo content box',
+        adjustGeometry !== null && adjustGeometry.quadInside === true,
+        JSON.stringify(adjustGeometry),
+      );
+      // Handle proportion: 44px hitbox with a smaller visual dot, even on
+      // small frames (the dot is the aria-hidden child span).
+      const handleSizes = await page.evaluate(() => {
+        try {
+          const els = [...document.querySelectorAll('[data-crop-handle],[data-crop-handle-mid]')];
+          if (els.length === 0) return null;
+          return els.map((el) => {
+            const r = el.getBoundingClientRect();
+            const dot = el.querySelector('[aria-hidden]') ?? el.firstElementChild;
+            const dr = dot?.getBoundingClientRect() ?? null;
+            return {
+              key:
+                el.getAttribute('data-crop-handle') ??
+                el.getAttribute('data-crop-handle-mid') ??
+                '',
+              w: Math.round(r.width),
+              h: Math.round(r.height),
+              dotW: dr !== null ? Math.round(dr.width) : null,
+              dotH: dr !== null ? Math.round(dr.height) : null,
+            };
+          });
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner adjust handles are proportionate (dot <44px, hitbox ≥44px)',
+        handleSizes !== null &&
+          handleSizes.length === 8 &&
+          handleSizes.every(
+            (s) =>
+              s.w >= 44 &&
+              s.h >= 44 &&
+              s.dotW !== null &&
+              s.dotW < 44 &&
+              s.dotH !== null &&
+              s.dotH < 44,
+          ),
+        JSON.stringify(handleSizes),
       );
       const adjustLabels = await page.evaluate(() => {
         try {
