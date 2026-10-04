@@ -183,11 +183,11 @@ function clampPoint(x: number, y: number, w: number, h: number): { x: number; y:
 }
 
 export const LOUPE_SIZE = 96;
-export const LOUPE_ZOOM = 1.1;
+export const LOUPE_ZOOM = 0.6;
 const LOUPE_OFFSET = 16;
 
 /**
- * Source rect (natural image pixels) for the 1.1x loupe, centered EXACTLY
+ * Source rect (natural image pixels) for the 0.6x loupe, centered EXACTLY
  * on the active corner. Accuracy contract: rect center == corner position
  * (before edge clamping); clamping only shifts the rect to stay in bounds.
  */
@@ -583,7 +583,7 @@ export default function ScanicReview({
     }
   }, [photoUrl]);
 
-  // Paint the 1.1x zoom centered EXACTLY on the active corner. Guards make
+  // Paint the 0.6x zoom centered EXACTLY on the active corner. Guards make
   // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
   useEffect(() => {
     if (loupeImagePoint === null || loupeHandle === null) return;

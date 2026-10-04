@@ -1,8 +1,8 @@
 /**
  * ScanicCapture tests: full-screen takeover contract, ML-default detection,
  * mirror control, finder frame/status, result-FIRST queue flow, commit
- * semantics (warped PNG vs byte-identical original, capture order,
- * `scan-NNN.jpg` naming), and the portaled corner editor.
+ * semantics (warped JPEG q0.9 vs byte-identical original, capture order,
+ * `scan-NNN.jpg` naming), main-lens scoring, and the portaled corner editor.
  *
  * `scanic` is doubled (jsdom has no camera, no canvas 2D, no WASM): the
  * doubles stay faithful — DOM handle buttons with `data-corner`, arrow-key
@@ -24,8 +24,10 @@ import ScanicCapture, {
   cameraFailureMessage,
   formatScanName,
   grayscaleSAD,
+  hasZoomCapability,
   isLandscapeScreen,
   isStableFrame,
+  scoreBackCamera,
   shouldAutoFire,
 } from './ScanicCapture';
 import { createCornerEditor, extractDocument, scanDocument } from 'scanic';
@@ -438,7 +440,7 @@ describe('mirror control', () => {
 describe('result-FIRST queue', () => {
   it('emits the exact E2E contract after capture', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
@@ -470,9 +472,15 @@ describe('result-FIRST queue', () => {
   });
 
   it('builds all remaining pages in order with no accept click', async () => {
-    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
-    };
+    const seen: Array<{ type?: string; quality?: number }> = [];
+    HTMLCanvasElement.prototype.toBlob = function (
+      cb: (b: Blob | null) => void,
+      type?: string,
+      quality?: number,
+    ) {
+      seen.push({ type, quality });
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    } as typeof HTMLCanvasElement.prototype.toBlob;
     const onCommit = vi.fn();
     const onExit = vi.fn();
     render(<ScanicCapture onCommit={onCommit} onExit={onExit} />);
@@ -498,10 +506,16 @@ describe('result-FIRST queue', () => {
     expect(onExit).toHaveBeenCalledTimes(1);
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages.map((p) => p.name)).toEqual(['scan-001.jpg', 'scan-002.jpg']);
-    expect(pages[0].file.type).toBe('image/png');
-    expect(await pages[0].file.text()).toBe('png-bytes');
-    expect(pages[1].file.type).toBe('image/png');
-    expect(await pages[1].file.text()).toBe('png-bytes');
+    expect(pages[0].file.type).toBe('image/jpeg');
+    expect(await pages[0].file.text()).toBe('jpeg-bytes');
+    expect(pages[1].file.type).toBe('image/jpeg');
+    expect(await pages[1].file.text()).toBe('jpeg-bytes');
+    // Warped output encodes full-res JPEG q0.9 (never PNG).
+    expect(seen.length).toBeGreaterThan(0);
+    for (const s of seen) {
+      expect(s.type).toBe('image/jpeg');
+      expect(s.quality).toBe(0.9);
+    }
   });
 
   it('Use original toggles to the byte-identical original', async () => {
@@ -523,7 +537,7 @@ describe('result-FIRST queue', () => {
 
   it('Use original toggles back to warped', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     const onCommit = vi.fn();
     render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
@@ -538,8 +552,8 @@ describe('result-FIRST queue', () => {
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
-    expect(pages[0].file.type).toBe('image/png');
-    expect(await pages[0].file.text()).toBe('png-bytes');
+    expect(pages[0].file.type).toBe('image/jpeg');
+    expect(await pages[0].file.text()).toBe('jpeg-bytes');
   });
 
   it('discards a page from the queue', async () => {
@@ -568,7 +582,7 @@ describe('result-FIRST queue', () => {
 describe('eager warp', () => {
   it('warps a page with corners immediately, with no accept click', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
@@ -585,7 +599,7 @@ describe('eager warp', () => {
 
   it('warps once per quad — no re-warp loop for the same corners', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
@@ -762,7 +776,7 @@ describe('capture mode + gallery cluster', () => {
 describe('review filmstrip + batch bar', () => {
   it('renders numbered thumbs, pager, add-back, and an ungated Next that reaches done', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
@@ -957,7 +971,7 @@ describe('original-blob capture (ImageCapture)', () => {
     const toBlobTypes: Array<string | undefined> = [];
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void, type?: string) {
       toBlobTypes.push(type);
-      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     const probe = stubImageCaptureNative();
     mockCameraForShutter();
@@ -971,7 +985,8 @@ describe('original-blob capture (ImageCapture)', () => {
     // Best original: the capabilities max was requested.
     await waitFor(() => expect(probe.calls()).toBe(1));
     expect(probe.seen()).toEqual({ imageWidth: 4000, imageHeight: 3000 });
-    // Capture never re-encoded: no JPEG canvas export anywhere (warp PNG only).
+    // Capture never re-encoded: no canvas export during the shutter itself
+    // (warped JPEG q0.9 runs later, in review, via canvasToJpeg only).
     expect(toBlobTypes.includes('image/jpeg')).toBe(false);
 
     // Original bytes flow downstream byte-identical.
@@ -1661,5 +1676,45 @@ describe('best-camera probe + persisted pick + flash honesty', () => {
     // platform-invisible and must never be faked into the list).
     expect(options.map((o) => o.value)).toEqual(['', 'cam-1', 'cam-2']);
     expect(options).toHaveLength(3);
+  });
+});
+
+describe('main-lens scoring (scoreBackCamera)', () => {
+  it('penalizes ultra-wide labels so a plain main lens wins at equal pixels', () => {
+    const ultra = scoreBackCamera({
+      label: '0.5x Ultra Wide camera',
+      maxPixels: 12_000_000,
+      hasZoom: false,
+    });
+    const main = scoreBackCamera({ label: 'Back camera', maxPixels: 12_000_000, hasZoom: false });
+    expect(ultra).toBeLessThan(main);
+    // Penalty is -100; the megapixel tiebreak alone (+12) can never overcome it.
+    expect(main - ultra).toBeGreaterThanOrEqual(100);
+  });
+
+  it('prefers a zoom-capable lens over a fixed lens at equal pixels', () => {
+    const noZoom = scoreBackCamera({ label: 'Back camera', maxPixels: 8_000_000, hasZoom: false });
+    const zoom = scoreBackCamera({ label: 'Back camera', maxPixels: 8_000_000, hasZoom: true });
+    expect(zoom).toBeGreaterThan(noZoom);
+    expect(zoom - noZoom).toBe(50);
+  });
+
+  it('breaks ties with megapixels when labels and zoom match', () => {
+    const low = scoreBackCamera({ label: 'Back camera', maxPixels: 8_000_000, hasZoom: false });
+    const high = scoreBackCamera({ label: 'Back camera', maxPixels: 12_000_000, hasZoom: false });
+    expect(high).toBeGreaterThan(low);
+    expect(high - low).toBeCloseTo(4, 6);
+  });
+
+  it('matches the label penalty variants and the zoom capability gate', () => {
+    for (const label of ['Ultra camera', 'wide-angle', '0.5x', 'fisheye lens', 'Macro cam']) {
+      expect(scoreBackCamera({ label, maxPixels: 12_000_000, hasZoom: false })).toBeLessThan(
+        scoreBackCamera({ label: 'Back camera', maxPixels: 1_000_000, hasZoom: false }),
+      );
+    }
+    expect(hasZoomCapability({ zoom: { min: 1, max: 8 } })).toBe(true);
+    expect(hasZoomCapability({ zoom: { min: 1, max: 1 } })).toBe(false);
+    expect(hasZoomCapability({})).toBe(false);
+    expect(hasZoomCapability(null)).toBe(false);
   });
 });

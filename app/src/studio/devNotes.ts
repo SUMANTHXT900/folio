@@ -17,6 +17,11 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D45 main-lens + JPEG warp',
+    date: '2026-10-04',
+    notes: ['Main-lens default scoring.', 'JPEG warped output.', 'Calmer 0.6x loupe.'],
+  },
+  {
     build: 'D44 best-camera + flash honesty',
     date: '2026-10-04',
     notes: [

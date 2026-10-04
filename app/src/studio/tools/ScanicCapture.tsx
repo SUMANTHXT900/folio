@@ -78,7 +78,12 @@
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
- * PNGs from `extractDocument(..., { output: 'canvas' })`.
+ * JPEG q0.9 renders from `extractDocument(..., { output: 'canvas' })` via
+ * `canvasToJpeg(0.9)` — warped pages are NEW renders (never original bytes;
+ * originals still pass through byte-identical), and JPEG q0.9 full-res cuts
+ * multi-MB PNG bloat to a fraction with no readable-text loss (4-page 22MB
+ * class problem). Committed warped files keep `scan-NNN.jpg` names with
+ * `image/jpeg` type.
  *
  * Corner adjust lives in `./ScanicReview` (dependency-free handles on the
  * overlay coordinate space, same E2E labels + 44px targets); this file owns
@@ -233,6 +238,89 @@ async function maxPixelsForTrack(track: MediaStreamTrack): Promise<number | null
   } catch {
     return null;
   }
+}
+
+/**
+ * Main-lens default scoring (best-effort heuristic, NOT a lens constraint).
+ *
+ * No getUserMedia constraint distinguishes wide vs ultra-wide (open W3C
+ * mediacapture-extensions#20 issue — verified 2026-10-04, never shipped), so
+ * "best back camera" must be PROBED and scored, never constrained. Inputs are
+ * the only three signals browsers expose:
+ * - `label` keywords (needs permission; blank/generic labels score 0 here),
+ * - `hasZoom` (PTZ `zoom` capability min!==max, Chrome 87+ — main/tele lenses
+ *   advertise a zoom range, fixed ultra-wide/macro lenses typically don't),
+ * - `maxPixels` probe (per-device max photo resolution, /1e6 tiebreak only).
+ *
+ * Scores rank ENUMERATED logical cameras only — this file never fabricates a
+ * device (see the platform-limit note above). The persisted user pick always
+ * wins overall; the suggestion probe keeps its >25% pixel gate AND picks the
+ * highest score (so a huge-but-ultra-wide sensor loses to a plain main lens).
+ *
+ * Limits: label-dependent (OEM labels vary; `0.5x`/ultra hints are the only
+ * wide signal), capability-gated (many browsers hide PTZ zoom; then hasZoom is
+ * false everywhere and pixels decide), never a physical-lens guarantee (hidden
+ * lenses behind one logical device stay platform-invisible).
+ */
+export function scoreBackCamera(input: {
+  label: string;
+  maxPixels: number | null;
+  hasZoom: boolean;
+}): number {
+  let score = 0;
+  if (/ultra|0\.5x?|wide.?angle|fisheye|macro/i.test(input.label)) score -= 100;
+  if (input.hasZoom) score += 50;
+  if (
+    typeof input.maxPixels === 'number' &&
+    Number.isFinite(input.maxPixels) &&
+    input.maxPixels > 0
+  ) {
+    score += input.maxPixels / 1e6;
+  }
+  return score;
+}
+
+/**
+ * True when a capabilities object advertises a real zoom range (min!==max).
+ * Accepts track `getCapabilities()` or ImageCapture `getPhotoCapabilities()`
+ * shapes — anything missing/non-numeric is capability-gated to false.
+ */
+export function hasZoomCapability(caps: unknown): boolean {
+  try {
+    if (!caps || typeof caps !== 'object') return false;
+    const zoom = (caps as { zoom?: unknown }).zoom;
+    if (!zoom || typeof zoom !== 'object') return false;
+    const min = (zoom as { min?: unknown }).min;
+    const max = (zoom as { max?: unknown }).max;
+    if (typeof min !== 'number' || typeof max !== 'number') return false;
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return false;
+    return min !== max;
+  } catch {
+    return false;
+  }
+}
+
+/** Zoom signal for a live track: track caps first, ImageCapture photo caps as fallback. */
+async function hasZoomForTrack(track: MediaStreamTrack): Promise<boolean> {
+  try {
+    const caps = (track as { getCapabilities?: () => unknown }).getCapabilities?.();
+    if (hasZoomCapability(caps)) return true;
+  } catch {
+    // Fall through to the ImageCapture check below.
+  }
+  const Ctor = getImageCaptureCtor();
+  if (Ctor) {
+    try {
+      const capture = new Ctor(track);
+      if (typeof capture.getPhotoCapabilities === 'function') {
+        const photoCaps = (await capture.getPhotoCapabilities()) as unknown;
+        if (hasZoomCapability(photoCaps)) return true;
+      }
+    } catch {
+      // Capability-gated: treat as no zoom.
+    }
+  }
+  return false;
 }
 
 /**
@@ -430,7 +518,7 @@ export interface ScanicCommittedPage {
 }
 
 export interface ScanicCaptureProps {
-  /** Receives accepted pages in capture order (warped PNG or original File). */
+  /** Receives accepted pages in capture order (warped JPEG or original File). */
   onCommit: (pages: ScanicCommittedPage[]) => void;
   /** Leaves the scanner without committing (Back in ImagesTool). */
   onExit: () => void;
@@ -453,7 +541,7 @@ interface QueueEntry {
   status: 'detecting' | 'ready';
   /**
    * Render verdict only (no pending — every queued page is implicitly
-   * accepted): `warped` uses the warped PNG when available else the
+   * accepted): `warped` uses the warped JPEG when available else the
    * original; `original` always uses the byte-identical original.
    * Defaults to `warped` (implicit accept with current crop).
    */
@@ -487,14 +575,24 @@ function loadImage(
   });
 }
 
-function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob | null> {
+/**
+ * Warped-page encoder: full-res `image/jpeg` at quality 0.9.
+ *
+ * Rationale: warped pages are NEW renders (never original bytes — originals
+ * still pass through byte-identical), and JPEG q0.9 full-res cuts multi-MB
+ * PNG bloat to a fraction with no readable-text loss (4-page 22MB class
+ * problem). Committed warped files keep `scan-NNN.jpg` names with
+ * `image/jpeg` type. Full-res means the extract canvas pixels as-is (no
+ * downscale); only the container changes (PNG → JPEG).
+ */
+function canvasToJpeg(canvas: HTMLCanvasElement, quality = 0.9): Promise<Blob | null> {
   return new Promise((resolve) => {
     try {
       if (typeof canvas.toBlob !== 'function') {
         resolve(null);
         return;
       }
-      canvas.toBlob((blob) => resolve(blob), 'image/png');
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', quality);
     } catch {
       resolve(null);
     }
@@ -1062,12 +1160,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * resolution (never a constraint — focalLength never shipped). Each
    * candidate opens video-only (`deviceId: { exact }`, muted, never attached
    * to any element), resolves `ImageCapture.getPhotoCapabilities()` max
-   * pixels (fallback: track `getCapabilities()` width×height max), then stops
-   * its tracks immediately. A clearly sharper candidate (>25% more pixels)
-   * surfaces a one-tap `[data-camera-suggest]` note — never an auto-switch.
-   * Skipped when <2 cameras are listed, on any error, or once the user has
-   * picked. StrictMode-safe: `probeFiredRef` fires once per mount and the
-   * generation guard drops the late double-mount result.
+   * pixels (fallback: track `getCapabilities()` width×height max) plus the
+   * PTZ zoom signal, scores via `scoreBackCamera` (ultra-wide/macro label
+   * penalty, zoom bonus, megapixel tiebreak), then stops its tracks
+   * immediately. The highest SCORE wins the default back-camera choice, gated
+   * by a clearly-sharper pixel rule (>25% more pixels) — a one-tap
+   * `[data-camera-suggest]` note, never an auto-switch. Skipped when
+   * <2 cameras are listed, on any error, or once the user has picked (the
+   * persisted pick wins overall). StrictMode-safe: `probeFiredRef` fires once
+   * per mount and the generation guard drops the late double-mount result.
    */
   useEffect(() => {
     if (phase !== 'camera' || paused) return;
@@ -1086,12 +1187,23 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (!liveTrack) return;
         const currentPixels = await maxPixelsForTrack(liveTrack);
         if (currentPixels === null) return;
+        const currentLabel =
+          typeof (liveTrack as { label?: unknown }).label === 'string'
+            ? ((liveTrack as { label?: string }).label ?? '')
+            : '';
+        const currentHasZoom = await hasZoomForTrack(liveTrack);
+        const currentScore = scoreBackCamera({
+          label: currentLabel,
+          maxPixels: currentPixels,
+          hasZoom: currentHasZoom,
+        });
         // Default stream's device is unknown, so every listed input is a
         // candidate; with an explicit pick this effect never runs (guarded).
         const candidates = cameras.filter((c) => c.deviceId !== '' && c.deviceId !== activePick);
         if (candidates.length === 0) return;
         let bestId: string | null = null;
         let bestPixels = 0;
+        let bestScore = Number.NEGATIVE_INFINITY;
         for (const candidate of candidates) {
           if (!alive || probeGenRef.current !== gen) return;
           let probeStream: MediaStream | null = null;
@@ -1103,7 +1215,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             const probeTrack = probeStream.getVideoTracks()[0];
             if (!probeTrack) continue;
             const pixels = await maxPixelsForTrack(probeTrack);
-            if (pixels !== null && pixels > bestPixels) {
+            if (pixels === null) continue;
+            const hasZoom = await hasZoomForTrack(probeTrack);
+            const score = scoreBackCamera({
+              label: candidate.label ?? '',
+              maxPixels: pixels,
+              hasZoom,
+            });
+            if (score > bestScore) {
+              bestScore = score;
               bestPixels = pixels;
               bestId = candidate.deviceId;
             }
@@ -1125,7 +1245,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           (chosenDeviceIdRef.current ?? selectedDeviceId) === null ||
           (chosenDeviceIdRef.current ?? selectedDeviceId) === '';
         if (!stillDefault) return;
-        if (bestId !== null && bestPixels > currentPixels * 1.25) {
+        if (bestId !== null && bestPixels > currentPixels * 1.25 && bestScore > currentScore) {
           setSuggestedDeviceId(bestId);
         }
       } catch {
@@ -1333,7 +1453,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   /**
    * `Use original` toggle: flips the current page's render verdict between
-   * warped (implicit accept, warped PNG when available else original) and
+   * warped (implicit accept, warped JPEG when available else original) and
    * original (byte-identical). Stays on the same page — no auto-advance.
    * StrictMode-safe: pure ref map + setEntries, no updater side effects.
    */
@@ -1361,8 +1481,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         const result = await extractDocument(img, corners, { output: 'canvas' });
         const canvas = result.output as HTMLCanvasElement | null;
         if (!canvas) throw new Error('no canvas');
-        const blob = await canvasToPng(canvas);
-        if (!blob) throw new Error('no png');
+        const blob = await canvasToJpeg(canvas, 0.9);
+        if (!blob) throw new Error('no jpeg');
         if (!mountedRef.current) return;
         warpedBlobsRef.current.set(id, blob);
         revokeUrl(entriesRef.current.find((e) => e.id === id)?.warpedUrl ?? null);
@@ -1461,7 +1581,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       const name = formatScanName(startIndex + i);
       if (entry.decision !== 'original') {
         const blob = warpedBlobsRef.current.get(entry.id);
-        if (blob) return { file: new File([blob], name, { type: 'image/png' }), name };
+        if (blob) return { file: new File([blob], name, { type: 'image/jpeg' }), name };
       }
       // Verdict `original`, or warped verdict with no warp yet: the queued
       // File, byte-identical — renamed, never re-encoded.
