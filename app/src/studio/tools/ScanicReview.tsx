@@ -183,11 +183,11 @@ function clampPoint(x: number, y: number, w: number, h: number): { x: number; y:
 }
 
 export const LOUPE_SIZE = 96;
-export const LOUPE_ZOOM = 1.15;
+export const LOUPE_ZOOM = 1.1;
 const LOUPE_OFFSET = 16;
 
 /**
- * Source rect (natural image pixels) for the 1.15x loupe, centered EXACTLY
+ * Source rect (natural image pixels) for the 1.1x loupe, centered EXACTLY
  * on the active corner. Accuracy contract: rect center == corner position
  * (before edge clamping); clamping only shifts the rect to stay in bounds.
  */
@@ -583,7 +583,7 @@ export default function ScanicReview({
     }
   }, [photoUrl]);
 
-  // Paint the 1.15x zoom centered EXACTLY on the active corner. Guards make
+  // Paint the 1.1x zoom centered EXACTLY on the active corner. Guards make
   // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
   useEffect(() => {
     if (loupeImagePoint === null || loupeHandle === null) return;
@@ -652,224 +652,227 @@ export default function ScanicReview({
             className="block max-h-[50dvh] w-full object-contain"
             draggable={false}
           />
-          {/* No fallback-window drift: overlay/handles render only once the
-              content rect is measured — drag already uses that rect. */}
-          {contentRect !== null && (
-            <>
-              <svg
-                viewBox={`0 0 ${safeW} ${safeH}`}
-                preserveAspectRatio="none"
-                aria-hidden={false}
-                aria-label="Adjustable crop outline"
-                style={overlaySvgStyle}
-                className="pointer-events-none absolute"
-              >
-                <path
-                  d={
-                    `M0 0H${safeW}V${safeH}H0Z ` +
-                    `M${draft.topLeft.x} ${draft.topLeft.y}` +
-                    `L${draft.topRight.x} ${draft.topRight.y}` +
-                    `L${draft.bottomRight.x} ${draft.bottomRight.y}` +
-                    `L${draft.bottomLeft.x} ${draft.bottomLeft.y}Z`
+          {/* Overlay always renders, even before measurement: with no content
+              rect yet it falls back to full-frame % positioning (same space
+              the % drag fallback used) and snaps exact once measured.
+              Gating it on measurement left zero-rect environments (jsdom,
+              first paint) with zero handles. */}
+          <svg
+            viewBox={`0 0 ${safeW} ${safeH}`}
+            preserveAspectRatio="none"
+            aria-hidden={false}
+            aria-label="Adjustable crop outline"
+            style={overlaySvgStyle}
+            className={
+              contentRect !== null
+                ? 'pointer-events-none absolute'
+                : 'pointer-events-none absolute inset-0 h-full w-full'
+            }
+          >
+            <path
+              d={
+                `M0 0H${safeW}V${safeH}H0Z ` +
+                `M${draft.topLeft.x} ${draft.topLeft.y}` +
+                `L${draft.topRight.x} ${draft.topRight.y}` +
+                `L${draft.bottomRight.x} ${draft.bottomRight.y}` +
+                `L${draft.bottomLeft.x} ${draft.bottomLeft.y}Z`
+              }
+              fill="rgba(23, 19, 14, 0.55)"
+              fillRule="evenodd"
+            />
+            <polygon
+              points={quadPointsAttr(draft)}
+              fill="none"
+              stroke="#c97a1f"
+              strokeWidth={1.5}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              strokeDasharray="1 4"
+              vectorEffect="non-scaling-stroke"
+            />
+          </svg>
+          <div className="absolute inset-0">
+            {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
+              const corner = HANDLE_TO_CORNER[key];
+              const point = draft[corner];
+              const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
+              const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  data-crop-handle={key}
+                  role="slider"
+                  aria-label={CORNER_LABEL[corner]}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={pctX}
+                  aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
+                  style={handlePosStyle(point.x, point.y)}
+                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    dragKeyRef.current = key;
+                    setGrabbed({ kind: 'corner', key });
+                    try {
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    } catch {
+                      // jsdom / browsers without pointer capture: move
+                      // events still fire on the element while pressed.
+                    }
+                  }}
+                  onPointerMove={(e) => {
+                    if (dragKeyRef.current !== key) return;
+                    if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
+                    const p = clientToImage(e.clientX, e.clientY);
+                    moveCorner(key, p.x, p.y);
+                  }}
+                  onPointerUp={() => {
+                    dragKeyRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    );
+                  }}
+                  onPointerCancel={() => {
+                    dragKeyRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    );
+                  }}
+                  onFocus={() => setFocusedHandle({ kind: 'corner', key })}
+                  onBlur={() =>
+                    setFocusedHandle((prev) =>
+                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                    )
                   }
-                  fill="rgba(23, 19, 14, 0.55)"
-                  fillRule="evenodd"
-                />
-                <polygon
-                  points={quadPointsAttr(draft)}
-                  fill="none"
-                  stroke="#c97a1f"
-                  strokeWidth={1.5}
-                  strokeLinejoin="round"
-                  strokeLinecap="round"
-                  strokeDasharray="1 4"
-                  vectorEffect="non-scaling-stroke"
-                />
-              </svg>
-              <div className="absolute inset-0">
-                {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
-                  const corner = HANDLE_TO_CORNER[key];
-                  const point = draft[corner];
-                  const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
-                  const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      data-crop-handle={key}
-                      role="slider"
-                      aria-label={CORNER_LABEL[corner]}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={pctX}
-                      aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                      style={handlePosStyle(point.x, point.y)}
-                      className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        dragKeyRef.current = key;
-                        setGrabbed({ kind: 'corner', key });
-                        try {
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                        } catch {
-                          // jsdom / browsers without pointer capture: move
-                          // events still fire on the element while pressed.
-                        }
-                      }}
-                      onPointerMove={(e) => {
-                        if (dragKeyRef.current !== key) return;
-                        if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
-                        const p = clientToImage(e.clientX, e.clientY);
-                        moveCorner(key, p.x, p.y);
-                      }}
-                      onPointerUp={() => {
-                        dragKeyRef.current = null;
-                        setGrabbed((prev) =>
-                          prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                        );
-                      }}
-                      onPointerCancel={() => {
-                        dragKeyRef.current = null;
-                        setGrabbed((prev) =>
-                          prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                        );
-                      }}
-                      onFocus={() => setFocusedHandle({ kind: 'corner', key })}
-                      onBlur={() =>
-                        setFocusedHandle((prev) =>
-                          prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                        )
-                      }
-                      onKeyDown={(e) => {
-                        const delta = e.shiftKey ? 10 : 1;
-                        if (e.key === 'ArrowLeft') {
-                          e.preventDefault();
-                          stepCorner(key, -delta, 0);
-                        } else if (e.key === 'ArrowRight') {
-                          e.preventDefault();
-                          stepCorner(key, delta, 0);
-                        } else if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          stepCorner(key, 0, -delta);
-                        } else if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          stepCorner(key, 0, delta);
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          cancelAdjust();
-                        }
-                      }}
-                    >
-                      <span
-                        aria-hidden
-                        className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
-                        style={{ width: handleVisual, height: handleVisual }}
-                      >
-                        <span
-                          aria-hidden
-                          className="rounded-full bg-brass-400"
-                          style={{ width: handleDot, height: handleDot }}
-                        />
-                      </span>
-                    </button>
-                  );
-                })}
-                {MID_EDGES.map((edge) => {
-                  const mid = midPoint(edge);
-                  if (mid === null) return null;
-                  const pctX = safeW > 0 ? Math.round((mid.x / safeW) * 100) : 0;
-                  const pctY = safeH > 0 ? Math.round((mid.y / safeH) * 100) : 0;
-                  return (
-                    <button
-                      key={`mid-${edge}`}
-                      type="button"
-                      data-crop-handle-mid={edge}
-                      role="slider"
-                      aria-label={MID_LABEL[edge]}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={pctX}
-                      aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                      style={handlePosStyle(mid.x, mid.y)}
-                      className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        if (draft === null) return;
-                        const p = clientToImage(e.clientX, e.clientY);
-                        midDragRef.current = {
-                          edge,
-                          startX: p.x,
-                          startY: p.y,
-                          snapshot: cloneCorners(draft),
-                        };
-                        setGrabbed({ kind: 'mid', key: edge });
-                        try {
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                        } catch {
-                          // jsdom / browsers without pointer capture.
-                        }
-                      }}
-                      onPointerMove={(e) => {
-                        if (midDragRef.current?.edge !== edge) return;
-                        if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
-                        const p = clientToImage(e.clientX, e.clientY);
-                        moveMid(edge, p.x, p.y);
-                      }}
-                      onPointerUp={() => {
-                        if (midDragRef.current?.edge === edge) midDragRef.current = null;
-                        setGrabbed((prev) =>
-                          prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                        );
-                      }}
-                      onPointerCancel={() => {
-                        if (midDragRef.current?.edge === edge) midDragRef.current = null;
-                        setGrabbed((prev) =>
-                          prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                        );
-                      }}
-                      onFocus={() => setFocusedHandle({ kind: 'mid', key: edge })}
-                      onBlur={() =>
-                        setFocusedHandle((prev) =>
-                          prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                        )
-                      }
-                      onKeyDown={(e) => {
-                        const delta = e.shiftKey ? 10 : 1;
-                        if (e.key === 'ArrowLeft') {
-                          e.preventDefault();
-                          stepMid(edge, -delta, 0);
-                        } else if (e.key === 'ArrowRight') {
-                          e.preventDefault();
-                          stepMid(edge, delta, 0);
-                        } else if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          stepMid(edge, 0, -delta);
-                        } else if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          stepMid(edge, 0, delta);
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          cancelAdjust();
-                        }
-                      }}
-                    >
-                      <span
-                        aria-hidden
-                        className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
-                        style={{ width: handleVisual, height: handleVisual }}
-                      >
-                        <span
-                          aria-hidden
-                          className="rounded-full bg-brass-400"
-                          style={{ width: handleDot, height: handleDot }}
-                        />
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          )}
+                  onKeyDown={(e) => {
+                    const delta = e.shiftKey ? 10 : 1;
+                    if (e.key === 'ArrowLeft') {
+                      e.preventDefault();
+                      stepCorner(key, -delta, 0);
+                    } else if (e.key === 'ArrowRight') {
+                      e.preventDefault();
+                      stepCorner(key, delta, 0);
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      stepCorner(key, 0, -delta);
+                    } else if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      stepCorner(key, 0, delta);
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      cancelAdjust();
+                    }
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
+                    style={{ width: handleVisual, height: handleVisual }}
+                  >
+                    <span
+                      aria-hidden
+                      className="rounded-full bg-brass-400"
+                      style={{ width: handleDot, height: handleDot }}
+                    />
+                  </span>
+                </button>
+              );
+            })}
+            {MID_EDGES.map((edge) => {
+              const mid = midPoint(edge);
+              if (mid === null) return null;
+              const pctX = safeW > 0 ? Math.round((mid.x / safeW) * 100) : 0;
+              const pctY = safeH > 0 ? Math.round((mid.y / safeH) * 100) : 0;
+              return (
+                <button
+                  key={`mid-${edge}`}
+                  type="button"
+                  data-crop-handle-mid={edge}
+                  role="slider"
+                  aria-label={MID_LABEL[edge]}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={pctX}
+                  aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
+                  style={handlePosStyle(mid.x, mid.y)}
+                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    if (draft === null) return;
+                    const p = clientToImage(e.clientX, e.clientY);
+                    midDragRef.current = {
+                      edge,
+                      startX: p.x,
+                      startY: p.y,
+                      snapshot: cloneCorners(draft),
+                    };
+                    setGrabbed({ kind: 'mid', key: edge });
+                    try {
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    } catch {
+                      // jsdom / browsers without pointer capture.
+                    }
+                  }}
+                  onPointerMove={(e) => {
+                    if (midDragRef.current?.edge !== edge) return;
+                    if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
+                    const p = clientToImage(e.clientX, e.clientY);
+                    moveMid(edge, p.x, p.y);
+                  }}
+                  onPointerUp={() => {
+                    if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    );
+                  }}
+                  onPointerCancel={() => {
+                    if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                    setGrabbed((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    );
+                  }}
+                  onFocus={() => setFocusedHandle({ kind: 'mid', key: edge })}
+                  onBlur={() =>
+                    setFocusedHandle((prev) =>
+                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                    )
+                  }
+                  onKeyDown={(e) => {
+                    const delta = e.shiftKey ? 10 : 1;
+                    if (e.key === 'ArrowLeft') {
+                      e.preventDefault();
+                      stepMid(edge, -delta, 0);
+                    } else if (e.key === 'ArrowRight') {
+                      e.preventDefault();
+                      stepMid(edge, delta, 0);
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      stepMid(edge, 0, -delta);
+                    } else if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      stepMid(edge, 0, delta);
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      cancelAdjust();
+                    }
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
+                    style={{ width: handleVisual, height: handleVisual }}
+                  >
+                    <span
+                      aria-hidden
+                      className="rounded-full bg-brass-400"
+                      style={{ width: handleDot, height: handleDot }}
+                    />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
           {loupeBox !== null && loupeImagePoint !== null && (
             <div
               data-loupe

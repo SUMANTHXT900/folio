@@ -35,7 +35,11 @@ export function formatIso(iso: string): string {
   if (Number.isNaN(ms)) {
     return iso;
   }
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
 /** min / mean / median / max over engine durations. */

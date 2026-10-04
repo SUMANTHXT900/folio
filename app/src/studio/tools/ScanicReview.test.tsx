@@ -612,18 +612,21 @@ describe('ScanicReview handles + loupe', () => {
     expect(container.querySelector('[data-loupe]')).toBeNull();
   });
 
-  it('loupe uses the calm 1.3x zoom with a 96px lens', () => {
-    expect(LOUPE_ZOOM).toBe(1.3);
+  it('loupe uses the calm 1.1x zoom with a 96px lens', () => {
+    expect(LOUPE_ZOOM).toBe(1.1);
     expect(LOUPE_SIZE).toBe(96);
   });
 
-  it('loupe source rect centers exactly on the active corner (1.3x zoom)', () => {
-    // Interior corner: rect center == corner, size == lens/zoom.
-    const r = loupeSourceRect(50, 40, 100, 100);
+  it('loupe source rect centers exactly on the active corner (1.1x zoom)', () => {
+    // Interior corner of a large photo: rect center == corner, size == lens/zoom.
+    // (At 1.1x the window covers ~87% of a 100px image, so edge clamping
+    // would shift the center there — use a photo big enough that no clamp
+    // applies for the centering assertion; clamping is asserted separately.)
+    const r = loupeSourceRect(500, 400, 1000, 1000);
     expect(r.sw).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
     expect(r.sh).toBeCloseTo(LOUPE_SIZE / LOUPE_ZOOM, 10);
-    expect(r.sx + r.sw / 2).toBeCloseTo(50, 10);
-    expect(r.sy + r.sh / 2).toBeCloseTo(40, 10);
+    expect(r.sx + r.sw / 2).toBeCloseTo(500, 10);
+    expect(r.sy + r.sh / 2).toBeCloseTo(400, 10);
     // Edge corner: clamped into the photo, still covering the corner pixel.
     const edge = loupeSourceRect(0, 0, 100, 100);
     expect(edge.sx).toBe(0);

@@ -17,6 +17,16 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D44 best-camera + flash honesty',
+    date: '2026-10-04',
+    notes: [
+      'Best-camera suggestion + persisted pick.',
+      'Flash stays visible with honest note.',
+      'Calmer 1.1x loupe.',
+      '12-hour clock everywhere.',
+    ],
+  },
+  {
     build: 'D35/D36 scanner UX',
     date: '2026-10-04',
     notes: [

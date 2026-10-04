@@ -16,6 +16,7 @@ import ScanicCapture, {
   AUTO_CAPTURE_MEAN_THRESHOLD,
   AUTO_CAPTURE_STABLE_TICKS_REQUIRED,
   AUTO_CAPTURE_TICK_MS,
+  CAMERA_STORAGE_KEY,
   SCANIC_ML_ASSET_BASE_URL,
   __resetCameraChoiceForTests,
   buildVideoConstraints,
@@ -193,6 +194,11 @@ let urlCounter = 0;
 beforeEach(() => {
   urlCounter = 0;
   __resetCameraChoiceForTests();
+  try {
+    window.localStorage.clear();
+  } catch {
+    // jsdom without storage — isolation is best-effort.
+  }
   URL.createObjectURL = vi.fn(() => {
     urlCounter += 1;
     return `blob:mock-${urlCounter}`;
@@ -1446,5 +1452,214 @@ describe('camera-phase chrome (slim top bar)', () => {
       strip.compareDocumentPosition(q('[data-scan-capture]') as Node) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+});
+
+describe('best-camera probe + persisted pick + flash honesty', () => {
+  function mockProbeCameras() {
+    const makeTrack = (caps: unknown) => ({
+      stop: vi.fn(),
+      readyState: 'live',
+      getCapabilities: () => caps,
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    });
+    const lowCaps = { width: { max: 1920 }, height: { max: 1080 } };
+    const highCaps = { width: { max: 4000 }, height: { max: 3000 } };
+    const lowTrack = makeTrack(lowCaps);
+    const lowStream = {
+      getTracks: () => [lowTrack],
+      getVideoTracks: () => [lowTrack],
+    } as unknown as MediaStream;
+    const highTrack = makeTrack(highCaps);
+    const highStream = {
+      getTracks: () => [highTrack],
+      getVideoTracks: () => [highTrack],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async (constraints: unknown) => {
+      const video = (constraints as { video?: { deviceId?: { exact?: string } } }).video;
+      if (video?.deviceId?.exact === 'cam-2') return highStream;
+      return lowStream;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia,
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Back Cam 1', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam 2', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    return { getUserMedia };
+  }
+
+  it('probes a sharper back camera and offers a one-tap switch (never auto-switches)', async () => {
+    // No ImageCapture in jsdom here — the probe falls back to track
+    // capabilities (low 1920x1080 vs high 4000x3000, ~5.7x = clearly beats).
+    const { getUserMedia } = mockProbeCameras();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const suggest = await findQ('[data-camera-suggest]');
+    expect(suggest.textContent).toMatch(/Sharper camera found/);
+    // Default stream stays live — the probe never auto-switches.
+    expect(q('[data-scan-capture]')).toBeTruthy();
+    const callsBefore = getUserMedia.mock.calls.length;
+    fireEvent.click(suggest.querySelector('button') as HTMLElement);
+    await waitFor(() => {
+      expect(getUserMedia.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    const last = getUserMedia.mock.calls[getUserMedia.mock.calls.length - 1][0] as {
+      video: { deviceId?: { exact?: string } };
+    };
+    expect(last.video.deviceId).toEqual({ exact: 'cam-2' });
+    // Suggestion clears once the switch starts.
+    await waitFor(() => {
+      expect(document.querySelector('[data-camera-suggest]')).toBeNull();
+    });
+  });
+
+  it('persists the user pick to localStorage and restores it on the next mount', async () => {
+    const { getUserMedia } = mockProbeCameras();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'cam-2' } });
+    await waitFor(() => {
+      const last = getUserMedia.mock.calls[getUserMedia.mock.calls.length - 1][0] as {
+        video: { deviceId?: { exact?: string } };
+      };
+      expect(last.video.deviceId).toEqual({ exact: 'cam-2' });
+    });
+    expect(window.localStorage.getItem(CAMERA_STORAGE_KEY)).toBe('cam-2');
+    cleanup();
+    // New session (module ref cleared, storage kept) — the stored pick wins.
+    __resetCameraChoiceForTests();
+    window.localStorage.setItem(CAMERA_STORAGE_KEY, 'cam-2');
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    const secondGUM = vi.fn(async (_constraints?: unknown) => stream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: secondGUM,
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Back Cam 1', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam 2', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    await waitFor(() => {
+      expect(secondGUM).toHaveBeenCalled();
+    });
+    const first = secondGUM.mock.calls[0]?.[0] as unknown as {
+      video: { deviceId?: { exact?: string } };
+    };
+    expect(first.video.deviceId).toEqual({ exact: 'cam-2' });
+  });
+
+  it('keeps the flash toggle mounted on a transient torch failure with an honest note', async () => {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => {
+        throw new DOMException('torch failed', 'NotSupportedError');
+      }),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => stream),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    fireEvent.click(screen.getByLabelText('Toggle torch'));
+    await waitFor(() => {
+      expect(screen.queryByLabelText('Toggle torch')).not.toBeNull();
+    });
+    // Toggle never unmounts on the transient failure — the honest note shows.
+    expect(screen.getByLabelText('Toggle torch')).toBeTruthy();
+    expect(document.querySelector('[data-torch-note]')?.textContent).toMatch(
+      /Flash isn't available on this camera/,
+    );
+  });
+
+  it('resets the torch to off on every camera change', async () => {
+    const makeTrack = () => ({
+      stop: vi.fn(),
+      readyState: 'live',
+      getCapabilities: () => ({ torch: true }),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    });
+    const track1 = makeTrack();
+    const stream1 = {
+      getTracks: () => [track1],
+      getVideoTracks: () => [track1],
+    } as unknown as MediaStream;
+    const track2 = makeTrack();
+    const stream2 = {
+      getTracks: () => [track2],
+      getVideoTracks: () => [track2],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async (constraints: unknown) => {
+      const video = (constraints as { video?: { deviceId?: { exact?: string } } }).video;
+      if (video?.deviceId?.exact === 'cam-2') return stream2;
+      return stream1;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia,
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Back Cam 1', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam 2', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    fireEvent.click(screen.getByLabelText('Toggle torch'));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Toggle torch').getAttribute('aria-pressed')).toBe('true');
+    });
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'cam-2' } });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Toggle torch').getAttribute('aria-pressed')).toBe('false');
+    });
+  });
+
+  it('lists exactly the enumerated logical cameras — never a fabricated third lens', async () => {
+    mockProbeCameras();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    const options = Array.from(select.querySelectorAll('option'));
+    // Default + the 2 enumerated logical lenses (hidden physical lenses are
+    // platform-invisible and must never be faked into the list).
+    expect(options.map((o) => o.value)).toEqual(['', 'cam-1', 'cam-2']);
+    expect(options).toHaveLength(3);
   });
 });

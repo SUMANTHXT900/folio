@@ -38,7 +38,9 @@
  * Camera choice: after permission, `enumerateDevices()` lists video inputs;
  * the `[data-camera-select]` native select (alongside the facing quick-flip)
  * restarts the session with `deviceId: { exact }`, falling back to
- * facingMode ideals on failure. The choice persists in a session ref.
+ * facingMode ideals on failure. The choice persists in a session ref and in
+ * `localStorage` (`folio.scan.cameraId`) so the eventual pick wins on the
+ * next open (validated against the fresh enumeration, else the default flow).
  *
  * Orientation-honest constraints: ideals come from screen orientation at
  * session start — portrait screens keep portrait ideals (1080x1920 back /
@@ -119,6 +121,41 @@ export function formatScanName(index: number): string {
  */
 let persistedCameraDeviceId: string | null = null;
 
+/** Cross-session camera pick (the user's eventual explicit choice). */
+export const CAMERA_STORAGE_KEY = 'folio.scan.cameraId';
+
+function readStoredCameraId(): string | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(CAMERA_STORAGE_KEY);
+    if (typeof raw === 'string' && raw !== '') return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredCameraId(id: string): void {
+  try {
+    globalThis.localStorage?.setItem(CAMERA_STORAGE_KEY, id);
+  } catch {
+    // Private mode / blocked storage — session ref still wins within a session.
+  }
+}
+
+function clearStoredCameraId(): void {
+  try {
+    globalThis.localStorage?.removeItem(CAMERA_STORAGE_KEY);
+  } catch {
+    // Private mode — nothing to clear.
+  }
+}
+
+/** First-open choice: session ref wins, else the stored pick, else default. */
+function initialCameraChoice(): string | null {
+  if (persistedCameraDeviceId !== null) return persistedCameraDeviceId;
+  return readStoredCameraId();
+}
+
 /** Minimal ImageCapture surface used here (avoids lib.dom version skew). */
 interface TakePhotoCapabilities {
   imageWidth?: { max?: number };
@@ -136,6 +173,65 @@ function getImageCaptureCtor(): ImageCaptureCtor | undefined {
     return typeof ctor === 'function' ? ctor : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Platform limit (documented, never worked around by fabrication): browsers
+ * expose LOGICAL cameras only — hidden physical lenses (wide / ultra-wide /
+ * tele behind one logical device) can never be enumerated. `enumerateDevices`
+ * returns exactly what the platform exposes; this file never fabricates a
+ * third entry when two are listed.
+ *
+ * Likewise no getUserMedia constraint distinguishes wide vs ultra-wide: the
+ * W3C `focalLength` / lens-selection extension (mediacapture-extensions#20,
+ * open since 2020) never shipped, so "best camera" must be PROBED (per-device
+ * max photo resolution) never constrained.
+ */
+function capabilitiesMaxPixels(caps: unknown): number | null {
+  try {
+    const c = caps as { width?: unknown; height?: unknown } | null | undefined;
+    if (!c || typeof c !== 'object') return null;
+    const maxOf = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+      if (v !== null && typeof v === 'object') {
+        const m = (v as { max?: unknown }).max;
+        if (typeof m === 'number' && Number.isFinite(m) && m > 0) return m;
+      }
+      return null;
+    };
+    const w = maxOf(c.width);
+    const h = maxOf(c.height);
+    if (w !== null && h !== null) return w * h;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Max photo pixels for a live track: ImageCapture photo caps, else track caps. */
+async function maxPixelsForTrack(track: MediaStreamTrack): Promise<number | null> {
+  const Ctor = getImageCaptureCtor();
+  if (Ctor) {
+    try {
+      const capture = new Ctor(track);
+      if (typeof capture.getPhotoCapabilities === 'function') {
+        const caps = await capture.getPhotoCapabilities();
+        const w = caps.imageWidth?.max;
+        const h = caps.imageHeight?.max;
+        if (typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0) {
+          return w * h;
+        }
+      }
+    } catch {
+      // Fall through to the track-capabilities fallback below.
+    }
+  }
+  try {
+    const caps = (track as { getCapabilities?: () => unknown }).getCapabilities?.();
+    return capabilitiesMaxPixels(caps);
+  } catch {
+    return null;
   }
 }
 
@@ -425,11 +521,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /** All video inputs enumerated after permission (labels need permission). */
   const [cameras, setCameras] = useState<Array<{ deviceId: string; label: string }>>([]);
   /** Explicit device choice; ''/null = default (facingMode ideals). */
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(persistedCameraDeviceId);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(() =>
+    initialCameraChoice(),
+  );
+  /** One-tap upgrade when a probed back camera is clearly sharper (>25%). Never auto-switches. */
+  const [suggestedDeviceId, setSuggestedDeviceId] = useState<string | null>(null);
   /** Live stream aspect (`W / H`) read from `track.getSettings()` — honest preview, never forced. */
   const [liveAspect, setLiveAspect] = useState<string | null>(null);
   const [mirrored, setMirrored] = useState(true);
   const [torchOn, setTorchOn] = useState(false);
+  /** Honest flash note for transient torch failures (toggle stays mounted). */
+  const [torchNote, setTorchNote] = useState<string | null>(null);
   // Visible unless hard-unsupported: inconclusive capabilities (no
   // getCapabilities, throws, or no `torch` field) default to SHOWING the
   // flash toggle — only an explicit `torch: false` (or a failed
@@ -466,7 +568,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   /** Session ref mirror of the camera choice (survives effect remounts within the session). */
-  const chosenDeviceIdRef = useRef<string | null>(persistedCameraDeviceId);
+  const chosenDeviceIdRef = useRef<string | null>(initialCameraChoice());
+  /** Best-camera probe guards: fire once per mount, generation-checked (StrictMode-safe). */
+  const probeFiredRef = useRef(false);
+  const probeGenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   const imageElsRef = useRef(new Map<number, HTMLImageElement>());
@@ -717,6 +822,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       setSelectedDeviceId(next);
       setCaptureError(null);
       setDeviceFallbackNote(null);
+      // A stale ON across switches explains phantom flash behavior — every
+      // camera change starts with the torch off and no stale note/suggestion.
+      setTorchOn(false);
+      setTorchNote(null);
+      setSuggestedDeviceId(null);
+      if (next === null) clearStoredCameraId();
       stopTracks();
     },
     [stopTracks],
@@ -856,7 +967,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         }
         // Camera choice: enumerate AFTER permission so labels are real
         // (before permission they are blank). Fallback names keep blank
-        // labels usable; the ordered index disambiguates duplicates.
+        // labels usable; the ordered index disambiguates duplicates. The list
+        // is exactly what the platform exposes (logical cameras only — never
+        // a fabricated physical-lens entry).
         try {
           const enumerate = navigator.mediaDevices.enumerateDevices?.bind(navigator.mediaDevices);
           if (typeof enumerate === 'function' && !cancelled) {
@@ -870,6 +983,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 }))
                 .filter((d) => d.deviceId !== '');
               setCameras(videos);
+              // Validate a stored pick against the current enumeration: a
+              // stale id (not listed) falls back to the default flow instead
+              // of sticking on a missing device.
+              const hasExactPick =
+                activeDeviceId !== null && activeDeviceId !== undefined && activeDeviceId !== '';
+              if (hasExactPick && videos.length > 0) {
+                const stillListed = videos.some((v) => v.deviceId === activeDeviceId);
+                if (!stillListed) {
+                  persistedCameraDeviceId = null;
+                  chosenDeviceIdRef.current = null;
+                  clearStoredCameraId();
+                  setSelectedDeviceId(null);
+                }
+              }
             }
           }
         } catch {
@@ -882,6 +1009,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           // Hard-unsupported ONLY when the track explicitly reports
           // `torch: false`. Missing API, throws, or a caps object without
           // the torch field is inconclusive — keep the toggle visible.
+          // A transient applyConstraints({torch}) failure later must NEVER
+          // hide the toggle either (honest note instead) — see toggleTorch.
           if (caps && 'torch' in caps) {
             supportsTorch = caps?.torch === true;
           } else {
@@ -892,7 +1021,22 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         }
         if (!cancelled) {
           setTorchSupported(supportsTorch);
+          // Every camera change starts torch-off (stale ON explains phantom
+          // behavior) with no stale flash note.
           setTorchOn(false);
+          setTorchNote(null);
+          // Persist the eventual pick on every successful exact-device start;
+          // the session ref already wins within the session.
+          if (
+            !usedExactFallback &&
+            activeDeviceId !== null &&
+            activeDeviceId !== undefined &&
+            activeDeviceId !== ''
+          ) {
+            persistedCameraDeviceId = activeDeviceId;
+            chosenDeviceIdRef.current = activeDeviceId;
+            writeStoredCameraId(activeDeviceId);
+          }
           setCamState('live');
         }
       } catch (e) {
@@ -911,6 +1055,87 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       }
     };
   }, [phase, facing, selectedDeviceId, paused, retryNonce]);
+
+  /**
+   * Best-camera background probe: after the DEFAULT stream is live,
+   * fire-and-forget probe every other enumerated device for max photo
+   * resolution (never a constraint — focalLength never shipped). Each
+   * candidate opens video-only (`deviceId: { exact }`, muted, never attached
+   * to any element), resolves `ImageCapture.getPhotoCapabilities()` max
+   * pixels (fallback: track `getCapabilities()` width×height max), then stops
+   * its tracks immediately. A clearly sharper candidate (>25% more pixels)
+   * surfaces a one-tap `[data-camera-suggest]` note — never an auto-switch.
+   * Skipped when <2 cameras are listed, on any error, or once the user has
+   * picked. StrictMode-safe: `probeFiredRef` fires once per mount and the
+   * generation guard drops the late double-mount result.
+   */
+  useEffect(() => {
+    if (phase !== 'camera' || paused) return;
+    if (camState !== 'live') return;
+    if (cameras.length < 2) return;
+    const activePick = chosenDeviceIdRef.current ?? selectedDeviceId;
+    if (activePick !== null && activePick !== '') return;
+    if (probeFiredRef.current) return;
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices) return;
+    probeFiredRef.current = true;
+    const gen = (probeGenRef.current += 1);
+    let alive = true;
+    (async () => {
+      try {
+        const liveTrack = streamRef.current?.getVideoTracks()[0] ?? null;
+        if (!liveTrack) return;
+        const currentPixels = await maxPixelsForTrack(liveTrack);
+        if (currentPixels === null) return;
+        // Default stream's device is unknown, so every listed input is a
+        // candidate; with an explicit pick this effect never runs (guarded).
+        const candidates = cameras.filter((c) => c.deviceId !== '' && c.deviceId !== activePick);
+        if (candidates.length === 0) return;
+        let bestId: string | null = null;
+        let bestPixels = 0;
+        for (const candidate of candidates) {
+          if (!alive || probeGenRef.current !== gen) return;
+          let probeStream: MediaStream | null = null;
+          try {
+            probeStream = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { exact: candidate.deviceId } },
+              audio: false,
+            });
+            const probeTrack = probeStream.getVideoTracks()[0];
+            if (!probeTrack) continue;
+            const pixels = await maxPixelsForTrack(probeTrack);
+            if (pixels !== null && pixels > bestPixels) {
+              bestPixels = pixels;
+              bestId = candidate.deviceId;
+            }
+          } catch {
+            // Unopenable candidate — try the next one.
+            continue;
+          } finally {
+            try {
+              if (probeStream) for (const t of probeStream.getTracks()) t.stop();
+            } catch {
+              // Stop is best-effort.
+            }
+          }
+        }
+        if (!alive || probeGenRef.current !== gen) return;
+        if (!mountedRef.current) return;
+        // Still on the default pick? Never auto-switch — suggest only.
+        const stillDefault =
+          (chosenDeviceIdRef.current ?? selectedDeviceId) === null ||
+          (chosenDeviceIdRef.current ?? selectedDeviceId) === '';
+        if (!stillDefault) return;
+        if (bestId !== null && bestPixels > currentPixels * 1.25) {
+          setSuggestedDeviceId(bestId);
+        }
+      } catch {
+        // Probe is advisory — any failure stays silent.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [phase, paused, camState, cameras, selectedDeviceId]);
 
   // Leaving the camera view (review/done) releases the camera; returning resumes.
   useEffect(() => {
@@ -942,8 +1167,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     try {
       await track.applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] });
       setTorchOn(next);
+      setTorchNote(null);
     } catch {
-      setTorchSupported(false);
+      // Transient failure: NEVER unmount the toggle — keep it visible with an
+      // honest note. Only `torch: false` capabilities (above) may hide it.
+      setTorchNote("Flash isn't available on this camera");
     }
   }, [torchOn]);
 
@@ -1480,7 +1708,42 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     {deviceFallbackNote}
                   </p>
                 )}
+                {suggestedDeviceId !== null && (
+                  <div
+                    data-camera-suggest
+                    role="status"
+                    className="pointer-events-auto flex max-w-full items-center gap-2 rounded-full bg-ink-950/60 px-3 py-1 text-[11px] text-paper-100 backdrop-blur"
+                  >
+                    <span>Sharper camera found — switch</span>
+                    <button
+                      type="button"
+                      aria-label="Switch to sharper camera"
+                      onClick={() => chooseCamera(suggestedDeviceId)}
+                      className="inline-flex min-h-[44px] items-center justify-center rounded-full bg-paper-50 px-3 text-[11px] font-semibold text-ink-900"
+                    >
+                      Switch
+                    </button>
+                  </div>
+                )}
+                {torchNote !== null && torchSupported && (
+                  <p
+                    data-torch-note
+                    role="status"
+                    className="max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur"
+                  >
+                    {torchNote}
+                  </p>
+                )}
               </div>
+            )}
+            {cameras.length === 0 && torchNote !== null && torchSupported && (
+              <p
+                data-torch-note
+                role="status"
+                className="pointer-events-auto relative max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur"
+              >
+                {torchNote}
+              </p>
             )}
           </>
         ) : (
@@ -1508,6 +1771,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               </button>
             ) : (
               <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+            )}
+            {torchNote !== null && torchSupported && (
+              <p data-torch-note role="status" className="text-xs text-ink-500 dark:text-ink-300">
+                {torchNote}
+              </p>
             )}
           </>
         )}
