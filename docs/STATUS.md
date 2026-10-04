@@ -5,7 +5,7 @@
 
 ## Current phase
 
-**Pre-v2.0 (`dev`).** Scanner v2.0 M1–M3 plus M3.x mobile hardening, performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix) are implemented on `dev`. Wave-A app finish (`e74e71b`: studioThumb removal, merge-readiness honesty, local-phase copy, About 44px targets, disabled-card focus, nav affordance, K4 from_bytes alignment) and the portal-AnimatePresence regression fix (`3ccabeb`, E2E-caught pre-ship) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.0 (waves 1–7 metadata marker per `docs/CHANGELOG.md`) and the v2.0.0 release is HELD pending real-device Android validation (see the release checklist below). Cloudflare `dev` deploys for the D29–D31 scanner builds are recorded in `docs/WORKLOG.md` (bundle-hash verified each time); the D32 build deploys next.
+**Pre-v2.0 (`dev`).** Scanner v2.0 M1–M3 plus M3.x mobile hardening, performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix) are implemented on `dev`. Wave-A app finish (`e74e71b`: studioThumb removal, merge-readiness honesty, local-phase copy, About 44px targets, disabled-card focus, nav affordance, K4 from_bytes alignment) and the portal-AnimatePresence regression fix (`3ccabeb`, E2E-caught pre-ship) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.0 (waves 1–7 metadata marker per `docs/CHANGELOG.md`) and the v2.0.0 release is HELD pending real-device Android validation (see the release checklist below). Cloudflare `dev` deploys for the D29–D32 scanner builds are recorded in `docs/WORKLOG.md` (bundle-hash verified each time).
 
 ## Completed work
 
@@ -95,7 +95,7 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `52b8fa2` (D32 miss-proof wave, 2026-10-04). `package.json` 1.9.0 — v2.0.0 bump HELD (see release checklist above).
+- Branch: `dev`. HEAD: D32 wave (`52b8fa2` code + docs, deployed `7881c4ec` 2026-10-04). `package.json` 1.9.0 — v2.0.0 bump HELD (see release checklist above).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace.
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
 - `main` at v1.9.0 (promoted 2026-09-27, fast-forward from `dev`).
