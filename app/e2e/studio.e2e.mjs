@@ -1405,6 +1405,34 @@ async function main() {
         JSON.stringify(pillLive),
       );
       await scanCaptureOnce(page);
+      // Status pill while detecting/processing: wait for the transient pill
+      // FIRST, immediately after the click — any strip/progress wait in
+      // between burns the visible window (detection + 800ms dwell), and the
+      // wait then starts post-expiry and reads idle (L-16 family).
+      // NOTE: polls the pill's textContent directly, not body.innerText —
+      // innerText forces layout on every poll and starves under the ORT
+      // cold-load main-thread block, while the cheap query keeps polling.
+      // Polling is an explicit 250ms timer, not rAF: under ORT/WASM load the
+      // headless renderer produces frames too slowly for rAF-driven polling
+      // to land inside the ~1s visible window (two green probes vs two suite
+      // misses proved exactly that split).
+      let holdSteadyWaited = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const pill = document.querySelector('[data-finder-status]');
+              return pill !== null && /hold steady/i.test(pill.textContent ?? '');
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 15000, polling: 250 },
+        );
+        holdSteadyWaited = true;
+      } catch {
+        holdSteadyWaited = false;
+      }
       // The camera-phase strip is `[data-scan-strip]` (thumbs); the
       // `[data-scan-queue]` review surface renders only after the Review CTA
       // (phase change), so per-capture waits assert strip thumbs here and the
@@ -1422,22 +1450,6 @@ async function main() {
       );
       // Status pill while detecting/processing: the capture above dispatched,
       // now wait for the transient pill, then measure in a later evaluate.
-      let holdSteadyWaited = false;
-      try {
-        await page.waitForFunction(
-          () => {
-            try {
-              return /hold steady/i.test(document.body.innerText ?? '');
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 15000 },
-        );
-        holdSteadyWaited = true;
-      } catch {
-        holdSteadyWaited = false;
-      }
       const pillDetecting = await page.evaluate(() => {
         try {
           const els = [...document.querySelectorAll('[data-finder-status], [role="status"]')];
@@ -1702,48 +1714,44 @@ async function main() {
           addRoundTrip.backInReview,
         JSON.stringify(addRoundTrip),
       );
-      const overlayState = await page.evaluate(() => {
+      const singleCanvas = await page.evaluate(() => {
         try {
-          const overlay = document.querySelector('[data-detect-overlay]');
-          const img = document.querySelector('[data-crop-result-img]');
-          const poly = overlay?.querySelector('polygon') ?? null;
-          const pointsAttr = poly?.getAttribute('points') ?? '';
-          const pts = pointsAttr
-            .trim()
-            .split(/[\s,]+/)
-            .filter((t) => t.length > 0);
+          const res = document.querySelector('[data-crop-result]');
+          const imgs = res !== null ? [...res.querySelectorAll('img')] : null;
+          const resultImg = document.querySelector('[data-crop-result-img]');
+          const src = resultImg?.getAttribute('src') ?? '';
           return {
-            overlayPresent: overlay !== null,
-            imgPresent: img !== null,
-            imgDecoded: img !== null && img.naturalWidth > 0,
-            imgSrcLen: img?.getAttribute('src')?.length ?? 0,
-            imgSrcPrefix: img?.getAttribute('src')?.slice(0, 5) ?? null,
-            polygonPresent: poly !== null,
-            pointsAttr: pointsAttr.slice(0, 120),
-            coordCount: pts.length,
-            pointPairs: pts.length / 2,
+            resultPresent: res !== null,
+            imgCountInResult: imgs === null ? -1 : imgs.length,
+            resultImgPresent: resultImg !== null,
+            imgDecoded: resultImg !== null && resultImg.naturalWidth > 0,
+            imgSrcLen: src.length,
+            imgSrcPrefix: src.slice(0, 5),
+            overlayPresent: document.querySelector('[data-detect-overlay]') !== null,
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner review hero shows PROCESSED result (decodes, blob src, no overlay pre-adjust)',
-        overlayState !== null &&
-          overlayState.imgDecoded &&
-          overlayState.imgSrcPrefix === 'blob:' &&
-          overlayState.polygonPresent === false,
-        JSON.stringify(overlayState),
+        'scanner review hero shows single warped canvas (exactly one img, decodes, no overlay)',
+        singleCanvas !== null &&
+          singleCanvas.resultPresent === true &&
+          singleCanvas.imgCountInResult === 1 &&
+          singleCanvas.resultImgPresent === true &&
+          singleCanvas.imgDecoded === true &&
+          singleCanvas.imgSrcLen > 0 &&
+          singleCanvas.overlayPresent === false,
+        JSON.stringify(singleCanvas),
       );
+      // Single-canvas contract: the result view carries no overlay, so
+      // Re-detect is a no-hang round-trip on the hero (dispatch → wait →
+      // measure): click, then the single decoded img must settle again.
       const redetectBefore = await page.evaluate(() => {
         try {
-          const overlay = document.querySelector('[data-detect-overlay]');
-          const poly = overlay?.querySelector('polygon') ?? null;
-          const status = document.querySelector('[data-finder-status]')?.textContent ?? '';
           return {
-            points: poly?.getAttribute('points') ?? null,
+            src: document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null,
             hasButton: document.querySelector('[data-redetect]') !== null,
-            status: status.slice(0, 80),
           };
         } catch {
           return null;
@@ -1761,21 +1769,31 @@ async function main() {
         });
         try {
           await page.waitForFunction(
-            (prevPoints) => {
+            (prevSrc) => {
               try {
-                const overlay = document.querySelector('[data-detect-overlay]');
-                const poly = overlay?.querySelector('polygon') ?? null;
                 const body = document.body.innerText ?? '';
-                const detecting = /detecting|re-?detect/i.test(body);
-                if (detecting) return true;
-                if (!poly) return false;
-                return poly.getAttribute('points') !== prevPoints;
+                // Transient detecting status counts as the refresh running.
+                if (/detecting|re-?detect/i.test(body)) {
+                  const img = document.querySelector('[data-crop-result-img]');
+                  return img !== null && img.naturalWidth > 0;
+                }
+                const res = document.querySelector('[data-crop-result]');
+                const img = document.querySelector('[data-crop-result-img]');
+                if (!res || !img) return false;
+                if (res.querySelectorAll('img').length !== 1) return false;
+                if (img.naturalWidth <= 0) return false;
+                if (document.querySelector('[data-detect-overlay]') !== null) return false;
+                // Settled: single decoded hero back. A changed src proves a
+                // re-warp; an unchanged src still proves no-hang (idempotent
+                // re-detect on the same quad).
+                void prevSrc;
+                return true;
               } catch {
                 return false;
               }
             },
             { timeout: 30000 },
-            redetectBefore.points,
+            redetectBefore.src,
           );
           redetectSettled = true;
         } catch {
@@ -1783,11 +1801,12 @@ async function main() {
         }
         redetectDetail = await page.evaluate(() => {
           try {
-            const overlay = document.querySelector('[data-detect-overlay]');
-            const poly = overlay?.querySelector('polygon') ?? null;
+            const res = document.querySelector('[data-crop-result]');
+            const img = document.querySelector('[data-crop-result-img]');
             return {
-              points: poly?.getAttribute('points')?.slice(0, 120) ?? null,
-              overlayPresent: overlay !== null,
+              imgCount: res !== null ? res.querySelectorAll('img').length : -1,
+              decoded: img !== null && img.naturalWidth > 0,
+              overlayPresent: document.querySelector('[data-detect-overlay]') !== null,
             };
           } catch {
             return null;
@@ -1795,12 +1814,14 @@ async function main() {
         });
       }
       check(
-        'scanner Re-detect refreshes overlay without hanging (30s bound)',
+        'scanner Re-detect refreshes result without hanging (30s bound)',
         redetectBefore !== null &&
           redetectBefore.hasButton === true &&
           redetectSettled === true &&
           redetectDetail !== null &&
-          redetectDetail.overlayPresent === true,
+          redetectDetail.imgCount === 1 &&
+          redetectDetail.decoded === true &&
+          redetectDetail.overlayPresent === false,
         JSON.stringify({ before: redetectBefore, settled: redetectSettled, after: redetectDetail }),
       );
       await waitForResultImg(page);
@@ -1993,6 +2014,16 @@ async function main() {
         await waitForResultImg(page);
         await waitForQueue(page, 2, 30000);
       }
+      // Reactive baseline: read the result src WHILE the result view is
+      // mounted (pre-adjust). Inside adjust mode the result strip unmounts,
+      // so a later read would be null and prove nothing.
+      const reactiveSrcBefore = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
+        } catch {
+          return null;
+        }
+      });
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')]
@@ -2006,7 +2037,10 @@ async function main() {
         await page.waitForFunction(
           () => {
             try {
-              return document.querySelectorAll('[data-crop-handle]').length === 4;
+              return (
+                document.querySelectorAll('[data-crop-handle]').length === 4 &&
+                document.querySelectorAll('[data-crop-handle-mid]').length === 4
+              );
             } catch {
               return false;
             }
@@ -2018,45 +2052,72 @@ async function main() {
       }
       const adjustState = await page.evaluate(() => {
         try {
-          const handles = [...document.querySelectorAll('[data-crop-handle]')];
-          const keys = handles
+          const corners = [...document.querySelectorAll('[data-crop-handle]')];
+          const cornerKeys = corners
             .map((h) => h.getAttribute('data-crop-handle'))
             .sort()
             .join(',');
-          const sliders = handles.filter((h) => h.getAttribute('role') === 'slider').length;
+          const cornerSliders = corners.filter((h) => h.getAttribute('role') === 'slider').length;
+          const mids = [...document.querySelectorAll('[data-crop-handle-mid]')];
+          const midKeys = mids
+            .map((h) => h.getAttribute('data-crop-handle-mid'))
+            .sort()
+            .join(',');
+          const midSliders = mids.filter((h) => h.getAttribute('role') === 'slider').length;
+          const adjust = document.querySelector('[data-crop-adjust]');
+          const photo = adjust !== null ? adjust.querySelector('img') : null;
           const reset = [...document.querySelectorAll('button')].some(
             (b) => b.textContent === 'Reset to auto',
           );
           const instruction = /drag|corner/i.test(document.body.innerText);
-          return { count: handles.length, keys, sliders, reset, instruction };
+          return {
+            count: corners.length,
+            keys: cornerKeys,
+            sliders: cornerSliders,
+            midCount: mids.length,
+            midKeys,
+            midSliders,
+            adjustPresent: adjust !== null,
+            photoPresent: photo !== null,
+            photoDecoded: photo !== null && photo.naturalWidth > 0,
+            reset,
+            instruction,
+          };
         } catch {
           return null;
         }
       });
       check(
-        'scanner Adjust mode shows 4 handles + instruction + Reset to auto',
+        'scanner Adjust mode shows 8 handles (4 corners + 4 mids) + instruction + Reset to auto',
         adjustState !== null &&
+          adjustState.adjustPresent === true &&
+          adjustState.photoPresent === true &&
+          adjustState.photoDecoded === true &&
           adjustState.count === 4 &&
           adjustState.keys === 'bl,br,tl,tr' &&
           adjustState.sliders === 4 &&
+          adjustState.midCount === 4 &&
+          adjustState.midKeys === 'bottom,left,right,top' &&
+          adjustState.midSliders === 4 &&
           adjustState.reset &&
           adjustState.instruction,
         JSON.stringify(adjustState),
       );
       // Reworked hero contract: the quad polygon lives INSIDE adjust (it is
       // absent pre-adjust per the hero check above) — 4 points, measured after
-      // the handles above rendered.
+      // the handles above rendered. Scoped to `[data-crop-adjust]`: the old
+      // `[data-detect-overlay]` wrapper no longer exists anywhere.
       const adjustPoly = await page.evaluate(() => {
         try {
-          const overlay = document.querySelector('[data-detect-overlay]');
-          const poly = overlay?.querySelector('polygon') ?? null;
+          const adjust = document.querySelector('[data-crop-adjust]');
+          const poly = adjust?.querySelector('polygon') ?? null;
           const pointsAttr = poly?.getAttribute('points') ?? '';
           const pts = pointsAttr
             .trim()
             .split(/[\s,]+/)
             .filter((t) => t.length > 0);
           return {
-            overlayPresent: overlay !== null,
+            adjustPresent: adjust !== null,
             polygonPresent: poly !== null,
             pointPairs: pts.length / 2,
           };
@@ -2090,13 +2151,8 @@ async function main() {
           adjustLabels.hasRedetect,
         JSON.stringify(adjustLabels),
       );
-      const reactiveSrcBefore = await page.evaluate(() => {
-        try {
-          return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
-        } catch {
-          return null;
-        }
-      });
+      // (reactiveSrcBefore was read pre-adjust above — the result strip is
+      // unmounted while adjusting, so it is read here no longer.)
       const dragStart = await page.evaluate(() => {
         try {
           const el = document.querySelector('[data-crop-handle="tl"]');
@@ -2157,6 +2213,88 @@ async function main() {
         kbResult.moved === true,
         JSON.stringify(kbResult),
       );
+      // Whole-edge contract: dragging the TOP midpoint translates the WHOLE
+      // top edge — both adjacent corners ride the same clamped delta
+      // (rigid, unsheared). Dispatch in one evaluate (mouse), waitForFunction
+      // the post-condition, measure in a LATER evaluate (L-12 discipline).
+      const edgeBefore = await page.evaluate(() => {
+        try {
+          const center = (sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          };
+          const tl = center('[data-crop-handle="tl"]');
+          const tr = center('[data-crop-handle="tr"]');
+          const mid = center('[data-crop-handle-mid="top"]');
+          if (!tl || !tr || !mid) return null;
+          return { tl, tr, mid };
+        } catch {
+          return null;
+        }
+      });
+      let edgeDetail = null;
+      if (edgeBefore !== null) {
+        await page.mouse.move(edgeBefore.mid.x, edgeBefore.mid.y);
+        await page.mouse.down();
+        await page.mouse.move(edgeBefore.mid.x, edgeBefore.mid.y + 30, { steps: 12 });
+        await page.mouse.up();
+        try {
+          await page.waitForFunction(
+            (my) => {
+              try {
+                const el = document.querySelector('[data-crop-handle-mid="top"]');
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                return r.y + r.height / 2 - my > 3;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 10000 },
+            edgeBefore.mid.y,
+          );
+        } catch {
+          /* measured below */
+        }
+        edgeDetail = await page.evaluate((before) => {
+          try {
+            const center = (sel) => {
+              const el = document.querySelector(sel);
+              if (!el) return null;
+              const r = el.getBoundingClientRect();
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            };
+            const tl = center('[data-crop-handle="tl"]');
+            const tr = center('[data-crop-handle="tr"]');
+            const mid = center('[data-crop-handle-mid="top"]');
+            if (!tl || !tr || !mid) return null;
+            const tlDy = tl.y - before.tl.y;
+            const trDy = tr.y - before.tr.y;
+            const midDy = mid.y - before.mid.y;
+            return {
+              tlDy: Math.round(tlDy * 10) / 10,
+              trDy: Math.round(trDy * 10) / 10,
+              midDy: Math.round(midDy * 10) / 10,
+              gap: Math.round(Math.abs(tlDy - trDy) * 10) / 10,
+              bothDown: tlDy > 4 && trDy > 4,
+              rigid: Math.abs(tlDy - trDy) < 2,
+              midFollows: midDy > 4,
+            };
+          } catch {
+            return null;
+          }
+        }, edgeBefore);
+      }
+      check(
+        'scanner whole-edge drag moves top edge rigidly (tl+tr down >4px, |gap| < 2px, mid follows)',
+        edgeDetail !== null &&
+          edgeDetail.bothDown === true &&
+          edgeDetail.rigid === true &&
+          edgeDetail.midFollows === true,
+        JSON.stringify({ before: edgeBefore, after: edgeDetail }),
+      );
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')].find((b) => b.textContent === 'Apply')?.click();
@@ -2171,7 +2309,9 @@ async function main() {
             try {
               return (
                 document.querySelector('[data-crop-result]') !== null &&
-                document.querySelectorAll('[data-crop-handle]').length === 0
+                document.querySelectorAll('[data-crop-handle]').length === 0 &&
+                document.querySelectorAll('[data-crop-handle-mid]').length === 0 &&
+                document.querySelector('[data-crop-adjust]') === null
               );
             } catch {
               return false;
@@ -2185,6 +2325,26 @@ async function main() {
       }
       check('scanner Apply returns to result', appliedBack);
       await waitForResultImg(page);
+      // Re-warp is async: Apply exits adjust instantly on the OLD url and the
+      // fresh warped blob lands a beat later. A single post-Apply read races
+      // the warp (flake: same-src when the warp hasn't committed yet), so
+      // wait for the src to actually CHANGE before measuring.
+      try {
+        await page.waitForFunction(
+          (before) => {
+            try {
+              const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src');
+              return src !== null && src.length > 0 && src !== before;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+          reactiveSrcBefore,
+        );
+      } catch {
+        /* measured below as changed:false */
+      }
       const reactiveSrcAfter = await page.evaluate(() => {
         try {
           return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;

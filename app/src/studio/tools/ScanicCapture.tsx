@@ -270,6 +270,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
   /** Single-flight warp guard (the review child has no busy prop). */
   const warpingRef = useRef(false);
+  /**
+   * Eager-warp bookkeeping: which corner quad each entry's `warpedUrl` was
+   * built for (`lastWarpedQuadRef`), and which quads an eager warp was
+   * already attempted for (`eagerAttemptRef`, set synchronously before the
+   * async warp so a re-render mid-warp cannot fire a duplicate). Both guard
+   * the eager effect against re-warp loops; neither changes any decision.
+   */
+  const lastWarpedQuadRef = useRef(new Map<number, string>());
+  const eagerAttemptRef = useRef(new Map<number, string>());
 
   const idRef = useRef(0);
   const entriesRef = useRef<QueueEntry[]>([]);
@@ -789,6 +798,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         warpedBlobsRef.current.set(entry.id, blob);
         revokeUrl(entry.warpedUrl);
         const url = trackUrl(URL.createObjectURL(blob));
+        lastWarpedQuadRef.current.set(entry.id, JSON.stringify(corners));
         setEntries((prev) => prev.map((e) => (e.id === entry.id ? { ...e, warpedUrl: url } : e)));
         markDecision(entry.id, 'warped');
       } catch {
@@ -825,6 +835,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         warpedBlobsRef.current.set(id, blob);
         revokeUrl(entriesRef.current.find((e) => e.id === id)?.warpedUrl ?? null);
         const url = trackUrl(URL.createObjectURL(blob));
+        lastWarpedQuadRef.current.set(id, JSON.stringify(corners));
         setEntries((prev) =>
           prev.map((e) => (e.id === id ? { ...e, corners, warpedUrl: url } : e)),
         );
@@ -844,6 +855,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         revokeUrl(target.warpedUrl);
         warpedBlobsRef.current.delete(id);
         imageElsRef.current.delete(id);
+        lastWarpedQuadRef.current.delete(id);
+        eagerAttemptRef.current.delete(id);
       }
       const next = entriesRef.current.filter((e) => e.id !== id);
       entriesRef.current = next;
@@ -869,11 +882,33 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       warpedBlobsRef.current.delete(entry.id);
       imageElsRef.current.delete(entry.id);
     }
+    lastWarpedQuadRef.current.clear();
+    eagerAttemptRef.current.clear();
     entriesRef.current = [];
     setEntries([]);
     setReviewIndex(0);
     setPhase('camera');
   }, [revokeUrl]);
+
+  /**
+   * EAGER warp: the review single canvas needs a `warpedUrl` the moment a
+   * pending page has corners. When the review shows a pending, ready page
+   * with corners whose quad has no warp yet, re-warp immediately via the
+   * decision-free `rewrapEntry` core — no decision change, ML-first /
+   * null-fallback / commit paths untouched. Loop guard: one attempt per
+   * (entry, quad); skip when the current `warpedUrl` was already built for
+   * these exact corners.
+   */
+  const eagerCornersKey = current?.corners ? JSON.stringify(current.corners) : null;
+  useEffect(() => {
+    if (phase !== 'review' || current === null || eagerCornersKey === null) return;
+    if (current.decision !== 'pending' || current.status !== 'ready') return;
+    if (current.corners === null) return;
+    if (lastWarpedQuadRef.current.get(current.id) === eagerCornersKey) return;
+    if (eagerAttemptRef.current.get(current.id) === eagerCornersKey) return;
+    eagerAttemptRef.current.set(current.id, eagerCornersKey);
+    void rewrapEntry(current.id, current.corners);
+  }, [phase, current, eagerCornersKey, rewrapEntry]);
 
   const buildPdf = useCallback(() => {
     const pages: ScanicCommittedPage[] = accepted.map((entry, i) => {

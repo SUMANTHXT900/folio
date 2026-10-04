@@ -352,6 +352,9 @@ describe('mirror control', () => {
 
 describe('result-FIRST queue', () => {
   it('emits the exact E2E contract after capture', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
     const cta = await findQ('[data-review-cta]');
@@ -359,8 +362,12 @@ describe('result-FIRST queue', () => {
     fireEvent.click(cta);
     expect(await findQ('[data-scan-queue]')).toBeTruthy();
     expect(screen.getByText('Page 1 of 2')).toBeTruthy();
-    expect(q('[data-crop-result]')).toBeTruthy();
-    expect(q('[data-crop-result-img]')).toBeTruthy();
+    // Single-canvas result view: exactly one warped image, no overlay.
+    const resultImg = await findQ('[data-crop-result-img]');
+    expect(resultImg.tagName.toLowerCase()).toBe('img');
+    const result = q('[data-crop-result]');
+    expect(result.querySelectorAll('img').length).toBe(1);
+    expect(document.querySelector('[data-detect-overlay]')).toBeNull();
     for (const label of ['Looks good', 'Use original', 'Adjust corners', 'Discard', 'Re-detect']) {
       expect(screen.getByText(label, { exact: true })).toBeTruthy();
     }
@@ -431,6 +438,36 @@ describe('result-FIRST queue', () => {
   });
 });
 
+describe('eager warp', () => {
+  it('warps a pending page with corners immediately, without deciding', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    // Eager warp fills the single canvas while the decision stays pending.
+    const img = (await findQ('[data-crop-result-img]')) as HTMLImageElement;
+    expect(img.src).toMatch(/^blob:mock-/);
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    // Still pending: review CTA counts it, Next stays gated.
+    expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('0 of 1 reviewed');
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('warps once per quad — no re-warp loop for the same corners', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    await findQ('[data-crop-result-img]');
+    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    const calls = mockExtract.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(mockExtract.mock.calls.length).toBe(calls);
+  });
+});
+
 describe('corner editor', () => {
   it('portals 4 slider handles, steps with arrow keys, and applies', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
@@ -455,6 +492,18 @@ describe('corner editor', () => {
     });
     // Queue is back; the editor portal is gone from the scanner root too.
     expect(q('[data-scan-queue]')).toBeTruthy();
+  });
+
+  it('renders 8 adjust handles: 4 corners + 4 rigid-edge midpoints', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
+    await findQ('[data-crop-adjust]');
+    expect(document.body.querySelectorAll('[data-crop-handle]').length).toBe(4);
+    expect(document.body.querySelectorAll('[data-crop-handle-mid]').length).toBe(4);
+    for (const edge of ['top', 'right', 'bottom', 'left']) {
+      expect(document.body.querySelector(`[data-crop-handle-mid="${edge}"]`)).not.toBeNull();
+    }
   });
 
   it('disables Reset to auto when there is no detection baseline', async () => {

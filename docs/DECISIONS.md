@@ -266,6 +266,12 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Research basis.** Scanbot SDK custom-UI patterns (full-bleed view, live polygon overlay, finder guidance, status-gated capture, mirrored front preview) + Dropbox detection pipeline notes; TinyFish fetch 2026-10-04.
 - **Status.** Implemented in the D35 wave; canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).
 
+## D37 — Single-canvas review + 8-handle adjust (user-verified field feedback 2026-10-04)
+
+- **Decision.** (1) Result view shows ONLY the warped auto-crop canvas (original never beside it; eager warp on review entry so the canvas is never empty; Use-original verdict swaps hero to the photo with an unprocessed chip — a verdict state, not a second canvas); (2) adjust mode has 8 handles (4 corners + 4 edge midpoints; midpoint drag rigidly translates the whole edge by one clamped delta, convexity-guarded — the proven D32 semantics returning after the D35 4-handle regression); (3) reactive re-warp on every Apply preserved. Folio theme, 44px targets, no fake controls.
+- **Reason.** User-verified field feedback 2026-10-04.
+- **Status.** Implemented in the D37 wave; canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).
+
 ## D36 — Google-Drive-scan-pattern UX redo + About dev-channel card
 
 - **Decision.** (1) Capture screen rebuilt Google-style (dark full-bleed viewfinder, minimal top chrome, shutter + gallery thumb cluster, Manual/Auto-capture segmented pill with SAD auto-fire, status-pill guidance voice); (2) review hero is PROCESSED-result-only (original never the hero; quad visible only inside crop-adjust); (3) filmstrip + add-page + Discard-scans/Next batch bar; (4) no fake Enhance/Filters (no such pipeline — omitted honestly); (5) About dev-channel card (hostname-gated, never on production) with version + build time + per-wave notes answering "did the update land". Folio paper/ink/brass theme throughout.
