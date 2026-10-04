@@ -17,6 +17,11 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.9.5 release',
+    date: '2026-10-04',
+    notes: ['Scanic ML scanner to production.', 'Main-lens default + JPEG warp.', 'Version 1.9.5.'],
+  },
+  {
     build: 'D45 main-lens + JPEG warp',
     date: '2026-10-04',
     notes: ['Main-lens default scoring.', 'JPEG warped output.', 'Calmer 0.6x loupe.'],

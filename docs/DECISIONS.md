@@ -325,3 +325,10 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Decision.** (1) Back-camera scoring default (ultra/macro label demerit + zoom-capability bonus + max-pixel tiebreak; persisted pick still wins; background max-res probe kept). (2) Warped commits JPEG q0.9 full-res (warped pages are new renders, never original bytes — originals still byte-identical; fixes the 4-page-22MB class bloat with no readable-text loss). (3) `LOUPE_ZOOM` 1.1 → 0.6. Folio theme, 44px targets, no fake controls.
 - **Reason.** User phone feedback 2026-10-04 + web research (no constraint distinguishes wide vs ultra-wide — open W3C mediacapture-extensions#20; PTZ zoom capability is the best available lens signal; logical-cameras-only platform limit stands).
 - **Status.** D45 wave; verification SCOPED (orchestrator fills scoped numbers; E2E NOT run per standing instruction — see WORKLOG); real-device validation pending (user's phone required).
+
+## v1.9.5 release (scanner to prod)
+
+- **Decision.** Ship the D33–D45 scanner wave as version 1.9.5, not 2.0.0: the scanner ships while the engine/tools contract is unchanged, so the v2.0.0 HELD state stays intact.
+- **Reason.** A minor bump matches the change (scanner feature wave, no engine/contract break); reserving 2.0.0 keeps the held release checklist meaningful.
+- **Consequences.** Same code ships to both branches via the hostname gate (the About dev-channel card never renders on production — no stripping commit needed). Production is built from `main` with `npm run build` (never dev-server output).
+- **Status.** Release prep on `dev` (2026-10-04); full-suite verification + promotion pending.

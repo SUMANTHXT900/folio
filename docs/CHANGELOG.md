@@ -2,6 +2,26 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.9.5 — On-device document scanner (scanic ML) (dev → main, 2026-10-04)
+
+Scanner ML wave to production (D33–D45, `dev` line; v2.0.0 stays HELD — scanner ships, engine/tools unchanged). About-page version tree follows automatically via `__FOLIO_VERSION__`; the `latest` entry copy is updated for this release.
+
+- D33 strip of the custom scan crate (`folio-scan`, scan worker/protocol/WASM glue, `CameraCapture`, scan UI/tests, scanner E2E sections deleted; Images tool upload-only in the interim).
+- D34 `scanic@1.6.0` + `scanic-ml@0.2.0` vendored same-origin under `/assets/scanic-ml/` and precached at install, ML-default; precache cap 8MB → 10MB with the 9MB alarm rule.
+- D35 fullscreen takeover + overlay review + reactive previews.
+- D36 Manual/Auto capture + filmstrip + batch bar + dev-channel card (dev hosts only, never production).
+- D37 single-canvas review + 8-handle eager warp adjust.
+- D38 portrait capture constraints + zero-shift layout.
+- D39 loupe + fullscreen finder.
+- D40 auto-accept review (no per-page accept gate).
+- D41 ImageCapture takePhoto + camera picker + orientation-honest preview + thin handles.
+- D42 labeled chrome + dotted outline + adjust-next navigation.
+- D43 pointer-events + mirror gating + bar-free hero + drift fix.
+- D44 best-camera suggestion + persisted pick + flash honesty + 12h clock.
+- D45 main-lens scoring default + JPEG warped output + 0.6x loupe.
+- Attribution: scanic MIT © marquaye; detector assets self-hosted (see `app/public/assets/scanic-ml/VERSIONS.md`).
+- Verification: full-suite numbers recorded in `docs/STATUS.md` on the release commit.
+
 ## v1.9.0 — Correctness, memory, and UX hardening (`dev`, 2026-09-27)
 
 Waves 1–7 (`ad592f9`..`97dc8c2`): engine + app hardening on the pre-v2.0 `dev` line. Scanner v2.0 scope (M1–M3+M3.x, D16–D21, P0–P2+P4, F-11–F-19) stays reserved for the v2.0.0 entry; the v2.0.0 release itself remains HELD pending real-device validation (see `docs/STATUS.md` checklist). App-only version marker — the About-page version tree follows automatically via `__FOLIO_VERSION__`, no About edit needed.

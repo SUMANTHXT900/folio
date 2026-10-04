@@ -44,13 +44,13 @@ const ENTRIES: Entry[] = [
     // dynamic — always reflects package.json version via Vite define
     version: `v${typeof __FOLIO_VERSION__ !== 'undefined' ? __FOLIO_VERSION__ : '1.1.0'} · dev`,
     date: 'now · latest',
-    title: 'Real engine underneath',
+    title: 'Scanner + real engine underneath',
     status: 'latest',
     changes: [
-      'Every tool now runs on the on-device Folio engine (Rust/WebAssembly) — no more in-page PDF patching.',
-      'New: Metadata properties and Images → PDF join the tool grid.',
-      'Fast previews with live progress, cancellation, and clear errors.',
-      'Compress stays reserved for a future update.',
+      'On-device document scanner on scanic — ML detection by default with classical as silent fallback; original-feed capture with main-lens default and a persisted camera pick.',
+      'Auto-accept review with thin-handle adjust, a calm loupe, and a fullscreen finder.',
+      'Warped pages commit as full-res JPEG; originals stay byte-identical.',
+      'Every tool still runs on the local Rust/WASM engine — Compress stays reserved.',
     ],
   },
 ];

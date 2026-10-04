@@ -1333,6 +1333,24 @@ describe('honest camera errors', () => {
       expect(q('[data-finder-status]').textContent).toMatch(/requested resolution/);
     });
   });
+
+  it('denied state still mounts the real camera picker with the Default camera option', async () => {
+    mockFailingCamera('NotAllowedError');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toMatch(/denied/);
+    });
+    // Real picker (same contract), honest empty state: Default camera only.
+    const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
+    expect(select.getAttribute('aria-label')).toBe('Choose camera');
+    expect(select.disabled).toBe(false);
+    expect(select.className).toMatch('min-h-[44px]');
+    const options = Array.from(select.querySelectorAll('option'));
+    expect(options.map((o) => o.value)).toEqual(['']);
+    expect(options[0].textContent).toMatch(/Default camera/);
+    // Denied fallback help + Retry stay untouched.
+    expect(screen.getByText('Retry camera', { exact: true })).toBeTruthy();
+  });
 });
 
 describe('camera-phase chrome (slim top bar)', () => {

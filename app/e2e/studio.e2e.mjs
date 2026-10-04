@@ -1281,9 +1281,53 @@ async function main() {
           orientationHonest.forced916 === false,
         JSON.stringify(orientationHonest),
       );
+      // Mirror gating (D43): the fake camera opens environment-facing, so
+      // the toggle is disabled by design. Assert that honest back-lens
+      // state first, then Flip to the front lens (facing='user') where the
+      // toggle enables, and only there assert the aria-pressed flip.
       // Click in one evaluate, read the flip in a LATER one: React flushes
       // setState after the click returns, so a same-evaluate read always
       // sees the stale value (L-12 family — reads as a dead toggle).
+      const mirrorGated = await page.evaluate(() => {
+        try {
+          const toggle = document.querySelector('[data-mirror-toggle]');
+          if (!toggle) return null;
+          return {
+            disabled: toggle.disabled,
+            title: toggle.getAttribute('title') ?? '',
+            pressed: toggle.getAttribute('aria-pressed') ?? null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner mirror toggle is front-only (disabled on the back lens)',
+        mirrorGated !== null && mirrorGated.disabled === true && /front/i.test(mirrorGated.title),
+        JSON.stringify(mirrorGated),
+      );
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[aria-label="Switch camera"]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const toggle = document.querySelector('[data-mirror-toggle]');
+              return toggle !== null && toggle.disabled === false;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10000 },
+        );
+      } catch {
+        /* measured below as flipped:false */
+      }
       const mirrorBefore = await page.evaluate(() => {
         try {
           return (
@@ -1329,7 +1373,7 @@ async function main() {
         }
       }, mirrorBefore);
       check(
-        'scanner mirror toggle flips preview mirroring (aria-pressed)',
+        'scanner mirror toggle flips front preview mirroring (aria-pressed)',
         mirrorFlip !== null && mirrorFlip.flipped === true,
         JSON.stringify(mirrorFlip),
       );
@@ -1835,9 +1879,10 @@ async function main() {
         JSON.stringify(queueState),
       );
       // Strip docked-bottom contract: the camera-phase `[data-scan-strip]`
-      // lives in the bottom overlay cluster — its rect sits in the lower
-      // third of the scanner surface (never mid-screen). Missing strip fails
-      // honestly. The zero-shift gate below is kept as-is.
+      // is DOCKED in the bottom overlay cluster — its bottom edge sits at
+      // or below the surface lower-third line (never floating mid-screen)
+      // and inside the absolute bottom-0 overlay descendant. Missing strip
+      // fails honestly. The zero-shift gate below is kept as-is.
       const stripDocked = await page.evaluate(() => {
         try {
           const root = document.querySelector('[data-scanner-root]');
@@ -1846,6 +1891,18 @@ async function main() {
           const s = root.getBoundingClientRect();
           const r = strip.getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0 || s.height <= 0) return null;
+          let node = strip.parentElement;
+          let docked = false;
+          let dockClass = null;
+          while (node && node !== root) {
+            const cls = typeof node.className === 'string' ? node.className : '';
+            if (cls.includes('bottom-0') && cls.includes('absolute')) {
+              docked = true;
+              dockClass = cls.slice(0, 120);
+              break;
+            }
+            node = node.parentElement;
+          }
           return {
             surfaceTop: Math.round(s.top),
             surfaceH: Math.round(s.height),
@@ -1853,6 +1910,8 @@ async function main() {
             stripTop: Math.round(r.top),
             stripBottom: Math.round(r.bottom),
             lowerThirdTop: Math.round(s.top + (s.height * 2) / 3),
+            docked,
+            dockClass,
           };
         } catch {
           return null;
@@ -1861,8 +1920,9 @@ async function main() {
       check(
         'scanner strip is docked in the bottom overlay (lower third of the surface)',
         stripDocked !== null &&
-          stripDocked.stripTop >= stripDocked.lowerThirdTop - 4 &&
-          stripDocked.stripBottom <= stripDocked.surfaceBottom + 2,
+          stripDocked.stripBottom >= stripDocked.lowerThirdTop - 4 &&
+          stripDocked.stripBottom <= stripDocked.surfaceBottom + 2 &&
+          stripDocked.docked === true,
         JSON.stringify(stripDocked),
       );
       // No-shift gate: the same viewfinder container keeps its pixel height

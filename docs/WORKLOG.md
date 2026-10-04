@@ -576,3 +576,10 @@ Chronological record of meaningful development events. Each entry records object
 - **Verification.** SCOPED per standing user instruction (E2E NOT run): typecheck clean, eslint clean, prettier clean; **143/143 across 8 scanner-related files** (ScanicCapture 65 incl. 4 new main-lens scoring + JPEG q0.9 pins, loupe suites incl. 0.6x pin); production build clean (precache 43 entries / 7789.57 KiB = 7.60MB — under 9MB alarm + 10MB cap).
 - **Remaining.** Real-device validation (user's phone).
 - **Deploy.** D45 shipped: GitHub `dev` (`2c86501` code + docs) + Cloudflare Pages `folio-pdf` branch `dev` (`https://dev-folio-pdf.pages.dev`, deployment `15fe3d52`, bundle `index-C7jJAz6m.js` verified byte-identical to the local build — served in live `index.html`, asset fetches 200).
+
+## 2026-10-04 — v1.9.5 release prep
+
+- **Objective.** Ship the scanner D33–D45 wave to production as v1.9.5 (v2.0.0 stays HELD).
+- **Work.** Release-prep edits only (no code, no E2E strings, no scan-core touch): `app/package.json` 1.9.0 → 1.9.5; README version badge → 1.9.5; About `latest` entry retitled to scanner copy (4 changes lines); `docs/CHANGELOG.md` v1.9.5 entry prepended above v1.9.0; `devNotes.ts` v1.9.5 entry appended newest-first; `docs/STATUS.md` release-pass edits (header, phase lead, current-work bullet, HEAD-line version + main-promotion-pending note, checklist header — baseline numbers table untouched); `docs/DECISIONS.md` release record; `docs/ROADMAP.md` scanner-track pointer.
+- **Verification.** Full suite GREEN on the release commit: engine 382 + fmt/clippy clean + build:wasm pass; typecheck/lint/format clean; frontend 447/35; production build clean (precache 43 entries / 8082.21 KiB = 7.89MB, under 9MB alarm + 10MB cap); canonical E2E 102/102 + 4 SKIP (first run 98/101 with 3 scanner FAILs — mirror front-only gate, strip dock predicate, denied-state picker — each root-caused read-only then fixed: E2E predicate sync ×2 + always-mount real picker ×1; re-run green exit 0).
+- **Remaining.** Push dev → deploy dev → merge main → prod build from main → deploy prod → verify.
