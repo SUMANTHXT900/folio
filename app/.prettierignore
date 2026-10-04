@@ -1,3 +1,7 @@
 dist
 node_modules
 coverage
+# Vendored scanic-ml detector assets (D34): byte-identical copies of the
+# published scanic-ml@0.2.0 dist files — never reformat, integrity pinned
+# by SHA-256 in public/assets/scanic-ml/VERSIONS.md.
+public/assets/scanic-ml/

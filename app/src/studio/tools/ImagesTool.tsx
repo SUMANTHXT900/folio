@@ -21,6 +21,7 @@ import {
 import { buildImagesPdf, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
+import ScanicCapture, { type ScanicCommittedPage } from './ScanicCapture';
 import { browserImageRenderer, preparePageBytes, type ImageRenderer } from './imagePrepare';
 import type { ImagePage } from './imagePages';
 
@@ -97,13 +98,16 @@ export function preStageShardEstimate(pages: readonly { file: File | Blob; size:
  * (preview, reorder, remove, rotate), then build through the Folio engine
  * (`pdf.images_to_pdf`, one page per image, in listed order). Image bytes
  * are staged in the service store only for the run (never in React state);
- * pages hold File/Blob handles + preview URLs. Upload-only in the
- * intermediate state after the D33 scanner strip; the scanic capture
- * entry point is rebuilt in a later wave.
+ * pages hold File/Blob handles + preview URLs. Uploads share the entry
+ * card with the scanic camera entry below: committed camera pages arrive
+ * pre-named `scan-NNN.jpg` in capture order (`source: 'camera'`) and join
+ * the same collection via `addFiles` — handles only, no normalization, so
+ * the gallery upload path stays byte-identical.
  */
 export default function ImagesTool() {
-  const { pages, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
+  const { pages, importFiles, move, remove, rotate, clear, reorder, addFiles } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
   const [meta, setMeta] = useState<string[]>([]);
@@ -113,6 +117,22 @@ export default function ImagesTool() {
   const [importing, setImporting] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
   const moreInputRef = useRef<HTMLInputElement>(null);
+
+  // Scanic camera reintegration: committed pages are pre-named `scan-NNN.jpg`
+  // in capture order. `addFiles` appends handles in array order with no
+  // normalization — the committed bytes (warped PNG or untouched original)
+  // reach the collection byte-identical, and numbering continues past any
+  // camera pages already in the collection.
+  const commitCameraPages = (committed: ScanicCommittedPage[]) => {
+    if (committed.length > 0) {
+      addFiles(
+        committed.map((p) => p.file),
+        'camera',
+      );
+    }
+    setScannerOpen(false);
+  };
+  const cameraStartIndex = pages.filter((p) => p.source === 'camera').length;
 
   const addUploads = async (incoming: File[]) => {
     // Shared normalized import path: pixel-budget resize + PNG→JPEG
@@ -255,7 +275,7 @@ export default function ImagesTool() {
 
       {pages.length === 0 ? (
         <div className="space-y-4">
-          <EntryCard onFiles={addUploads} />
+          <EntryCard onFiles={addUploads} onScan={() => setScannerOpen(true)} />
           {error !== null && <ErrorBlock error={error} />}
         </div>
       ) : (
@@ -299,6 +319,14 @@ export default function ImagesTool() {
               <Button variant="ghost" onClick={() => moreInputRef.current?.click()}>
                 Add images
               </Button>
+              <button
+                type="button"
+                data-scan-open
+                onClick={() => setScannerOpen(true)}
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:border-brass-400/30 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-800"
+              >
+                Scan
+              </button>
             </div>
             <p className="mb-3 mt-4 text-sm font-medium text-ink-700 dark:text-paper-100">
               Page size policy
@@ -358,6 +386,15 @@ export default function ImagesTool() {
           )}
         </div>
       )}
+      {scannerOpen && (
+        <div className="mt-5">
+          <ScanicCapture
+            startIndex={cameraStartIndex}
+            onCommit={commitCameraPages}
+            onExit={() => setScannerOpen(false)}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -366,11 +403,11 @@ const ease = [0.22, 1, 0.36, 1] as const;
 
 /**
  * Upload entry card: the whole card is a drop target (drag-over
- * spotlights the upload tile); the tile staggers in, lifts on hover, and
- * compresses on tap. It was one of two tiles before the D33 scanner
- * strip removed the camera entry point.
+ * spotlights the upload tile); the tiles stagger in, lift on hover, and
+ * compress on tap. Upload tile + scan tile: gallery files and camera
+ * captures join the same ordered collection.
  */
-function EntryCard({ onFiles }: { onFiles: (files: File[]) => void }) {
+function EntryCard({ onFiles, onScan }: { onFiles: (files: File[]) => void; onScan: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -439,6 +476,45 @@ function EntryCard({ onFiles }: { onFiles: (files: File[]) => void }) {
             </motion.span>
           )}
         </AnimatePresence>
+      </motion.button>
+      <motion.button
+        type="button"
+        data-scan-open
+        onClick={onScan}
+        initial={{ opacity: 0, y: 14 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, ease, delay: 0.14 }}
+        whileHover={{ y: -3 }}
+        whileTap={{ scale: 0.97 }}
+        className="group relative flex flex-1 flex-col items-center gap-2.5 overflow-hidden rounded-2xl border-2 border-dashed border-brass-500/35 px-4 py-7 text-center transition-colors hover:border-brass-400/60 hover:bg-brass-400/[0.04] sm:py-9 dark:border-brass-400/25"
+      >
+        <motion.span
+          transition={{ type: 'spring', stiffness: 400, damping: 17 }}
+          className="flex items-center justify-center rounded-2xl bg-ink-900 p-3 text-paper-50 shadow-sm ring-1 ring-black/5 transition-colors group-hover:bg-brass-500 dark:bg-paper-100 dark:text-ink-900 dark:ring-white/10"
+          aria-hidden
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+        </motion.span>
+        <span>
+          <span className="block font-display text-base font-semibold text-ink-900 dark:text-paper-100">
+            Scan document
+          </span>
+          <span className="mt-1 block text-xs text-ink-500 dark:text-ink-300">
+            Camera capture, auto-cropped
+          </span>
+        </span>
       </motion.button>
     </>
   );

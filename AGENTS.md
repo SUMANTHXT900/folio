@@ -79,6 +79,7 @@ folio/
 │   ├── src/rendering/ PDF.js rendering + thumbnail engines.
 │   ├── src/studio/    Application UI: shell, tools, hooks, Folio service boundary.
 │   ├── e2e/           Production E2E suite (real headless Chrome, real engine, no mocks).
+│   ├── public/assets/scanic-ml/ Vendored scanic-ml dist (same-origin self-host, precached at install).
 │   ├── package.json   App scripts (`dev`, `build`, `build:wasm`, `test`, E2E via node).
 │   └── vite.config.ts App build config (PWA precache incl. WASM, `fs.allow` for `./` + `../wasm`).
 ├── ARCHITECTURE.md    Long-form historical architecture log (lesson-by-lesson build record).
@@ -88,8 +89,10 @@ folio/
 Rust commands run in `engine/` (PDF engine); frontend commands run in `app/`. There is no
 Cargo workspace: `engine/` and `wasm/` keep their independent manifests and
 lockfiles (see `docs/DECISIONS.md` D12). The `scan/` crate was deleted in the D33 scanner
-pivot (document scanning is being rebuilt on the external `scanic` library — see
-`docs/DECISIONS.md` D33). The `test pdfs/` directory (gitignored,
+pivot; document scanning is rebuilt on the external `scanic` library in D34
+(`scanic@1.6.0` classical + self-hosted `scanic-ml@0.2.0` vendored same-origin
+under `app/public/assets/scanic-ml/`, precached at install, ML opt-in — see
+`docs/DECISIONS.md` D33/D34). The `test pdfs/` directory (gitignored,
 local-only, optional benchmark corpus — never required for canonical testing,
 see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
 

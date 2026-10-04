@@ -474,6 +474,10 @@ export default function About() {
           </a>
         </div>
       </motion.footer>
+      <p className="mt-3 text-center text-[11px] text-ink-400 dark:text-ink-300">
+        Document scanning by scanic (MIT © marquaye) — detector assets self-hosted, runs fully
+        on-device.
+      </p>
     </div>
   );
 }

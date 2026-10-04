@@ -39,10 +39,10 @@ Most PDF tools upload your documents to a server to process them. **Folio doesn'
 | **Rearrange**    | Drag to reorder pages, preview at full resolution, then save                                              |
 | **Rotate**       | Rotate individual pages or the whole document by quarter turns                                            |
 | **Metadata**     | Read and edit titles, authors, dates, and other document properties (set / clear / leave unchanged)       |
-| **Images → PDF** | Build one PDF from JPEG/PNG images — upload your photos (camera capture temporarily removed)              |
+| **Images → PDF** | Build one PDF from JPEG/PNG images — camera capture (scanic, on-device) or upload your photos as fallback |
 | **Compress**     | _Coming in a future update_ — the action stays disabled rather than pretending to work                    |
 
-> **Document scanning is being rebuilt on [scanic](https://github.com/marquaye/scanic) (MIT).** Camera capture is temporarily removed, so Images → PDF is upload-only until the integration lands.
+> **Document scanning runs on [scanic](https://github.com/marquaye/scanic) (MIT © marquaye).** Camera capture runs on-device (classical detection by default, self-hosted ML as an explicit opt-in); uploads still work as fallback.
 
 Every completed file gets a smart name derived from your inputs (or your own custom name) before it downloads. Every tool reports real engine progress, honest cancellation, completion time, and output sizes.
 
@@ -68,7 +68,7 @@ PDF rendering             Studio → PdfRenderEngine → PDF.js → canvas
 
 ```text
 folio/
-├── app/          Production Studio (React + TS + Vite)
+├── app/          Production Studio (React + TS + Vite; scanic-ml dist vendored under `public/assets/scanic-ml/`)
 ├── engine/       Folio Rust PDF engine (src, tests, examples, Cargo.toml)
 ├── wasm/         Rust → WASM bridge (wasm-pack)
 ├── docs/         Persistent project memory

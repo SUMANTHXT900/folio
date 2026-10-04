@@ -207,6 +207,190 @@ async function bodyText(page) {
   return page.evaluate(() => document.body.innerText);
 }
 
+// ---- Scanner helpers (every waitForFunction predicate is total: try/catch, never
+// dereferences a possibly-null query result) ----
+function writeFakeY4M(filePath, width = 640, height = 480, frames = 12) {
+  const header = `YUV4MPEG2 W${width} H${height} F30:1 Ip A1:1 C420\n`;
+  const ySize = width * height;
+  const uvSize = (width >> 1) * (height >> 1);
+  const frameSize = ySize + uvSize * 2;
+  const parts = [Buffer.from(header, 'ascii')];
+  for (let f = 0; f < frames; f += 1) {
+    parts.push(Buffer.from('FRAME\n', 'ascii'));
+    const y = Buffer.alloc(ySize, 0x80 + ((f * 7) % 64));
+    // A bright square drifting per frame so motion is visible to detectors.
+    const sq = 96;
+    const ox = (f * 24) % (width - sq);
+    const oy = (f * 16) % (height - sq);
+    for (let row = 0; row < sq; row += 1) {
+      y.fill(0xe0, (oy + row) * width + ox, (oy + row) * width + ox + sq);
+    }
+    parts.push(y);
+    parts.push(Buffer.alloc(uvSize, 0x80));
+    parts.push(Buffer.alloc(uvSize, 0x80));
+  }
+  fs.writeFileSync(filePath, Buffer.concat(parts));
+  void frameSize;
+}
+
+async function scanOpen(page) {
+  await page.evaluate(() => {
+    try {
+      document.querySelector('[data-scan-open]')?.click();
+    } catch {
+      /* noop */
+    }
+  });
+  await page.waitForFunction(
+    () => {
+      try {
+        return document.querySelector('[data-scanner-root]') !== null;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: 30000 },
+  );
+  // The shutter renders only once the camera is LIVE (async getUserMedia +
+  // video.play after the root mounts). Every read/click below needs it —
+  // without this wait the opened-evaluate sees shutter:null and the first
+  // capture click no-ops, which reads as a dead scanner (E2E-only timing;
+  // the app itself goes live ~1s later).
+  await page.waitForFunction(
+    () => {
+      try {
+        return document.querySelector('[data-scan-capture]') !== null;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: 30000 },
+  );
+}
+
+async function scanCaptureOnce(page) {
+  await page.waitForFunction(
+    () => {
+      try {
+        return document.querySelector('[data-scan-capture]') !== null;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: 30000 },
+  );
+  await page.evaluate(() => {
+    try {
+      document.querySelector('[data-scan-capture]')?.click();
+    } catch {
+      /* noop */
+    }
+  });
+}
+
+async function waitForQueue(page, count, timeoutMs = 30000) {
+  await page.waitForFunction(
+    (expected) => {
+      try {
+        const q = document.querySelector('[data-scan-queue]');
+        if (!q) return false;
+        const text = q.textContent ?? '';
+        return new RegExp(`of ${expected}\\b`).test(text);
+      } catch {
+        return false;
+      }
+    },
+    { timeout: timeoutMs },
+    count,
+  );
+}
+
+async function waitForResultImg(page, timeoutMs = 30000) {
+  await page.waitForFunction(
+    () => {
+      try {
+        const img = document.querySelector('[data-crop-result-img]');
+        if (!img) return false;
+        return img.naturalWidth > 0;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: timeoutMs },
+  );
+}
+
+// Keyboard-handle exercise: dispatch in ONE evaluate, waitForFunction the
+// post-condition, then measure in a LATER evaluate (never dispatch-then-
+// measure synchronously — React-flush timing would fake-fail the read).
+// Shift is held so scanic takes its coarse step (10px, same slider path as
+// the 1px nudge): a 1px step can land sub-pixel on screen and never trip a
+// whole-pixel post-condition, which reads as a dead handle.
+async function exerciseScanicHandles(page, handle = 'tr', key = 'ArrowRight') {
+  const before = await page.evaluate((h) => {
+    try {
+      const el = document.querySelector(`[data-crop-handle="${h}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y) };
+    } catch {
+      return null;
+    }
+  }, handle);
+  if (before === null) return { moved: false, before, after: null };
+  await page.evaluate(
+    (h, k) => {
+      try {
+        const el = document.querySelector(`[data-crop-handle="${h}"]`);
+        if (!el) return;
+        el.focus();
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, shiftKey: true }));
+      } catch {
+        /* noop */
+      }
+    },
+    handle,
+    key,
+  );
+  let settled = false;
+  try {
+    await page.waitForFunction(
+      (h, bx, by) => {
+        try {
+          const el = document.querySelector(`[data-crop-handle="${h}"]`);
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return Math.abs(r.x - bx) > 1 || Math.abs(r.y - by) > 1;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 10000 },
+      handle,
+      before.x,
+      before.y,
+    );
+    settled = true;
+  } catch {
+    settled = false;
+  }
+  const after = await page.evaluate((h) => {
+    try {
+      const el = document.querySelector(`[data-crop-handle="${h}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y) };
+    } catch {
+      return null;
+    }
+  }, handle);
+  const moved =
+    settled &&
+    after !== null &&
+    (Math.abs(after.x - before.x) > 1 || Math.abs(after.y - before.y) > 1);
+  return { moved, before, after };
+}
+
 async function main() {
   fs.mkdirSync(path.join(__dirname, 'after'), { recursive: true });
   // Downloads are captured in-page (see installDownloadCapture) — no OS
@@ -846,6 +1030,550 @@ async function main() {
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
+  }
+
+  // ---- Scanner: fake-camera capture → review → crop → Build PDF ----
+  // Real 640×480 Y4M via the Chrome fake video device (established pattern:
+  // no prior fake-camera block exists in this file, so the Y4M is generated
+  // fresh into e2e/after/). A separate browser carries the fake-device flags;
+  // the denied-state block below reuses the flagless main browser.
+  {
+    const y4mPath = path.join(__dirname, 'after', 'fake-640x480.y4m');
+    if (!fs.existsSync(y4mPath)) writeFakeY4M(y4mPath, 640, 480, 12);
+    let scanBrowser = null;
+    try {
+      scanBrowser = await puppeteer.launch({
+        executablePath: CHROME,
+        headless: 'shell',
+        protocolTimeout: 600000,
+        args: [
+          '--no-sandbox',
+          '--disable-dev-shm-usage',
+          '--mute-audio',
+          '--disable-extensions',
+          '--use-fake-device-for-media-stream',
+          '--use-fake-ui-for-media-stream',
+          `--use-file-for-fake-video-capture=${y4mPath}`,
+        ],
+      });
+    } catch (err) {
+      check('scanner opens with root + shutter + ML toggle default classical', false, String(err));
+    }
+    if (scanBrowser !== null) {
+      const { page, consoleErrors } = await newPage(scanBrowser);
+      await gotoTool(page, 'images');
+      await scanOpen(page);
+      const scanOpened = await page.evaluate(() => {
+        try {
+          const root = document.querySelector('[data-scanner-root]');
+          const shutter = document.querySelector('[data-scan-capture]');
+          const ml = document.querySelector('[data-ml-detector]');
+          if (!root || !shutter || !ml) return null;
+          const text = (ml.textContent ?? '').toLowerCase();
+          const mode = (
+            ml.getAttribute('data-mode') ??
+            ml.getAttribute('data-detector') ??
+            ''
+          ).toLowerCase();
+          const pressed = ml.getAttribute('aria-pressed');
+          const checked = ml.getAttribute('aria-checked');
+          const classical =
+            text.includes('classical') ||
+            mode.includes('classical') ||
+            pressed === 'false' ||
+            checked === 'false';
+          return { classical, text: text.slice(0, 60), mode, pressed, checked };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner opens with root + shutter + ML toggle default classical',
+        scanOpened !== null && scanOpened.classical === true,
+        JSON.stringify(scanOpened),
+      );
+      await scanCaptureOnce(page);
+      // The camera-phase strip is `[data-scan-strip]` (thumbs); the
+      // `[data-scan-queue]` review surface renders only after the Review CTA
+      // (phase change), so per-capture waits assert strip thumbs here and the
+      // queue wait moves below the CTA click.
+      await page.waitForFunction(
+        () => {
+          try {
+            const s = document.querySelector('[data-scan-strip]');
+            return s !== null && s.querySelectorAll('button').length >= 1;
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 30000 },
+      );
+      await scanCaptureOnce(page);
+      await page.waitForFunction(
+        () => {
+          try {
+            const s = document.querySelector('[data-scan-strip]');
+            return s !== null && s.querySelectorAll('button').length >= 2;
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 30000 },
+      );
+      const queueState = await page.evaluate(() => {
+        try {
+          const s = document.querySelector('[data-scan-strip]');
+          const alert = document.querySelector('[role="alert"]');
+          const v = document.querySelector('[data-scanner-root] video');
+          const live =
+            v !== null && (v.readyState >= 2 || v.videoWidth > 0 || v.played !== undefined);
+          const thumbs = s === null ? -1 : s.querySelectorAll('button').length;
+          return {
+            header: `strip thumbs ${thumbs} of 2`,
+            silent: alert === null,
+            live,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner fake-camera capture queues silently with camera live',
+        queueState !== null &&
+          /of 2\b/.test(queueState.header) &&
+          queueState.silent &&
+          queueState.live,
+        JSON.stringify(queueState),
+      );
+      const ctaText = await page.evaluate(() => {
+        try {
+          return document.querySelector('[data-review-cta]')?.textContent?.trim() ?? null;
+        } catch {
+          return null;
+        }
+      });
+      check('scanner Review CTA reads Review N pages', ctaText === 'Review 2 pages', ctaText);
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-review-cta]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      await waitForResultImg(page);
+      const resultFirst = await page.evaluate(() => {
+        try {
+          const res = document.querySelector('[data-crop-result]');
+          const img = document.querySelector('[data-crop-result-img]');
+          if (!res || !img) return null;
+          const r = res.getBoundingClientRect();
+          return {
+            shown: r.width > 0 && r.height > 0,
+            naturalWidth: img.naturalWidth,
+            handles: document.querySelectorAll('[data-crop-handle]').length,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Page 1 shows crop result first (result shown, zero handles)',
+        resultFirst !== null && resultFirst.shown && resultFirst.handles === 0,
+        JSON.stringify(resultFirst),
+      );
+      check(
+        'scanner result image decodes (naturalWidth > 0)',
+        resultFirst !== null && resultFirst.naturalWidth > 0,
+        JSON.stringify(resultFirst),
+      );
+      const touchBefore = await page.evaluate(() => {
+        try {
+          const box = (label) => {
+            const btn = [...document.querySelectorAll('button')].find(
+              (b) => b.textContent === label,
+            );
+            if (!btn) return null;
+            const r = btn.getBoundingClientRect();
+            return { w: Math.round(r.width), h: Math.round(r.height) };
+          };
+          return { looksGood: box('Looks good'), adjust: box('Adjust corners') };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner touch targets meet 44px (Looks-good/Adjust)',
+        touchBefore !== null &&
+          touchBefore.looksGood !== null &&
+          touchBefore.adjust !== null &&
+          touchBefore.looksGood.w >= 44 &&
+          touchBefore.looksGood.h >= 44 &&
+          touchBefore.adjust.w >= 44 &&
+          touchBefore.adjust.h >= 44,
+        JSON.stringify(touchBefore),
+      );
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent === 'Looks good')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let progressed = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const p = document.querySelector('[data-review-progress]');
+              if (!p) return false;
+              const label = p.getAttribute('aria-label') ?? p.textContent ?? '';
+              return /1 of 2 reviewed/.test(label);
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        progressed = true;
+      } catch {
+        progressed = false;
+      }
+      const progressState = await page.evaluate(() => {
+        try {
+          const p = document.querySelector('[data-review-progress]');
+          if (!p) return null;
+          return { label: p.getAttribute('aria-label') ?? p.textContent ?? '' };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Looks-good advances + progress 1 of 2 reviewed',
+        progressed && progressState !== null && /1 of 2 reviewed/.test(progressState.label),
+        JSON.stringify(progressState),
+      );
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent === 'Adjust corners')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              return document.querySelectorAll('[data-crop-handle]').length === 4;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+      } catch {
+        /* measured below */
+      }
+      const adjustState = await page.evaluate(() => {
+        try {
+          const handles = [...document.querySelectorAll('[data-crop-handle]')];
+          const keys = handles
+            .map((h) => h.getAttribute('data-crop-handle'))
+            .sort()
+            .join(',');
+          const sliders = handles.filter((h) => h.getAttribute('role') === 'slider').length;
+          const reset = [...document.querySelectorAll('button')].some(
+            (b) => b.textContent === 'Reset to auto',
+          );
+          const instruction = /drag|corner/i.test(document.body.innerText);
+          return { count: handles.length, keys, sliders, reset, instruction };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Adjust mode shows 4 handles + instruction + Reset to auto',
+        adjustState !== null &&
+          adjustState.count === 4 &&
+          adjustState.keys === 'bl,br,tl,tr' &&
+          adjustState.sliders === 4 &&
+          adjustState.reset &&
+          adjustState.instruction,
+        JSON.stringify(adjustState),
+      );
+      const dragStart = await page.evaluate(() => {
+        try {
+          const el = document.querySelector('[data-crop-handle="tl"]');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        } catch {
+          return null;
+        }
+      });
+      let dragMoved = false;
+      if (dragStart !== null) {
+        await page.mouse.move(dragStart.x, dragStart.y);
+        await page.mouse.down();
+        await page.mouse.move(dragStart.x + 40, dragStart.y + 30, { steps: 12 });
+        await page.mouse.up();
+        try {
+          await page.waitForFunction(
+            (sx, sy) => {
+              try {
+                const el = document.querySelector('[data-crop-handle="tl"]');
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const cx = r.x + r.width / 2;
+                const cy = r.y + r.height / 2;
+                return Math.hypot(cx - sx, cy - sy) > 3;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 10000 },
+            dragStart.x,
+            dragStart.y,
+          );
+          dragMoved = true;
+        } catch {
+          dragMoved = false;
+        }
+      }
+      const dragAfter = await page.evaluate(() => {
+        try {
+          const el = document.querySelector('[data-crop-handle="tl"]');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: Math.round(r.x), y: Math.round(r.y) };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner corner drag MOVES a handle',
+        dragMoved && dragStart !== null && dragAfter !== null,
+        JSON.stringify({ before: dragStart, after: dragAfter }),
+      );
+      const kbResult = await exerciseScanicHandles(page, 'tr', 'ArrowRight');
+      check(
+        'scanner keyboard arrows move a corner',
+        kbResult.moved === true,
+        JSON.stringify(kbResult),
+      );
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')].find((b) => b.textContent === 'Apply')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let appliedBack = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              return (
+                document.querySelector('[data-crop-result]') !== null &&
+                document.querySelectorAll('[data-crop-handle]').length === 0
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        appliedBack = true;
+      } catch {
+        appliedBack = false;
+      }
+      check('scanner Apply returns to result', appliedBack);
+      // Use-original is a per-page review action: measure it HERE, while the
+      // review buttons are visible. After the next Looks-good (last page) the
+      // end screen replaces them and the button is legitimately absent.
+      const touchEnd = await page.evaluate(() => {
+        try {
+          const btn = [...document.querySelectorAll('button')].find(
+            (b) => b.textContent === 'Use original',
+          );
+          if (!btn) return 'absent';
+          const r = btn.getBoundingClientRect();
+          return { w: Math.round(r.width), h: Math.round(r.height) };
+        } catch {
+          return 'error';
+        }
+      });
+      check(
+        'scanner touch target meets 44px (Use-original)',
+        touchEnd !== null && typeof touchEnd === 'object' && touchEnd.w >= 44 && touchEnd.h >= 44,
+        JSON.stringify(touchEnd),
+      );
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent === 'Looks good')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let endScreen = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+              return labels.includes('Build PDF') && labels.includes('Back to camera');
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        endScreen = true;
+      } catch {
+        endScreen = false;
+      }
+      check('scanner end screen offers Build PDF + Back to camera', endScreen);
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent === 'Build PDF')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      // Done-screen Build PDF commits + exits to the Images tool; the tool's
+      // own build button starts the engine job (same pattern as the main
+      // Images section — the download link only exists after it).
+      await page.waitForFunction(
+        () => {
+          try {
+            return (
+              document.querySelector('[data-scanner-root]') === null &&
+              [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].length >= 2
+            );
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 60000 },
+      );
+      await page.evaluate(() => {
+        try {
+          [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.startsWith('Build PDF'))
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              return document.querySelector('a[aria-label="Download PDF"]') !== null;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 300000 },
+        );
+      } catch {
+        /* probed below */
+      }
+      await page.evaluate(() => {
+        try {
+          document.querySelector('a[aria-label="Download PDF"]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      const scanPdf = await waitForCapturedDownload(page, 120000);
+      const scanOrder = await page.evaluate(() => {
+        try {
+          const text = document.body.innerText;
+          const names = [...text.matchAll(/scan-\d{3}\.jpg/gi)].map((m) => m[0].toLowerCase());
+          return names.slice(0, 8);
+        } catch {
+          return null;
+        }
+      });
+      const ordered =
+        scanOrder !== null &&
+        scanOrder.length >= 2 &&
+        scanOrder[0] <= scanOrder[1] &&
+        new Set(scanOrder).size === scanOrder.length;
+      check(
+        'scanner Build PDF yields real PDF with scan-NNN.jpg pages in order',
+        scanPdf !== null && scanPdf.magic === '%PDF-' && ordered,
+        scanPdf ? `${scanPdf.name} ${JSON.stringify(scanOrder)}` : JSON.stringify(scanOrder),
+      );
+      if (consoleErrors.length > 0)
+        console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
+      await page.close();
+      await scanBrowser.close();
+    }
+    // Scanner-denied state on the flagless main browser (headless, no camera):
+    // honest failure, and uploads still work.
+    {
+      const denied = await newPage(browser);
+      await gotoTool(denied.page, 'images');
+      await denied.page.evaluate(() => {
+        try {
+          document.querySelector('[data-scan-open]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let deniedHonest = false;
+      try {
+        await denied.page.waitForFunction(
+          () => {
+            try {
+              return /no camera found|denied|could-not-start|could not start/i.test(
+                document.body.innerText,
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        deniedHonest = true;
+      } catch {
+        deniedHonest = false;
+      }
+      check('scanner-denied state fails honestly with no camera', deniedHonest);
+      const red = path.join(__dirname, 'fixtures', 'red-wide.png');
+      await upload(denied.page, 'input[type="file"]', [red]);
+      let deniedUpload = false;
+      try {
+        await denied.page.waitForFunction(
+          () => {
+            try {
+              return (
+                document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length >= 1
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 120000 },
+        );
+        deniedUpload = true;
+      } catch {
+        deniedUpload = false;
+      }
+      check('scanner-denied uploads still work', deniedUpload);
+      if (denied.consoleErrors.length > 0)
+        console.log(`[section-errors] ${denied.consoleErrors.join(' | ').slice(0, 500)}`);
+      await denied.page.close();
+    }
   }
 
   // ---- Compress: disabled with future note ----

@@ -4,8 +4,10 @@
  * for the sharded build downstream. Sharding semantics themselves are
  * owned by `imageSharding.test.ts` and are untouched here.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { preStageShardEstimate, stageImagePages } from './ImagesTool';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import ImagesTool, { preStageShardEstimate, stageImagePages } from './ImagesTool';
 import { createPage } from './imagePages';
 import type { ImageRenderer } from './imagePrepare';
 
@@ -100,5 +102,29 @@ describe('preStageShardEstimate', () => {
     // Below the shard threshold the page-count gate decides first:
     // pre-stage and post-stage evaluations agree — behavior identical.
     expect(preStageShardEstimate(pages).shards).toBe(1);
+  });
+});
+
+describe('camera entry (scanic reintegration)', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('opens the scanner from the entry-card Scan tile', () => {
+    render(createElement(ImagesTool));
+    const open = document.querySelector('[data-scan-open]');
+    expect(open).not.toBeNull();
+    fireEvent.click(open as HTMLElement);
+    expect(document.querySelector('[data-scanner-root]')).not.toBeNull();
+  });
+
+  it('closes the scanner without touching the empty collection', () => {
+    render(createElement(ImagesTool));
+    fireEvent.click(document.querySelector('[data-scan-open]') as HTMLElement);
+    expect(document.querySelector('[data-scanner-root]')).not.toBeNull();
+    fireEvent.click(screen.getByLabelText('Close scanner'));
+    expect(document.querySelector('[data-scanner-root]')).toBeNull();
+    // Still the empty entry card — no pages were added.
+    expect(screen.getByText(/decode one at a time/)).toBeTruthy();
   });
 });

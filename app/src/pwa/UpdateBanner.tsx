@@ -74,21 +74,23 @@ export default function UpdateBanner() {
 /**
  * Busy guard for deferred updates. There is no global StudioJob registry
  * (job handles stay tool-local by design), so this observes the
- * native-picker import progress marker in the DOM. The scanner-root
- * marker (camera live / review open) was removed with the D33 scanner
- * strip; the scanic integration wave re-arms a scanner marker through
- * this same query. No new stores — presence is read from state the
- * surface already publishes, via MutationObserver so the banner copy
- * defers the moment a session starts.
+ * native-picker import progress marker in the DOM. The scanner marker
+ * (`[data-scanner-root]`, camera live / review open) was re-armed here in
+ * the D33 scanic reintegration: while the scanner is mounted, the banner
+ * copy defers instead of pushing the user toward a reload mid-session.
+ * No new stores — presence is read from state the surfaces already
+ * publish, via MutationObserver so the banner copy defers the moment a
+ * session starts.
  */
 function useBusyGuard(): boolean {
   const [busy, setBusy] = useState<boolean>(() =>
     typeof document === 'undefined'
       ? false
-      : document.querySelector('[data-import-progress]') !== null,
+      : document.querySelector('[data-scanner-root],[data-import-progress]') !== null,
   );
   useEffect(() => {
-    const check = () => setBusy(document.querySelector('[data-import-progress]') !== null);
+    const check = () =>
+      setBusy(document.querySelector('[data-scanner-root],[data-import-progress]') !== null);
     check();
     const observer = new MutationObserver(check);
     observer.observe(document.body, { childList: true, subtree: true });
