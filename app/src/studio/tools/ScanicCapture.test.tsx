@@ -11,7 +11,17 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import ScanicCapture, { SCANIC_ML_ASSET_BASE_URL, formatScanName } from './ScanicCapture';
+import ScanicCapture, {
+  AUTO_CAPTURE_COOLDOWN_MS,
+  AUTO_CAPTURE_MEAN_THRESHOLD,
+  AUTO_CAPTURE_STABLE_TICKS_REQUIRED,
+  AUTO_CAPTURE_TICK_MS,
+  SCANIC_ML_ASSET_BASE_URL,
+  formatScanName,
+  grayscaleSAD,
+  isStableFrame,
+  shouldAutoFire,
+} from './ScanicCapture';
 import { createCornerEditor, extractDocument, scanDocument } from 'scanic';
 import type { ScanicCorners } from './scan/index';
 
@@ -473,6 +483,149 @@ describe('corner editor', () => {
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     const reset = await screen.findByText('Reset to auto', { exact: true });
     expect((reset as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('auto capture stability shutter', () => {
+  it('grayscaleSAD sums absolute per-pixel differences', () => {
+    expect(grayscaleSAD(new Uint8Array([10, 20, 30]), new Uint8Array([10, 20, 30]))).toBe(0);
+    expect(grayscaleSAD(new Uint8Array([0, 0, 0]), new Uint8Array([1, 2, 3]))).toBe(6);
+    expect(grayscaleSAD(new Uint8Array([255, 0]), new Uint8Array([0, 255]))).toBe(510);
+  });
+
+  it('grayscaleSAD treats unreadable/mismatched frames as maximally different', () => {
+    expect(grayscaleSAD(new Uint8Array([1, 2]), new Uint8Array([1]))).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+    expect(grayscaleSAD(new Uint8Array([]), new Uint8Array([1]))).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('isStableFrame accepts steady frames up to the mean threshold', () => {
+    const pixels = 100;
+    // Static frame (SAD 0) counts as stable.
+    expect(isStableFrame(0, pixels)).toBe(true);
+    expect(isStableFrame(AUTO_CAPTURE_MEAN_THRESHOLD * pixels, pixels)).toBe(true);
+    expect(isStableFrame(AUTO_CAPTURE_MEAN_THRESHOLD * pixels + 1, pixels)).toBe(false);
+    expect(isStableFrame(Number.POSITIVE_INFINITY, pixels)).toBe(false);
+    expect(isStableFrame(0, 0)).toBe(false);
+  });
+
+  it('shouldAutoFire needs N consecutive ticks plus cooldown spacing', () => {
+    const n = AUTO_CAPTURE_STABLE_TICKS_REQUIRED;
+    expect(shouldAutoFire(n - 1, 10_000, null)).toBe(false);
+    expect(shouldAutoFire(n, 10_000, null)).toBe(true);
+    // Static-frame repeat inside the cooldown stays gated…
+    expect(shouldAutoFire(n, 10_000, 10_000 - (AUTO_CAPTURE_COOLDOWN_MS - 1))).toBe(false);
+    // …and fires once the cooldown has fully elapsed (boundary inclusive).
+    expect(shouldAutoFire(n, 10_000, 10_000 - AUTO_CAPTURE_COOLDOWN_MS)).toBe(true);
+    expect(shouldAutoFire(n + 3, 10_000, 10_000 - AUTO_CAPTURE_COOLDOWN_MS - 500)).toBe(true);
+  });
+});
+
+describe('capture mode + gallery cluster', () => {
+  it('defaults to Manual with an Auto capture option that never fires on its own', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const group = q('[data-scan-mode]');
+    expect(group.getAttribute('role')).toBe('group');
+    const manual = screen.getByText('Manual', { exact: true });
+    const auto = screen.getByText('Auto capture', { exact: true });
+    expect(manual.getAttribute('aria-pressed')).toBe('true');
+    expect(auto.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(auto);
+    expect(auto.getAttribute('aria-pressed')).toBe('true');
+    expect(manual.getAttribute('aria-pressed')).toBe('false');
+    // jsdom has no readable preview frames — nothing may self-queue.
+    await new Promise((r) => setTimeout(r, AUTO_CAPTURE_TICK_MS * 2 + 100));
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
+    fireEvent.click(manual);
+    expect(manual.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('gallery thumb shows the last queued page and jumps to review', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    // Empty queue: gallery exists but stays disabled.
+    expect((q('[data-scan-gallery]') as HTMLButtonElement).disabled).toBe(true);
+    injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
+    const gallery = await findQ('[data-scan-gallery]');
+    expect((gallery as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(gallery);
+    expect(await findQ('[data-scan-queue]')).toBeTruthy();
+    expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+  });
+
+  it('shows Scanning… hold steady while a capture is being detected', async () => {
+    mockLiveCamera();
+    // Never-resolving detection keeps the entry in `detecting`.
+    mockScan.mockReturnValue(new Promise(() => {}) as ReturnType<typeof scanDocument>);
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    injectFiles(photo('a.jpg', [9]));
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toBe('Scanning… hold steady');
+    });
+  });
+
+  it('dwells the working pill briefly after instant detection (readable, not a flash)', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // Default mock settles detection in milliseconds: sleep past the settle
+    // but inside the 800ms dwell, then the pill must STILL read working —
+    // without the dwell it would already read idle.
+    injectFiles(photo('a.jpg', [9]));
+    await new Promise((r) => setTimeout(r, 400));
+    expect(q('[data-finder-status]').textContent).toBe('Scanning… hold steady');
+  });
+});
+
+describe('review filmstrip + batch bar', () => {
+  it('renders numbered thumbs, add-back, and a gated Next that reaches done', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['png-bytes'], { type: 'image/png' }));
+    };
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    expect(q('[data-scan-filmstrip]')).toBeTruthy();
+    expect(document.body.querySelectorAll('[data-film-thumb]').length).toBe(2);
+    expect(q('[data-scan-add]').getAttribute('aria-label')).toBe('Back to camera');
+    expect(q('[data-batch-bar]')).toBeTruthy();
+    // Nothing accepted yet — Next stays disabled.
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+
+    // Accept one page, then jump back via the numbered thumb.
+    fireEvent.click(screen.getByText('Looks good', { exact: true }));
+    await screen.findByText('Page 2 of 2');
+    fireEvent.click(document.body.querySelectorAll('[data-film-thumb]')[0] as HTMLElement);
+    await screen.findByText('Page 1 of 2');
+
+    // One acceptance gates Next open; Next reaches the done screen.
+    const next = screen.getByText('Next', { exact: true }) as HTMLButtonElement;
+    expect(next.disabled).toBe(false);
+    fireEvent.click(next);
+    await screen.findByText('All pages ready');
+  });
+
+  it('Discard scans drops everything back to the camera, confirm-free', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    expect(q('[data-batch-bar]')).toBeTruthy();
+    fireEvent.click(screen.getByText('Discard scans', { exact: true }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-scan-queue]')).toBeNull();
+    });
+    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
+  });
+
+  it('[data-scan-add] returns to the camera without losing the queue', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    fireEvent.click(q('[data-scan-add]'));
+    await findQ('[data-scan-capture]');
+    expect(q('[data-review-cta]').textContent).toBe('Review 1 pages');
   });
 });
 

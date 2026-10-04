@@ -1,7 +1,7 @@
 /**
- * ScanicReview tests: detect-overlay quad tracks the `corners` prop,
+ * ScanicReview tests: processed-first hero, adjust-only quad overlay,
  * adjust-mode drag/keyboard editing, Apply/Re-detect emissions, Reset
- * gating, and the reactive result-strip image.
+ * gating, use-original verdict chip, and the reactive result-strip image.
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -49,16 +49,49 @@ function enterAdjust() {
 }
 
 describe('ScanicReview', () => {
-  it('draws the ML-found quad over the original photo and tracks prop corners', () => {
+  it('shows the processed auto-crop in the hero, never the raw photo', () => {
+    const { container, rerender } = render(<ScanicReview {...baseProps()} />);
+    const hero = container.querySelector('[data-detect-overlay]');
+    expect(hero).not.toBeNull();
+    // No quad outline outside adjust mode — the hero is the result.
+    expect(hero?.querySelector('polygon')).toBeNull();
+    expect(hero?.querySelector('img')?.getAttribute('src')).toBe('warped.jpg');
+
+    rerender(<ScanicReview {...baseProps({ warpedUrl: 'warped-2.jpg' })} />);
+    expect(container.querySelector('[data-detect-overlay] img')?.getAttribute('src')).toBe(
+      'warped-2.jpg',
+    );
+    expect(container.querySelector('[data-detect-overlay] polygon')).toBeNull();
+
+    // No warp yet: the photo stands in with a processing state, still no quad.
+    rerender(<ScanicReview {...baseProps({ warpedUrl: null })} />);
+    expect(container.querySelector('[data-detect-overlay] img')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
+    expect(container.querySelector('[data-detect-overlay] polygon')).toBeNull();
+  });
+
+  it('shows the ML-found quad only inside adjust mode, seeded from prop corners', () => {
     const { container, rerender } = render(<ScanicReview {...baseProps()} />);
     const overlay = container.querySelector('[data-detect-overlay]');
-    expect(overlay).not.toBeNull();
-    const polygon = overlay?.querySelector('polygon');
-    expect(polygon?.getAttribute('points')).toBe('10,10 90,10 90,90 10,90');
+    expect(overlay?.querySelector('polygon')).toBeNull();
+
+    enterAdjust();
+    expect(overlay?.querySelector('polygon')?.getAttribute('points')).toBe(
+      '10,10 90,10 90,90 10,90',
+    );
+
+    // Leaving adjust mode hides the outline again; re-entering seeds fresh
+    // corners from the prop (post-Apply / post-Re-detect values).
+    const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+    fireEvent.keyDown(tl, { key: 'Escape' });
+    expect(overlay?.querySelector('polygon')).toBeNull();
 
     const next = detectedCorners();
     next.topLeft = { x: 20, y: 25 };
     rerender(<ScanicReview {...baseProps({ corners: next })} />);
+    expect(overlay?.querySelector('polygon')).toBeNull();
+    enterAdjust();
     expect(overlay?.querySelector('polygon')?.getAttribute('points')).toBe(
       '20,25 90,10 90,90 10,90',
     );
@@ -69,6 +102,29 @@ describe('ScanicReview', () => {
     const overlay = container.querySelector('[data-detect-overlay]');
     expect(overlay?.querySelector('polygon')).toBeNull();
     expect(screen.getByText('Auto-detect found no page — adjust to crop manually.')).toBeTruthy();
+  });
+
+  it('shows a processing state when corners exist but no warp yet', () => {
+    const { container } = render(<ScanicReview {...baseProps({ warpedUrl: null })} />);
+    expect(container.querySelector('[data-detect-overlay] img')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
+    expect(screen.getByText('Processing auto-crop…')).toBeTruthy();
+  });
+
+  it('Use original swaps the hero to the unprocessed photo with an honest chip', () => {
+    const props = baseProps();
+    const { container } = render(<ScanicReview {...props} />);
+    expect(container.querySelector('[data-detect-overlay] img')?.getAttribute('src')).toBe(
+      'warped.jpg',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Use original' }));
+    expect(props.onUseOriginal).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-detect-overlay] img')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
+    expect(screen.getByText('Original photo — unprocessed')).toBeTruthy();
+    expect(container.querySelector('[data-detect-overlay] polygon')).toBeNull();
   });
 
   it('shows a Preparing skeleton while detecting', () => {

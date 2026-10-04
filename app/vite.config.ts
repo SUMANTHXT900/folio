@@ -91,6 +91,8 @@ export default defineConfig({
   ],
   define: {
     __FOLIO_VERSION__: JSON.stringify(version),
+    // Stamped when the dev server / build config loads (D36 dev-channel card).
+    __FOLIO_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
   },
   server: {
     port: 5173,

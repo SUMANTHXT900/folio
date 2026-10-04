@@ -1,13 +1,20 @@
 /**
- * ScanicReview — result-FIRST review card for one scanned page.
+ * ScanicReview — processed-FIRST review card for one scanned page.
  *
- * The hero is the answer to the review complaint: the ORIGINAL photo with
- * the DETECTED QUAD drawn over it ("this is what ML found"), then the
- * user's verdict. The overlay derives from the `corners` prop on every
- * render, so a parent re-render with new corners/warpedUrl (after Apply or
- * Re-detect) updates the outline and the result strip with zero extra
- * wiring. Local state is only the in-progress adjust draft, reseeded from
- * `photoUrl` (a new page is a fresh seed).
+ * The hero is the answer to the review complaint: the PROCESSED auto-crop
+ * result (`warpedUrl`) when one exists, else the original photo with an
+ * honest detecting/processing state — the original photo is never the hero.
+ * The ML-found quad (dim surround + polygon) lives ONLY inside crop-adjust
+ * mode, where it is drawn from the live adjust draft. The draft reseeds
+ * from the `corners` prop on every entry into adjust mode (full-frame
+ * fallback when `corners` is null), and a new `photoUrl` (a new page)
+ * resets all local state.
+ *
+ * "Use original" flips the hero to the untouched photo behind an explicit
+ * "Original photo — unprocessed" chip so the verdict is visible, not
+ * implied; Looks-good after that still warps the current corners via the
+ * unchanged parent callback. There is no enhance/filter pipeline, so no
+ * such buttons exist here.
  *
  * Runtime-dependency-free: no scanic worker/client import (type-only
  * `ScanicCorners` from `./scan/index`), pointer drag on the SVG-overlay
@@ -16,7 +23,8 @@
  * no `AnimatePresence` inside.
  *
  * DOM contract (E2E continuity):
- * - hero `[data-detect-overlay]` (SVG quad polygon + dimmed surround),
+ * - hero `[data-detect-overlay]` (processed-first image; quad polygon only
+ *   in adjust mode),
  * - result `[data-crop-result]` + `img [data-crop-result-img]`,
  * - handles `[data-crop-handle="tl|tr|br|bl"]` (role=slider),
  * - progress `p [data-review-progress]`, re-detect `[data-redetect]`.
@@ -132,13 +140,15 @@ export default function ScanicReview({
 }: ScanicReviewProps) {
   const [adjusting, setAdjusting] = useState(false);
   const [draft, setDraft] = useState<ScanicCorners | null>(null);
+  const [useOriginalView, setUseOriginalView] = useState(false);
   const heroRef = useRef<HTMLDivElement>(null);
   const dragKeyRef = useRef<HandleKey | null>(null);
 
-  // New page = fresh seed: leave no adjust state behind.
+  // New page = fresh seed: leave no adjust or verdict state behind.
   useEffect(() => {
     setAdjusting(false);
     setDraft(null);
+    setUseOriginalView(false);
   }, [photoUrl]);
 
   const safeW = imageWidth > 0 ? imageWidth : 1;
@@ -188,10 +198,26 @@ export default function ScanicReview({
     };
   };
 
-  // The drawn outline: the live draft while adjusting, else the prop quad.
-  // Post-Apply the parent re-renders with fresh `corners`, which is what
-  // paints here — no extra wiring.
-  const shown: ScanicCorners | null = adjusting ? draft : corners;
+  const applyDraft = () => {
+    if (draft !== null) onAdjustApply(cloneCorners(draft));
+    setAdjusting(false);
+    setDraft(null);
+    // A fresh warp follows: the processed result is the hero again.
+    setUseOriginalView(false);
+  };
+
+  const chooseOriginal = () => {
+    setUseOriginalView(true);
+    setAdjusting(false);
+    setDraft(null);
+    onUseOriginal();
+  };
+
+  const redetect = () => {
+    setUseOriginalView(false);
+    onRedetect();
+  };
+
   const resultSrc = warpedUrl ?? photoUrl;
 
   const verdictDisabled = detecting;
@@ -209,7 +235,8 @@ export default function ScanicReview({
         </p>
       </div>
 
-      {/* Hero: original photo + ML-found outline. */}
+      {/* Hero: processed-first — the auto-crop result, never the raw photo.
+          The quad outline renders ONLY in adjust mode (below). */}
       <div
         ref={heroRef}
         data-detect-overlay
@@ -222,130 +249,170 @@ export default function ScanicReview({
           >
             Preparing…
           </p>
-        ) : (
+        ) : adjusting && draft !== null ? (
           <>
             <img
               src={photoUrl}
-              alt="Original capture with detected page outline"
+              alt="Original photo with adjustable crop outline"
+              data-hero-img
               className="block max-h-[50dvh] w-full object-contain"
               draggable={false}
             />
-            {shown !== null ? (
-              <svg
-                viewBox={`0 0 ${safeW} ${safeH}`}
-                preserveAspectRatio="none"
-                aria-hidden={!adjusting}
-                aria-label={adjusting ? undefined : 'Detected page outline'}
-                className="pointer-events-none absolute inset-0 h-full w-full"
-              >
-                <path
-                  d={
-                    `M0 0H${safeW}V${safeH}H0Z ` +
-                    `M${shown.topLeft.x} ${shown.topLeft.y}` +
-                    `L${shown.topRight.x} ${shown.topRight.y}` +
-                    `L${shown.bottomRight.x} ${shown.bottomRight.y}` +
-                    `L${shown.bottomLeft.x} ${shown.bottomLeft.y}Z`
-                  }
-                  fill="rgba(23, 19, 14, 0.55)"
-                  fillRule="evenodd"
-                />
-                <polygon
-                  points={quadPointsAttr(shown)}
-                  fill="none"
+            <svg
+              viewBox={`0 0 ${safeW} ${safeH}`}
+              preserveAspectRatio="none"
+              aria-hidden={false}
+              aria-label="Adjustable crop outline"
+              className="pointer-events-none absolute inset-0 h-full w-full"
+            >
+              <path
+                d={
+                  `M0 0H${safeW}V${safeH}H0Z ` +
+                  `M${draft.topLeft.x} ${draft.topLeft.y}` +
+                  `L${draft.topRight.x} ${draft.topRight.y}` +
+                  `L${draft.bottomRight.x} ${draft.bottomRight.y}` +
+                  `L${draft.bottomLeft.x} ${draft.bottomLeft.y}Z`
+                }
+                fill="rgba(23, 19, 14, 0.55)"
+                fillRule="evenodd"
+              />
+              <polygon
+                points={quadPointsAttr(draft)}
+                fill="none"
+                stroke="#c97a1f"
+                strokeWidth={Math.max(safeW, safeH) * 0.004}
+                strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
+              />
+              {(['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const).map((name) => (
+                <circle
+                  key={name}
+                  cx={draft[name].x}
+                  cy={draft[name].y}
+                  r={Math.max(safeW, safeH) * 0.008}
+                  fill="#fdfbf7"
                   stroke="#c97a1f"
-                  strokeWidth={Math.max(safeW, safeH) * 0.004}
-                  strokeLinejoin="round"
+                  strokeWidth={Math.max(safeW, safeH) * 0.003}
                   vectorEffect="non-scaling-stroke"
                 />
-                {(['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const).map((name) => (
-                  <circle
-                    key={name}
-                    cx={shown[name].x}
-                    cy={shown[name].y}
-                    r={Math.max(safeW, safeH) * 0.008}
-                    fill="#fdfbf7"
-                    stroke="#c97a1f"
-                    strokeWidth={Math.max(safeW, safeH) * 0.003}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                ))}
-              </svg>
-            ) : (
+              ))}
+            </svg>
+            <div className="absolute inset-0">
+              {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
+                const corner = HANDLE_TO_CORNER[key];
+                const point = draft[corner];
+                const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
+                const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    data-crop-handle={key}
+                    role="slider"
+                    aria-label={CORNER_LABEL[corner]}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pctX}
+                    aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
+                    style={{
+                      left: `${(point.x / safeW) * 100}%`,
+                      top: `${(point.y / safeH) * 100}%`,
+                      touchAction: 'none',
+                    }}
+                    className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      dragKeyRef.current = key;
+                      try {
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                      } catch {
+                        // jsdom / browsers without pointer capture: move
+                        // events still fire on the element while pressed.
+                      }
+                    }}
+                    onPointerMove={(e) => {
+                      if (dragKeyRef.current !== key) return;
+                      if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
+                      const p = clientToImage(e.clientX, e.clientY);
+                      moveCorner(key, p.x, p.y);
+                    }}
+                    onPointerUp={() => {
+                      dragKeyRef.current = null;
+                    }}
+                    onPointerCancel={() => {
+                      dragKeyRef.current = null;
+                    }}
+                    onKeyDown={(e) => {
+                      const delta = e.shiftKey ? 10 : 1;
+                      if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        stepCorner(key, -delta, 0);
+                      } else if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        stepCorner(key, delta, 0);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        stepCorner(key, 0, -delta);
+                      } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        stepCorner(key, 0, delta);
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelAdjust();
+                      }
+                    }}
+                  >
+                    <span aria-hidden className="h-2.5 w-2.5 rounded-full bg-brass-400" />
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        ) : useOriginalView ? (
+          <div className="relative">
+            <img
+              src={photoUrl}
+              alt="Original photo — unprocessed"
+              data-hero-img
+              className="block max-h-[50dvh] w-full object-contain"
+              draggable={false}
+            />
+            <p className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50">
+              Original photo — unprocessed
+            </p>
+          </div>
+        ) : warpedUrl !== null ? (
+          <>
+            <img
+              src={warpedUrl}
+              alt="Auto-cropped page preview"
+              data-hero-img
+              className="block max-h-[50dvh] w-full object-contain"
+              draggable={false}
+            />
+            {corners === null && (
               <p className="px-4 py-2 text-center text-xs text-paper-100/90">
                 Auto-detect found no page — adjust to crop manually.
               </p>
             )}
-            {adjusting && draft !== null && (
-              <div className="absolute inset-0">
-                {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
-                  const corner = HANDLE_TO_CORNER[key];
-                  const point = draft[corner];
-                  const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
-                  const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      data-crop-handle={key}
-                      role="slider"
-                      aria-label={CORNER_LABEL[corner]}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={pctX}
-                      aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                      style={{
-                        left: `${(point.x / safeW) * 100}%`,
-                        top: `${(point.y / safeH) * 100}%`,
-                        touchAction: 'none',
-                      }}
-                      className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-brass-400 bg-paper-50 text-ink-900 shadow-soft"
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        dragKeyRef.current = key;
-                        try {
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                        } catch {
-                          // jsdom / browsers without pointer capture: move
-                          // events still fire on the element while pressed.
-                        }
-                      }}
-                      onPointerMove={(e) => {
-                        if (dragKeyRef.current !== key) return;
-                        if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
-                        const p = clientToImage(e.clientX, e.clientY);
-                        moveCorner(key, p.x, p.y);
-                      }}
-                      onPointerUp={() => {
-                        dragKeyRef.current = null;
-                      }}
-                      onPointerCancel={() => {
-                        dragKeyRef.current = null;
-                      }}
-                      onKeyDown={(e) => {
-                        const delta = e.shiftKey ? 10 : 1;
-                        if (e.key === 'ArrowLeft') {
-                          e.preventDefault();
-                          stepCorner(key, -delta, 0);
-                        } else if (e.key === 'ArrowRight') {
-                          e.preventDefault();
-                          stepCorner(key, delta, 0);
-                        } else if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          stepCorner(key, 0, -delta);
-                        } else if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          stepCorner(key, 0, delta);
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          cancelAdjust();
-                        }
-                      }}
-                    >
-                      <span aria-hidden className="h-2.5 w-2.5 rounded-full bg-brass-400" />
-                    </button>
-                  );
-                })}
-              </div>
+          </>
+        ) : (
+          <>
+            <img
+              src={photoUrl}
+              alt="Original capture"
+              data-hero-img
+              className="block max-h-[50dvh] w-full object-contain"
+              draggable={false}
+            />
+            {corners === null ? (
+              <p className="px-4 py-2 text-center text-xs text-paper-100/90">
+                Auto-detect found no page — adjust to crop manually.
+              </p>
+            ) : (
+              <p role="status" className="px-4 py-2 text-center text-xs text-paper-100/70">
+                Processing auto-crop…
+              </p>
             )}
           </>
         )}
@@ -401,11 +468,7 @@ export default function ScanicReview({
           <>
             <button
               type="button"
-              onClick={() => {
-                if (draft !== null) onAdjustApply(cloneCorners(draft));
-                setAdjusting(false);
-                setDraft(null);
-              }}
+              onClick={applyDraft}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >
               Apply
@@ -429,7 +492,7 @@ export default function ScanicReview({
           type="button"
           data-redetect
           disabled={redetecting}
-          onClick={onRedetect}
+          onClick={redetect}
           className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-wait disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
         >
           Re-detect
@@ -437,7 +500,7 @@ export default function ScanicReview({
         <button
           type="button"
           disabled={verdictDisabled}
-          onClick={onUseOriginal}
+          onClick={chooseOriginal}
           className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
         >
           Use original

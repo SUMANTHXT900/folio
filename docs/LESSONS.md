@@ -98,6 +98,12 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Why it matters.** (1) Dev/prod asset asymmetry is invisible to every gate except a real browser: typecheck, lint, unit, and build all stayed green while dev-only ML silently ran classical. (2) Treating "no result" as success short-circuits detector cascades — every fallback policy must trigger on null results, not just exceptions.
 - **Rule.** Vendored runtime-loaded assets need a dev-serving story verified in a real browser (not just a passing build); detector fallbacks trigger on null/empty results exactly like on throws. Evidence: `app/vite.config.ts`, `ScanicCapture.tsx` detectEntry, D35 54/56 → 56/56.
 
+## L-19 — Copy the interaction grammar users already know
+
+- **Observation.** The D36 redo replaced the D35 overlay-hero review (photo + ML-found quad as the hero) with the Google-Drive-scan pattern the user supplied screenshots of: capture → processed-result review → crop-as-mode → batch commit.
+- **Why it matters.** Novelty in scan UX reads as brokenness — the D35 overlay hero made the raw photo + quad the chore instead of showing what you get.
+- **Rule.** Copy the interaction grammar users already know (capture → processed review → crop-as-mode → batch commit); novelty in scan UX reads as brokenness. Evidence: user-supplied Drive screenshots analyzed 2026-10-04 vs D35 overlay-hero rejection; `docs/DECISIONS.md` D36.
+
 ## L-14 — Vite `server.fs.allow` overrides the default app-root allowance
 
 - **Observation.** The D33 strip agent narrowed `vite.config.ts`'s `server.fs.allow` from `['..']` to `['../wasm']` while removing the deleted `scan/pkg` allowance. Because an explicit `fs.allow` list _replaces_ Vite's implicit allowance of the project root, every dev-server request for the app's own files (`index.html`, `/assets/...`) returned `403 Restricted — outside of Vite serving allow list`; the app never mounted (empty `#root`, zero links) and the canonical E2E died at the first `a[href="#/merge"]` wait with no console errors to point at it. Unit tests, typecheck, and lint all stayed green — only the real browser saw it.

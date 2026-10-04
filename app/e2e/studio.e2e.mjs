@@ -452,6 +452,39 @@ async function main() {
       updateCard.hasCard && updateCard.localStatus && updateCard.noBanner,
       JSON.stringify(updateCard),
     );
+    // Scanner-contract dev card: localhost-only assertion (never against
+    // non-local runs). Fails honestly when the card is absent.
+    const isLocalhost = /localhost|127\.0\.0\.1/.test(DEV_URL);
+    if (!isLocalhost) {
+      skip(
+        'about dev channel card shows version + build-time + notes',
+        'non-localhost run (channel card asserts localhost only)',
+      );
+    } else {
+      const devChannel = await page.evaluate(() => {
+        try {
+          const card = document.querySelector('[data-dev-channel]');
+          if (!card) return null;
+          const text = card.textContent ?? '';
+          return {
+            text: text.slice(0, 300),
+            hasVersion: /v?\d+\.\d+/.test(text),
+            hasBuildTime: /build|built|\d{4}[-/]\d{2}[-/]\d{2}|\d{1,2}:\d{2}/i.test(text),
+            hasNotes: text.trim().length >= 60,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'about dev channel card shows version + build-time + notes on localhost',
+        devChannel !== null &&
+          devChannel.hasVersion &&
+          devChannel.hasBuildTime &&
+          devChannel.hasNotes,
+        JSON.stringify(devChannel),
+      );
+    }
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -1202,6 +1235,175 @@ async function main() {
         mirrorFlip !== null && mirrorFlip.flipped === true,
         JSON.stringify(mirrorFlip),
       );
+      // Capture top bar (Google-style): close + title asserted strictly; flash
+      // control probed into details (fake-camera devices may not expose torch,
+      // so its absence is reported, not failed on).
+      const topBar = await page.evaluate(() => {
+        try {
+          const root = document.querySelector('[data-scanner-root]');
+          const closeBtn =
+            root?.querySelector('[aria-label="Close scanner"]') ??
+            [...document.querySelectorAll('button')].find((b) => b.textContent === '✕');
+          const title = root?.textContent ?? '';
+          const flashFound = [...(root?.querySelectorAll('button') ?? [])].some((b) =>
+            /flash|torch/i.test(`${b.textContent ?? ''} ${b.getAttribute('aria-label') ?? ''}`),
+          );
+          return {
+            closePresent: closeBtn !== null && closeBtn !== undefined,
+            titlePresent: /Scan documents/.test(title),
+            flashFound,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner top bar has close + title (flash probe in details)',
+        topBar !== null && topBar.closePresent && topBar.titlePresent,
+        JSON.stringify(topBar),
+      );
+      // Capture mode segmented control: Manual default, Auto selectable (click
+      // Auto and assert selected — never wait for auto-fire on synthetic feed),
+      // then restore Manual so the captures below stay deterministic.
+      const readMode = () => {
+        try {
+          const seg = document.querySelector('[data-scan-mode]');
+          if (!seg) return null;
+          const btns = [...seg.querySelectorAll('button')];
+          const isSel = (b) =>
+            b.getAttribute('aria-pressed') === 'true' ||
+            b.getAttribute('aria-checked') === 'true' ||
+            b.getAttribute('aria-selected') === 'true' ||
+            b.getAttribute('data-selected') === 'true' ||
+            b.classList.contains('active');
+          return {
+            options: btns.map((b) => b.textContent?.trim() ?? ''),
+            selected: btns.filter(isSel).map((b) => b.textContent?.trim() ?? ''),
+          };
+        } catch {
+          return null;
+        }
+      };
+      const modeDefault = await page.evaluate(readMode);
+      check(
+        'scanner capture mode defaults to Manual',
+        modeDefault !== null &&
+          modeDefault.options.includes('Manual') &&
+          modeDefault.options.some((o) => /Auto/.test(o)) &&
+          modeDefault.selected.includes('Manual'),
+        JSON.stringify(modeDefault),
+      );
+      await page.evaluate(() => {
+        try {
+          const seg = document.querySelector('[data-scan-mode]');
+          [...(seg?.querySelectorAll('button') ?? [])]
+            .find((b) => /Auto/.test(b.textContent ?? ''))
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let autoWaited = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const seg = document.querySelector('[data-scan-mode]');
+              if (!seg) return false;
+              const auto = [...seg.querySelectorAll('button')].find((b) =>
+                /Auto/.test(b.textContent ?? ''),
+              );
+              if (!auto) return false;
+              return (
+                auto.getAttribute('aria-pressed') === 'true' ||
+                auto.getAttribute('aria-checked') === 'true' ||
+                auto.getAttribute('aria-selected') === 'true' ||
+                auto.getAttribute('data-selected') === 'true' ||
+                auto.classList.contains('active')
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10000 },
+        );
+        autoWaited = true;
+      } catch {
+        autoWaited = false;
+      }
+      const modeAfterAuto = await page.evaluate(readMode);
+      check(
+        'scanner Auto capture is selectable (no auto-fire wait)',
+        autoWaited && modeAfterAuto !== null && modeAfterAuto.selected.some((s) => /Auto/.test(s)),
+        JSON.stringify(modeAfterAuto),
+      );
+      await page.evaluate(() => {
+        try {
+          const seg = document.querySelector('[data-scan-mode]');
+          [...(seg?.querySelectorAll('button') ?? [])]
+            .find((b) => (b.textContent?.trim() ?? '') === 'Manual')
+            ?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const seg = document.querySelector('[data-scan-mode]');
+              if (!seg) return false;
+              const manual = [...seg.querySelectorAll('button')].find(
+                (b) => (b.textContent?.trim() ?? '') === 'Manual',
+              );
+              if (!manual) return false;
+              return (
+                manual.getAttribute('aria-pressed') === 'true' ||
+                manual.getAttribute('aria-checked') === 'true' ||
+                manual.getAttribute('aria-selected') === 'true' ||
+                manual.getAttribute('data-selected') === 'true' ||
+                manual.classList.contains('active')
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10000 },
+        );
+      } catch {
+        /* measured implicitly by the captures below staying manual */
+      }
+      // Big shutter (live only — live-only absence is covered by the review
+      // phase check asserting liveCaptureAbsent).
+      const shutterSize = await page.evaluate(() => {
+        try {
+          const btn = document.querySelector('[data-scan-capture]');
+          if (!btn) return null;
+          const r = btn.getBoundingClientRect();
+          return { w: Math.round(r.width), h: Math.round(r.height) };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner capture button is big (>=64px)',
+        shutterSize !== null && shutterSize.w >= 64 && shutterSize.h >= 64,
+        JSON.stringify(shutterSize),
+      );
+      const pillLive = await page.evaluate(() => {
+        try {
+          const pill = document.querySelector('[data-finder-status]');
+          const text = pill?.textContent?.trim() ?? '';
+          return { present: pill !== null, nonEmpty: text.length > 0, text: text.slice(0, 80) };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner status pill is non-empty while live',
+        pillLive !== null && pillLive.present && pillLive.nonEmpty,
+        JSON.stringify(pillLive),
+      );
       await scanCaptureOnce(page);
       // The camera-phase strip is `[data-scan-strip]` (thumbs); the
       // `[data-scan-queue]` review surface renders only after the Review CTA
@@ -1217,6 +1419,72 @@ async function main() {
           }
         },
         { timeout: 30000 },
+      );
+      // Status pill while detecting/processing: the capture above dispatched,
+      // now wait for the transient pill, then measure in a later evaluate.
+      let holdSteadyWaited = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              return /hold steady/i.test(document.body.innerText ?? '');
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 15000 },
+        );
+        holdSteadyWaited = true;
+      } catch {
+        holdSteadyWaited = false;
+      }
+      const pillDetecting = await page.evaluate(() => {
+        try {
+          const els = [...document.querySelectorAll('[data-finder-status], [role="status"]')];
+          const texts = els.map((e) => e.textContent?.trim() ?? '');
+          return {
+            texts: texts.map((t) => t.slice(0, 80)),
+            anyHoldSteady: texts.some((t) => /hold steady/i.test(t)),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner status pill shows Scanning… hold steady while detecting',
+        holdSteadyWaited && pillDetecting !== null && pillDetecting.anyHoldSteady === true,
+        JSON.stringify(pillDetecting),
+      );
+      // Gallery thumb after a capture (fails honestly when the reworked
+      // capture screen omits it).
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const g = document.querySelector('[data-scan-gallery]');
+              return g !== null && g.querySelectorAll('img,button').length >= 1;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 15000 },
+        );
+      } catch {
+        /* measured below */
+      }
+      const galleryState = await page.evaluate(() => {
+        try {
+          const g = document.querySelector('[data-scan-gallery]');
+          if (!g) return null;
+          return { thumbs: g.querySelectorAll('img,button').length };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner gallery thumb appears after a capture',
+        galleryState !== null && galleryState.thumbs >= 1,
+        JSON.stringify(galleryState),
       );
       await scanCaptureOnce(page);
       await page.waitForFunction(
@@ -1304,6 +1572,136 @@ async function main() {
           queuePhase.liveCaptureAbsent,
         JSON.stringify(queuePhase),
       );
+      // Reworked review chrome: filmstrip with numbered thumbs + add button,
+      // batch bar with Discard scans + Next. All fail honestly when absent.
+      const filmState = await page.evaluate(() => {
+        try {
+          const film = document.querySelector('[data-scan-filmstrip]');
+          if (!film) return { filmPresent: false, addPresent: null };
+          const thumbs = [...film.querySelectorAll('[data-film-thumb]')];
+          const labels = thumbs.map((t) =>
+            (t.getAttribute('aria-label') ?? t.textContent ?? '').trim().slice(0, 40),
+          );
+          return {
+            filmPresent: true,
+            thumbCount: thumbs.length,
+            labels,
+            numbered: labels.some((l) => /1/.test(l)) && labels.some((l) => /2/.test(l)),
+            addPresent: document.querySelector('[data-scan-add]') !== null,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner filmstrip shows 2 numbered thumbs',
+        filmState !== null &&
+          filmState.filmPresent === true &&
+          filmState.thumbCount === 2 &&
+          filmState.numbered === true,
+        JSON.stringify(filmState),
+      );
+      const batchState = await page.evaluate(() => {
+        try {
+          const bar = document.querySelector('[data-batch-bar]');
+          if (!bar) return null;
+          const labels = [...bar.querySelectorAll('button')].map(
+            (b) => b.textContent?.trim() ?? '',
+          );
+          return {
+            labels,
+            hasDiscard: labels.includes('Discard scans'),
+            hasNext: labels.includes('Next'),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner batch bar offers Discard scans + Next',
+        batchState !== null && batchState.hasDiscard && batchState.hasNext,
+        JSON.stringify(batchState),
+      );
+      // Add-button round-trip: review → camera → review CTA → review again.
+      const addPresent = filmState !== null && filmState.addPresent === true;
+      let addReturned = false;
+      if (addPresent) {
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-scan-add]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                return (
+                  document.querySelector('[data-scan-capture]') !== null &&
+                  document.querySelector('[data-scan-queue]') === null
+                );
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+          );
+          addReturned = true;
+        } catch {
+          addReturned = false;
+        }
+        if (addReturned) {
+          await page.evaluate(() => {
+            try {
+              document.querySelector('[data-review-cta]')?.click();
+            } catch {
+              /* noop */
+            }
+          });
+          try {
+            await page.waitForFunction(
+              () => {
+                try {
+                  return document.querySelector('[data-scan-queue]') !== null;
+                } catch {
+                  return false;
+                }
+              },
+              { timeout: 30000 },
+            );
+            await waitForResultImg(page);
+            await waitForQueue(page, 2, 30000);
+          } catch {
+            /* measured as back-in-review below */
+          }
+        }
+      }
+      const addRoundTrip = await page.evaluate(
+        (reached, present) => {
+          try {
+            return {
+              addPresent: present,
+              cameraReached: reached,
+              backInReview:
+                document.querySelector('[data-scan-queue]') !== null &&
+                document.querySelector('[data-crop-result-img]') !== null,
+            };
+          } catch {
+            return null;
+          }
+        },
+        addReturned,
+        addPresent,
+      );
+      check(
+        'scanner add-button returns to camera (round-trip to review)',
+        addRoundTrip !== null &&
+          addRoundTrip.addPresent &&
+          addRoundTrip.cameraReached &&
+          addRoundTrip.backInReview,
+        JSON.stringify(addRoundTrip),
+      );
       const overlayState = await page.evaluate(() => {
         try {
           const overlay = document.querySelector('[data-detect-overlay]');
@@ -1319,6 +1717,7 @@ async function main() {
             imgPresent: img !== null,
             imgDecoded: img !== null && img.naturalWidth > 0,
             imgSrcLen: img?.getAttribute('src')?.length ?? 0,
+            imgSrcPrefix: img?.getAttribute('src')?.slice(0, 5) ?? null,
             polygonPresent: poly !== null,
             pointsAttr: pointsAttr.slice(0, 120),
             coordCount: pts.length,
@@ -1329,12 +1728,11 @@ async function main() {
         }
       });
       check(
-        'scanner review hero shows photo + quad outline (overlay polygon, 4 points)',
+        'scanner review hero shows PROCESSED result (decodes, blob src, no overlay pre-adjust)',
         overlayState !== null &&
-          overlayState.overlayPresent &&
           overlayState.imgDecoded &&
-          overlayState.polygonPresent &&
-          overlayState.pointPairs === 4,
+          overlayState.imgSrcPrefix === 'blob:' &&
+          overlayState.polygonPresent === false,
         JSON.stringify(overlayState),
       );
       const redetectBefore = await page.evaluate(() => {
@@ -1499,6 +1897,102 @@ async function main() {
         progressed && progressState !== null && /1 of 2 reviewed/.test(progressState.label),
         JSON.stringify(progressState),
       );
+      // Destructive batch action now (fresh queue re-captured below) so the
+      // surviving adjust/Apply/reactive/Build-PDF flow keeps its 2-page shape.
+      await page.evaluate(() => {
+        try {
+          const bar = document.querySelector('[data-batch-bar]');
+          const inBar = [...(bar?.querySelectorAll('button') ?? [])].find(
+            (b) => b.textContent?.trim() === 'Discard scans',
+          );
+          const fallback = [...document.querySelectorAll('button')].find(
+            (b) => b.textContent?.trim() === 'Discard scans',
+          );
+          (inBar ?? fallback)?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let emptiedToCamera = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const strip = document.querySelector('[data-scan-strip]');
+              return (
+                document.querySelector('[data-scan-capture]') !== null &&
+                document.querySelector('[data-scan-queue]') === null &&
+                (strip === null || strip.querySelectorAll('button').length === 0)
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        emptiedToCamera = true;
+      } catch {
+        emptiedToCamera = false;
+      }
+      const discardState = await page.evaluate(() => {
+        try {
+          const strip = document.querySelector('[data-scan-strip]');
+          return {
+            capturePresent: document.querySelector('[data-scan-capture]') !== null,
+            queueAbsent: document.querySelector('[data-scan-queue]') === null,
+            stripThumbs: strip === null ? -1 : strip.querySelectorAll('button').length,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Discard-scans empties to camera',
+        emptiedToCamera &&
+          discardState !== null &&
+          discardState.capturePresent &&
+          discardState.queueAbsent &&
+          discardState.stripThumbs === 0,
+        JSON.stringify(discardState),
+      );
+      // Re-capture a fresh 2-page queue only when the discard actually
+      // emptied; otherwise the surviving flow continues on the kept queue
+      // (page 2 current, 1 accepted) and every downstream check still holds.
+      if (emptiedToCamera) {
+        await scanCaptureOnce(page);
+        await page.waitForFunction(
+          () => {
+            try {
+              const s = document.querySelector('[data-scan-strip]');
+              return s !== null && s.querySelectorAll('button').length >= 1;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        await scanCaptureOnce(page);
+        await page.waitForFunction(
+          () => {
+            try {
+              const s = document.querySelector('[data-scan-strip]');
+              return s !== null && s.querySelectorAll('button').length >= 2;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-review-cta]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        await waitForResultImg(page);
+        await waitForQueue(page, 2, 30000);
+      }
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')]
@@ -1548,6 +2042,32 @@ async function main() {
           adjustState.reset &&
           adjustState.instruction,
         JSON.stringify(adjustState),
+      );
+      // Reworked hero contract: the quad polygon lives INSIDE adjust (it is
+      // absent pre-adjust per the hero check above) — 4 points, measured after
+      // the handles above rendered.
+      const adjustPoly = await page.evaluate(() => {
+        try {
+          const overlay = document.querySelector('[data-detect-overlay]');
+          const poly = overlay?.querySelector('polygon') ?? null;
+          const pointsAttr = poly?.getAttribute('points') ?? '';
+          const pts = pointsAttr
+            .trim()
+            .split(/[\s,]+/)
+            .filter((t) => t.length > 0);
+          return {
+            overlayPresent: overlay !== null,
+            polygonPresent: poly !== null,
+            pointPairs: pts.length / 2,
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner adjust mode shows editable quad polygon (4 points)',
+        adjustPoly !== null && adjustPoly.polygonPresent && adjustPoly.pointPairs === 4,
+        JSON.stringify(adjustPoly),
       );
       const adjustLabels = await page.evaluate(() => {
         try {
@@ -1705,6 +2225,141 @@ async function main() {
         touchEnd !== null && typeof touchEnd === 'object' && touchEnd.w >= 44 && touchEnd.h >= 44,
         JSON.stringify(touchEnd),
       );
+      // Finish-one-early path: with ≥1 accepted, Next must reach the same done
+      // screen. Fresh queues (post-Discard recapture) hold 0 accepted here, so
+      // accept the current page first; kept queues already read 1 of 2.
+      const progressBeforeNext = await page.evaluate(() => {
+        try {
+          const p = document.querySelector('[data-review-progress]');
+          if (!p) return null;
+          return p.getAttribute('aria-label') ?? p.textContent ?? '';
+        } catch {
+          return null;
+        }
+      });
+      if (progressBeforeNext !== null && /^0 of 2\b/.test(progressBeforeNext)) {
+        await page.evaluate(() => {
+          try {
+            [...document.querySelectorAll('button')]
+              .find((b) => b.textContent === 'Looks good')
+              ?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                const p = document.querySelector('[data-review-progress]');
+                if (!p) return false;
+                const label = p.getAttribute('aria-label') ?? p.textContent ?? '';
+                return /1 of 2 reviewed/.test(label);
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 60000 },
+          );
+        } catch {
+          /* measured at the done screen below */
+        }
+      }
+      await page.evaluate(() => {
+        try {
+          const bar = document.querySelector('[data-batch-bar]');
+          const inBar = [...(bar?.querySelectorAll('button') ?? [])].find(
+            (b) => b.textContent?.trim() === 'Next',
+          );
+          const fallback = [...document.querySelectorAll('button')].find(
+            (b) => b.textContent?.trim() === 'Next',
+          );
+          (inBar ?? fallback)?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      let nextDone = false;
+      try {
+        await page.waitForFunction(
+          () => {
+            try {
+              const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+              return labels.includes('Build PDF') && labels.includes('Back to camera');
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+        nextDone = true;
+      } catch {
+        nextDone = false;
+      }
+      const nextState = await page.evaluate(() => {
+        try {
+          const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
+          return {
+            doneVisible: labels.includes('Build PDF') && labels.includes('Back to camera'),
+          };
+        } catch {
+          return null;
+        }
+      });
+      check(
+        'scanner Next reaches done screen with ≥1 accepted',
+        nextDone && nextState !== null && nextState.doneVisible,
+        JSON.stringify({ progressBeforeNext, nextState }),
+      );
+      // Return to the pending page for the surviving accept-all flow (skipped
+      // when Next never left review — the flow is already positioned there).
+      if (nextDone) {
+        await page.evaluate(() => {
+          try {
+            [...document.querySelectorAll('button')]
+              .find((b) => b.textContent === 'Back to camera')
+              ?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                return document.querySelector('[data-scan-capture]') !== null;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+          );
+        } catch {
+          /* measured via the review wait below */
+        }
+        await page.evaluate(() => {
+          try {
+            document.querySelector('[data-review-cta]')?.click();
+          } catch {
+            /* noop */
+          }
+        });
+        try {
+          await page.waitForFunction(
+            () => {
+              try {
+                return document.querySelector('[data-scan-queue]') !== null;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 30000 },
+          );
+          await waitForResultImg(page);
+        } catch {
+          /* the surviving Looks-good wait measures */
+        }
+      }
       await page.evaluate(() => {
         try {
           [...document.querySelectorAll('button')]

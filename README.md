@@ -42,7 +42,9 @@ Most PDF tools upload your documents to a server to process them. **Folio doesn'
 | **Images → PDF** | Build one PDF from JPEG/PNG images — camera capture (scanic, on-device) or upload your photos as fallback |
 | **Compress**     | _Coming in a future update_ — the action stays disabled rather than pretending to work                    |
 
-> **Document scanning runs on [scanic](https://github.com/marquaye/scanic) (MIT © marquaye).** Camera capture runs on-device (ML detection by default, classical as silent fallback); uploads still work as fallback.
+> **Document scanning runs on [scanic](https://github.com/marquaye/scanic) (MIT © marquaye).** Camera capture runs on-device (ML detection by default, classical as silent fallback) with a Google-pattern capture → processed-result-first review flow; uploads still work as fallback.
+>
+> The About page shows a dev-channel card on dev builds only (never on production) with the version, build time, and per-wave notes — so it answers "did the update land".
 
 Every completed file gets a smart name derived from your inputs (or your own custom name) before it downloads. Every tool reports real engine progress, honest cancellation, completion time, and output sizes.
 

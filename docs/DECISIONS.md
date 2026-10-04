@@ -265,3 +265,9 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Reason.** User-verified field feedback on D34.
 - **Research basis.** Scanbot SDK custom-UI patterns (full-bleed view, live polygon overlay, finder guidance, status-gated capture, mirrored front preview) + Dropbox detection pipeline notes; TinyFish fetch 2026-10-04.
 - **Status.** Implemented in the D35 wave; canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).
+
+## D36 — Google-Drive-scan-pattern UX redo + About dev-channel card
+
+- **Decision.** (1) Capture screen rebuilt Google-style (dark full-bleed viewfinder, minimal top chrome, shutter + gallery thumb cluster, Manual/Auto-capture segmented pill with SAD auto-fire, status-pill guidance voice); (2) review hero is PROCESSED-result-only (original never the hero; quad visible only inside crop-adjust); (3) filmstrip + add-page + Discard-scans/Next batch bar; (4) no fake Enhance/Filters (no such pipeline — omitted honestly); (5) About dev-channel card (hostname-gated, never on production) with version + build time + per-wave notes answering "did the update land". Folio paper/ink/brass theme throughout.
+- **Reason.** User-supplied screenshots analyzed 2026-10-04 (Google Drive scan pattern as the reference interaction grammar).
+- **Status.** Implemented in the D36 wave; canonical re-verification PENDING (orchestrator fills exact numbers — see WORKLOG); real-device validation pending (user's phone required).

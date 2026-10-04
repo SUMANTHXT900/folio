@@ -1,9 +1,12 @@
 import { motion } from 'framer-motion';
 import { useState } from 'react';
 import { updateManager, usePwaUpdate } from '../pwa/usePwaUpdate';
+import { formatIso } from '../utils/format';
 import { ToolHeading } from './components/ui';
+import { DEV_NOTES } from './devNotes';
 
 declare const __FOLIO_VERSION__: string;
+declare const __FOLIO_BUILD_TIME__: string;
 
 type Entry = {
   version: string;
@@ -53,6 +56,183 @@ const ENTRIES: Entry[] = [
 ];
 
 const ease = [0.22, 1, 0.36, 1] as const;
+
+export type FolioChannel = 'production' | 'dev-preview' | 'local';
+
+/**
+ * Which channel this page is being served from (D36 dev-channel card).
+ * Production is the one canonical host; localhost is a local build; every
+ * other host — dev-folio-pdf.pages.dev, *.pages.dev previews, LAN origins —
+ * is a dev preview. The card renders on every channel except production,
+ * so a fresh load proves which build actually landed.
+ */
+export function folioChannel(hostname: string): FolioChannel {
+  if (hostname === 'folio-pdf.pages.dev') return 'production';
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return 'local';
+  return 'dev-preview';
+}
+
+const CHANNEL_BADGE: Record<Exclude<FolioChannel, 'production'>, string> = {
+  'dev-preview': 'Dev preview',
+  local: 'Local build',
+};
+
+/**
+ * Build-channel card — visible on every host EXCEPT production. Reuses the
+ * update manager's own status line (no parallel SW bookkeeping) and the
+ * append-only DEV_NOTES list so "did the update land?" is answerable from
+ * the page itself: version + build stamp + the latest shipped wave.
+ */
+function DevChannelCard() {
+  const state = usePwaUpdate();
+  const channel = folioChannel(typeof window !== 'undefined' ? window.location.hostname : '');
+  const latest = DEV_NOTES[0];
+  // Hooks run unconditionally; production (or an empty notes list) renders
+  // nothing at all — hence the early return AFTER the hooks above.
+  if (channel === 'production' || !latest) return null;
+  const earlier = DEV_NOTES.slice(1);
+  const version = typeof __FOLIO_VERSION__ !== 'undefined' ? __FOLIO_VERSION__ : '1.1.0';
+  const buildTime = typeof __FOLIO_BUILD_TIME__ !== 'undefined' ? __FOLIO_BUILD_TIME__ : '';
+  return (
+    <motion.section
+      data-dev-channel={channel}
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, ease }}
+      aria-label="Build channel"
+      className="mb-6 rounded-2xl border border-brass-500/25 dark:border-brass-400/20 bg-brass-400/[0.05] dark:bg-brass-400/[0.07] p-5 shadow-soft"
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="font-display text-base font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+              Build channel
+            </h2>
+            <span className="inline-flex items-center rounded-full border border-brass-500/30 bg-brass-400/[0.12] px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-brass-600 dark:text-brass-300">
+              {CHANNEL_BADGE[channel]}
+            </span>
+          </div>
+          <p className="mt-0.5 text-sm text-ink-500 dark:text-ink-300">
+            A non-production build — this card exists so a fresh load proves which update actually
+            landed.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full border border-brass-500/25 bg-brass-400/[0.08] px-3 py-1 font-mono text-xs text-brass-600 dark:text-brass-300">
+          v{version}
+        </span>
+        <time
+          dateTime={buildTime || undefined}
+          className="inline-flex items-center rounded-full border border-paper-300 dark:border-ink-700 bg-paper-50/70 dark:bg-ink-800/60 px-3 py-1 font-mono text-xs text-ink-500 dark:text-ink-300"
+        >
+          Built {buildTime ? formatIso(buildTime) : '— time unavailable'}
+        </time>
+      </div>
+
+      <div className="mt-3 rounded-xl bg-ink-900/[0.04] dark:bg-ink-950/60 p-3">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-ink-400 dark:text-ink-300">
+          Service worker
+        </p>
+        <p className="mt-0.5 text-xs text-ink-500 dark:text-ink-300" role="status">
+          {state.statusText}
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-ink-400 dark:text-ink-300">
+          Shipped waves · newest first
+        </p>
+        <div className="mt-2 rounded-xl border border-brass-400/30 bg-paper-50/70 dark:bg-ink-800/50 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs font-semibold text-brass-600 dark:text-brass-300">
+              {latest.build}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-brass-400/40 bg-brass-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-brass-600 dark:text-brass-300">
+              current
+            </span>
+            <span className="ml-auto font-mono text-xs text-ink-400 dark:text-ink-300">
+              {latest.date}
+            </span>
+          </div>
+          <ul className="mt-2.5 space-y-1.5">
+            {latest.notes.map((note) => (
+              <li
+                key={note.slice(0, 24)}
+                className="flex gap-2.5 text-sm text-ink-500 dark:text-ink-300 leading-relaxed"
+              >
+                <span
+                  aria-hidden
+                  className="mt-[7px] w-1 h-1 rounded-full bg-brass-500/60 shrink-0"
+                />
+                <span className="text-pretty">{note}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        {earlier.length > 0 && (
+          <div className="mt-2 space-y-2">
+            {earlier.map((entry) => (
+              <details
+                key={`${entry.build}-${entry.date}`}
+                className="group rounded-xl border border-paper-300/70 dark:border-ink-700 bg-paper-50/60 dark:bg-ink-800/40"
+              >
+                <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 px-3 text-xs text-ink-500 dark:text-ink-300">
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                    className="shrink-0 transition-transform group-open:rotate-90"
+                  >
+                    <path d="m9 6 6 6-6 6" />
+                  </svg>
+                  <span className="font-mono font-semibold text-brass-600 dark:text-brass-300">
+                    {entry.build}
+                  </span>
+                  <span className="ml-auto font-mono">{entry.date}</span>
+                </summary>
+                <ul className="px-3 pb-3 space-y-1.5">
+                  {entry.notes.map((note) => (
+                    <li
+                      key={note.slice(0, 24)}
+                      className="flex gap-2.5 text-sm text-ink-500 dark:text-ink-300 leading-relaxed"
+                    >
+                      <span
+                        aria-hidden
+                        className="mt-[7px] w-1 h-1 rounded-full bg-brass-500/60 shrink-0"
+                      />
+                      <span className="text-pretty">{note}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="mt-4 text-xs text-ink-400 dark:text-ink-300 leading-relaxed">
+        This preview build may change daily — production is{' '}
+        <a
+          href="https://folio-pdf.pages.dev"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline decoration-brass-400/60 underline-offset-2 hover:text-brass-600 dark:hover:text-brass-300 transition-colors"
+        >
+          folio-pdf.pages.dev
+        </a>
+        .
+      </p>
+    </motion.section>
+  );
+}
 
 function UpdateCard() {
   const state = usePwaUpdate();
@@ -152,6 +332,11 @@ export default function About() {
           waiting version and applies it, with diagnostics for debugging
           stale installs on phones. */}
       <UpdateCard />
+
+      {/* Dev channel — visible on every host except production (D36). The
+          card itself returns null on folio-pdf.pages.dev, so production
+          stays identical to before. */}
+      <DevChannelCard />
 
       {/* split layout: sticky mission left, scrolling content right */}
       <div className="grid lg:grid-cols-[minmax(280px,5fr)_minmax(320px,7fr)] gap-6 lg:gap-10">

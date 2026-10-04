@@ -26,14 +26,19 @@
  *
  * E2E DATA CONTRACT (do not rename):
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
- *   `[data-scan-capture]` (rendered only when live), queue
+ *   `[data-scan-capture]` (rendered only when live), gallery thumb
+ *   `[data-scan-gallery]` (last queued thumb, jumps to review), mode pill
+ *   `[data-scan-mode]` (`Manual` default / `Auto capture`), queue
  *   `[data-scan-queue]` with header `Page i of N`, result
  *   `[data-crop-result]` + `[data-crop-result-img]`, handles
  *   `[data-crop-handle="tl|tr|br|bl"]` (role=slider, arrow-key
  *   steppable via scanic's keyboard mode), review CTA `[data-review-cta]`
  *   (`Review N pages` / `View N pages`), progress `[data-review-progress]`
  *   (aria-label `i of N reviewed`), finder `[data-finder-frame]` +
- *   `[data-finder-status]`, mirror `[data-mirror-toggle]` (aria-pressed).
+ *   `[data-finder-status]`, mirror `[data-mirror-toggle]` (aria-pressed),
+ *   filmstrip `[data-scan-filmstrip]` + `[data-film-thumb]` (numbered, tap
+ *   jumps) + `[data-scan-add]` (back to camera), batch bar
+ *   `[data-batch-bar]` (`Discard scans` ghost / `Next` primary).
  * - Queue button labels are EXACT: "Looks good", "Adjust corners", "Apply",
  *   "Use original", "Discard", "Reset to auto", "Build PDF",
  *   "Back to camera", "Re-detect".
@@ -56,6 +61,7 @@ import type { ScanicCorners } from './scan/index';
 import {
   DEFAULT_DETECTOR,
   ML_ASSET_BASE_URL as POLICY_ML_ASSET_BASE_URL,
+  warmMlDetector,
 } from './scan/detectorPolicy';
 import ScanicReview from './ScanicReview';
 
@@ -69,6 +75,93 @@ export type ScanicHandleKey = (typeof SCANIC_HANDLE_KEYS)[number];
 /** `scan-NNN.jpg` collection names (capture order; engine sniffs magic bytes). */
 export function formatScanName(index: number): string {
   return `scan-${String(index + 1).padStart(3, '0')}.jpg`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Auto capture (SAD stability shutter)                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Preview sampling grid for the stability shutter — tiny on purpose: the
+ * <video> preview pixels are NEVER the detection input, and here they are
+ * only a steadiness signal, so 48x27 grayscale is plenty.
+ */
+export const AUTO_CAPTURE_SAMPLE_W = 48;
+export const AUTO_CAPTURE_SAMPLE_H = 27;
+/** Mean per-pixel absolute difference at/below which a tick counts as steady. */
+export const AUTO_CAPTURE_MEAN_THRESHOLD = 12;
+/** Consecutive steady ticks required before the shutter fires. */
+export const AUTO_CAPTURE_STABLE_TICKS_REQUIRED = 4;
+/** Sampling cadence while auto mode is armed. */
+export const AUTO_CAPTURE_TICK_MS = 300;
+/** Minimum spacing between two auto shutter fires (static frames included). */
+export const AUTO_CAPTURE_COOLDOWN_MS = 1500;
+/**
+ * Minimum time the "Scanning… hold steady" pill stays visible after the last
+ * detection settles. Detection often resolves in ~200ms — faster than anyone
+ * can read — so without a dwell the working state flashes past unreadably.
+ */
+export const SCAN_STATUS_DWELL_MS = 800;
+
+/**
+ * Sum of absolute differences between two equal-length grayscale frames.
+ * Length mismatch (or anything unreadable) is maximally different.
+ */
+export function grayscaleSAD(a: Uint8Array, b: Uint8Array): number {
+  if (a.length !== b.length) return Number.POSITIVE_INFINITY;
+  let sad = 0;
+  for (let i = 0; i < a.length; i += 1) sad += Math.abs(a[i] - b[i]);
+  return sad;
+}
+
+/**
+ * Steady when the mean per-pixel difference is within threshold — a
+ * perfectly static preview (SAD 0) counts as steady; the cooldown (not this
+ * comparator) is what bounds repeat fires on a frozen frame.
+ */
+export function isStableFrame(
+  sad: number,
+  pixelCount: number,
+  meanThreshold: number = AUTO_CAPTURE_MEAN_THRESHOLD,
+): boolean {
+  if (!Number.isFinite(sad) || pixelCount <= 0) return false;
+  return sad / pixelCount <= meanThreshold;
+}
+
+/**
+ * Fire only after N consecutive steady ticks AND outside the cooldown window
+ * since the last fire (manual or auto). `lastFireMs` null = never fired.
+ */
+export function shouldAutoFire(
+  stableTicks: number,
+  nowMs: number,
+  lastFireMs: number | null,
+  requiredTicks: number = AUTO_CAPTURE_STABLE_TICKS_REQUIRED,
+  cooldownMs: number = AUTO_CAPTURE_COOLDOWN_MS,
+): boolean {
+  if (stableTicks < requiredTicks) return false;
+  if (lastFireMs === null) return true;
+  return nowMs - lastFireMs >= cooldownMs;
+}
+
+/** Downscaled grayscale snapshot of the live preview; null when unreadable. */
+function samplePreviewGrayscale(video: HTMLVideoElement): Uint8Array | null {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = AUTO_CAPTURE_SAMPLE_W;
+    canvas.height = AUTO_CAPTURE_SAMPLE_H;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, AUTO_CAPTURE_SAMPLE_W, AUTO_CAPTURE_SAMPLE_H);
+    const data = ctx.getImageData(0, 0, AUTO_CAPTURE_SAMPLE_W, AUTO_CAPTURE_SAMPLE_H).data;
+    const gray = new Uint8Array(AUTO_CAPTURE_SAMPLE_W * AUTO_CAPTURE_SAMPLE_H);
+    for (let i = 0; i < gray.length; i += 1) {
+      gray[i] = Math.round((data[i * 4] + data[i * 4 + 1] + data[i * 4 + 2]) / 3);
+    }
+    return gray;
+  } catch {
+    return null;
+  }
 }
 
 export interface ScanicCommittedPage {
@@ -173,6 +266,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [cardError, setCardError] = useState<string | null>(null);
   const [redetecting, setRedetecting] = useState(false);
+  /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
+  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
   /** Single-flight warp guard (the review child has no busy prop). */
   const warpingRef = useRef(false);
 
@@ -185,6 +280,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const imageElsRef = useRef(new Map<number, HTMLImageElement>());
   const warpedBlobsRef = useRef(new Map<number, Blob>());
   const objectUrlsRef = useRef(new Set<string>());
+  /** Last shutter time (manual or auto) — the auto cooldown gates on this. */
+  const lastFireRef = useRef<number | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -211,6 +308,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   useEffect(() => {
     entriesRef.current = entries;
   }, [entries]);
+
+  // Warm preload at scanner open: the ORT runtime + model bytes load while
+  // the user frames the first page, so the first capture never pays the
+  // load. Fire-and-forget; failure falls back silently per-entry.
+  useEffect(() => {
+    void warmMlDetector();
+  }, []);
 
   const trackUrl = useCallback((url: string): string => {
     objectUrlsRef.current.add(url);
@@ -572,6 +676,44 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     enqueueCapture(file);
   }, [enqueueCapture]);
 
+  /** Shutter tap: records the fire time so auto mode never double-fires. */
+  const manualCapture = useCallback(() => {
+    lastFireRef.current = Date.now();
+    void captureFrame();
+  }, [captureFrame]);
+
+  // Auto capture: SAD-based stability shutter over tiny downscaled preview
+  // frames. Armed ONLY in auto mode on the live camera view — manual mode
+  // never reaches the sampler, so it can never auto-fire. Static previews
+  // (SAD 0) count as steady but stay cooldown-bounded like any other fire.
+  useEffect(() => {
+    if (phase !== 'camera' || mode !== 'auto' || camState !== 'live') return;
+    let cancelled = false;
+    let prev: Uint8Array | null = null;
+    let stable = 0;
+    const id = window.setInterval(() => {
+      if (cancelled || document.hidden) return;
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+      const gray = samplePreviewGrayscale(video);
+      if (!gray) return;
+      if (prev !== null) {
+        const sad = grayscaleSAD(prev, gray);
+        stable = isStableFrame(sad, gray.length) ? stable + 1 : 0;
+        if (shouldAutoFire(stable, Date.now(), lastFireRef.current)) {
+          lastFireRef.current = Date.now();
+          stable = 0;
+          void captureFrame();
+        }
+      }
+      prev = gray;
+    }, AUTO_CAPTURE_TICK_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [phase, mode, camState, captureFrame]);
+
   const addFilesInstead = useCallback(
     (files: File[]) => {
       const images = files.filter(
@@ -715,6 +857,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     [revokeUrl],
   );
 
+  /**
+   * Discard-all from the review batch bar: drops EVERYTHING (pending and
+   * accepted alike) back to the camera, confirm-free. Revokes every queued
+   * URL so no blob leaks.
+   */
+  const discardAll = useCallback(() => {
+    for (const entry of entriesRef.current) {
+      revokeUrl(entry.photoUrl);
+      revokeUrl(entry.warpedUrl);
+      warpedBlobsRef.current.delete(entry.id);
+      imageElsRef.current.delete(entry.id);
+    }
+    entriesRef.current = [];
+    setEntries([]);
+    setReviewIndex(0);
+    setPhase('camera');
+  }, [revokeUrl]);
+
   const buildPdf = useCallback(() => {
     const pages: ScanicCommittedPage[] = accepted.map((entry, i) => {
       const name = formatScanName(startIndex + i);
@@ -743,44 +903,54 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? 'No camera is available on this device or browser. Add image files instead — they stay on this device.'
           : null;
 
+  const anyDetecting = queue.some((e) => e.status === 'detecting');
+  const lastQueued = queue.length === 0 ? null : queue[queue.length - 1];
+
+  // Minimum dwell for the working status: detection often settles in ~200ms
+  // (warm ML session), faster than anyone can read — without a dwell the
+  // "Scanning… hold steady" pill flashes past unreadably, and fast eyes (or
+  // E2E) only ever see the idle text. The dwell keeps the working state
+  // visible briefly AFTER the last settle; it never delays any action.
+  const scanDwellUntilRef = useRef(0);
+  const [, setDwellTick] = useState(0);
+  useEffect(() => {
+    // Empty queue (fresh open, discard-all): idle, never dwelling.
+    if (queue.length === 0) {
+      scanDwellUntilRef.current = 0;
+      return;
+    }
+    if (queue.some((e) => e.status === 'detecting')) return;
+    scanDwellUntilRef.current = Date.now() + SCAN_STATUS_DWELL_MS;
+    // Repaint NOW: refs don't render by themselves, and with nothing else
+    // scheduled the pill would freeze on the settle-time text (idle) for the
+    // whole window. The trailing timeout repaints again at expiry.
+    setDwellTick((t) => t + 1);
+    const id = window.setTimeout(() => {
+      if (mountedRef.current) setDwellTick((t) => t + 1);
+    }, SCAN_STATUS_DWELL_MS + 50);
+    return () => window.clearTimeout(id);
+  }, [queue]);
+
   const finderStatus =
     camState === 'requesting'
       ? 'Starting camera…'
       : paused
         ? 'Paused (tab hidden) — preview resumes when you return.'
-        : 'Point at the page';
+        : anyDetecting || Date.now() < scanDwellUntilRef.current
+          ? 'Scanning… hold steady'
+          : 'Point at the page';
 
-  // NOTE(Agent F): the review phase below stays inline until
-  // `ScanicReview.tsx` lands (another agent's new file — never created here).
-  // When it exists, replace the `[data-scan-queue]` block with
-  // `<ScanicReview photoUrl imageWidth imageHeight corners warpedUrl
-  //   detecting note pageLabel progressLabel onLooksGood
-  //   onAdjustApply onUseOriginal onDiscard onRedetect redetecting />`
-  // keeping the E2E contract and exact button labels below.
+  // Review phase: the single-page card is owned by `./ScanicReview` (props
+  // below stay EXACT); the filmstrip + batch bar underneath are owned here
+  // because the review component renders the card only (never duplicates).
   const content = (
     <div
       data-scanner-root
       data-detector={DEFAULT_DETECTOR}
       className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 dark:bg-ink-900 dark:text-paper-100"
     >
-      {/* header */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-4 py-3 dark:border-ink-700/70 dark:bg-ink-900/95">
-        <div className="min-w-0 flex-1">
-          <p className="font-display text-base font-semibold tracking-tight text-ink-900 dark:text-paper-100">
-            {phase === 'camera'
-              ? 'Scan documents'
-              : phase === 'review'
-                ? 'Review scans'
-                : 'Scan complete'}
-          </p>
-          <p className="truncate text-xs text-ink-400 dark:text-ink-300">
-            {phase === 'camera'
-              ? 'Capture pages, then review each auto-crop.'
-              : phase === 'review'
-                ? 'Looks good keeps the auto-crop; original keeps the photo untouched.'
-                : `${accepted.length} page${accepted.length === 1 ? '' : 's'} accepted`}
-          </p>
-        </div>
+      {/* slim top chrome: close · title · flash */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 dark:border-ink-700/70 dark:bg-ink-900/95">
         <button
           type="button"
           aria-label="Close scanner"
@@ -789,6 +959,22 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         >
           ✕
         </button>
+        <p className="min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+          Scan documents
+        </p>
+        {torchSupported ? (
+          <button
+            type="button"
+            aria-label="Toggle torch"
+            aria-pressed={torchOn}
+            onClick={() => void toggleTorch()}
+            className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+          >
+            {torchOn ? '🔦' : '💡'}
+          </button>
+        ) : (
+          <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+        )}
       </div>
 
       {/* session strip — always rendered */}
@@ -864,7 +1050,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               <p
                 data-finder-status
                 role="status"
-                className="absolute inset-x-0 bottom-3 px-4 text-center text-sm font-medium text-paper-50 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
+                className="absolute bottom-3 left-1/2 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
               >
                 {finderStatus}
               </p>
@@ -892,17 +1078,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 >
                   {mirrored ? '◐' : '◑'}
                 </button>
-                {torchSupported && (
-                  <button
-                    type="button"
-                    aria-label="Toggle torch"
-                    aria-pressed={torchOn}
-                    onClick={() => void toggleTorch()}
-                    className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-ink-950/60 px-3 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                  >
-                    {torchOn ? '🔦' : '💡'}
-                  </button>
-                )}
               </div>
             </div>
           ) : (
@@ -927,19 +1102,79 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           )}
 
           <div className="shrink-0 space-y-2 overflow-y-auto bg-paper-50 px-4 py-3 dark:bg-ink-900">
-            {camState === 'live' && (
-              <div className="flex items-center justify-center">
+            {/* Manual/Auto segmented mode pill */}
+            <div className="flex justify-center">
+              <div
+                data-scan-mode
+                role="group"
+                aria-label="Capture mode"
+                className="inline-flex rounded-full border border-paper-300 p-1 dark:border-ink-700"
+              >
+                <button
+                  type="button"
+                  aria-pressed={mode === 'manual'}
+                  onClick={() => setMode('manual')}
+                  className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                    mode === 'manual'
+                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                      : 'text-ink-500 dark:text-ink-300'
+                  }`}
+                >
+                  Manual
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={mode === 'auto'}
+                  onClick={() => setMode('auto')}
+                  className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                    mode === 'auto'
+                      ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                      : 'text-ink-500 dark:text-ink-300'
+                  }`}
+                >
+                  Auto capture
+                </button>
+              </div>
+            </div>
+            {mode === 'auto' && (
+              <p className="text-center text-[11px] text-ink-400 dark:text-ink-300">
+                Hold steady over the page — the shutter fires itself.
+              </p>
+            )}
+
+            {/* Bottom cluster: gallery thumb · big shutter · balance spacer */}
+            <div className="flex items-center justify-between gap-4 px-2">
+              <button
+                type="button"
+                data-scan-gallery
+                aria-label={queue.length > 0 ? `Open review, ${queue.length} pages` : 'Open review'}
+                disabled={queue.length === 0}
+                onClick={() => goToReview(queue.length - 1)}
+                className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-paper-300 bg-paper-200 text-ink-400 transition-colors disabled:opacity-40 dark:border-ink-700 dark:bg-ink-700 dark:text-ink-300"
+              >
+                {lastQueued?.photoUrl ? (
+                  <img src={lastQueued.photoUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <span aria-hidden className="text-lg">
+                    ▦
+                  </span>
+                )}
+              </button>
+              {camState === 'live' ? (
                 <button
                   type="button"
                   data-scan-capture
                   aria-label="Capture page"
-                  onClick={() => void captureFrame()}
+                  onClick={manualCapture}
                   className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
                 >
                   <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
                 </button>
-              </div>
-            )}
+              ) : (
+                <span aria-hidden className="h-[76px] w-[76px] shrink-0" />
+              )}
+              <span aria-hidden className="w-14 shrink-0" />
+            </div>
             {captureError !== null && (
               <p role="alert" className="text-center text-xs text-red-600 dark:text-red-400">
                 {captureError}
@@ -1009,6 +1244,68 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             onRedetect={() => void redetectEntry(current)}
             redetecting={redetecting}
           />
+          {/* Review filmstrip (owned here — ScanicReview renders the single
+              card only): numbered thumbs jump to a page, + returns to camera. */}
+          <div
+            data-scan-filmstrip
+            aria-label="Scanned pages"
+            className="flex items-center gap-2 overflow-x-auto py-1"
+          >
+            {queue.map((entry, i) => (
+              <button
+                key={entry.id}
+                type="button"
+                data-film-thumb
+                aria-label={`Go to page ${i + 1}${entry.decision !== 'pending' ? ` (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})` : ''}`}
+                aria-current={i === safeIndex}
+                onClick={() => setReviewIndex(i)}
+                className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
+                  i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
+                }`}
+              >
+                {entry.photoUrl ? (
+                  <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
+                    {i + 1}
+                  </span>
+                )}
+                <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
+                  {i + 1}
+                </span>
+              </button>
+            ))}
+            <button
+              type="button"
+              data-scan-add
+              aria-label="Back to camera"
+              onClick={() => setPhase('camera')}
+              className="inline-flex h-14 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+            >
+              + Add
+            </button>
+          </div>
+          {/* Batch bar: discard-all (confirm-free, everything) vs Next. */}
+          <div
+            data-batch-bar
+            className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
+          >
+            <button
+              type="button"
+              onClick={discardAll}
+              className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:text-ink-300 dark:hover:bg-ink-700"
+            >
+              Discard scans
+            </button>
+            <button
+              type="button"
+              disabled={accepted.length === 0}
+              onClick={() => setPhase('done')}
+              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 
