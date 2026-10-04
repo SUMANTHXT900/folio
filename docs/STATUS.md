@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current as of the v1.9.5 release in progress (2026-10-04 — scanner D33–D45 to prod; package.json 1.9.5, v2.0.0 release HELD).
+> Current as of the v1.9.5 release SHIPPED (2026-10-04 — scanner D33–D45 live on dev + prod; package.json 1.9.5, v2.0.0 release HELD).
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
@@ -46,7 +46,7 @@
 
 ## Pending work
 
-- `main` now carries the Folio v1.9.0 build (fast-forwarded from `dev` 2026-09-27) and serves production at `https://folio-pdf.pages.dev`; `dev` continues as the staging line.
+- `main` now carries the Folio v1.9.5 build (merged from `dev` 2026-10-04) and serves production at `https://folio-pdf.pages.dev`; `dev` continues as the staging line.
 
 ## Blocked work
 
@@ -98,12 +98,12 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `2c86501` (D45 main-lens + JPEG warp, 2026-10-04). `package.json` 1.9.5 — v2.0.0 bump HELD (see release checklist above); main promotion pending.
+- Branch: `dev`. HEAD: `69eb215` (v1.9.5 release, 2026-10-04). `package.json` 1.9.5 — v2.0.0 bump HELD (see release checklist above); `dev` + `main` both at v1.9.5 (see below).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace. The `scan/` crate is deleted (D33).
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
-- `main` at v1.9.0 (promoted 2026-09-27, fast-forward from `dev`).
+- `main` at v1.9.5 (merged from `dev` 2026-10-04, deployed to production).
 - Generated/ignored: `wasm/pkg/`, `engine/target/`, `app/dist/`, `app/node_modules/`, optional `test pdfs/` corpus, E2E artifacts — none committed.
 
 ## Immediate next steps
 
-1. Real-device validation of the D45 fixes on the user's phone — pending, gates any camera-capture claim.
+1. Real-device validation of the v1.9.5 scanner on the user's phone — pending, gates any camera-capture claim.
