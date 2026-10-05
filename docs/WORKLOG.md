@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-05 — Updater field diagnosis: stale alias + updateViaCache check (no code change)
+
+- **Report.** User: exact deploy link (`96a60264…`) served v1.10.1 but the `dev` alias still showed v1.9.0, and Check-for-updates from that stale page never surfaced the new build.
+- **Diagnosis.** Bootstrap trap, not a logic miss: the stale page ran the pre-v1.9.7 `autoUpdate` updater, under which `onNeedRefresh` never fires and `updateSW(true)` is a no-op — so no old-bundle updater can ever surface its own replacement; only a fresh load (user's manual clear) pulls the fixed bundle. Current prompt flow verified against best-practice sources (vite-plugin-pwa prompt guide, SW lifecycle references): user-gated activation, `controllerchange` once-reload, tap + hourly check, plugin v1.3.0 current; matches, no old techniques.
+- **updateViaCache.** Traced registration → plugin uses `workbox-window` (sets no `updateViaCache`, browser default applies); live `sw.js` headers are `cache-control: public, max-age=0, must-revalidate` + etag, so no cached copy can stale the check. No change needed; Check is trustworthy.
+- **Remaining for laptop.** Full vitest suite + E2E (standing split: server does scoped, laptop owns full + wasm build + E2E) before any prod decision.
+
 ## 2026-10-05 — Interaction-performance pass, all phases (v1.10.0)
 
 - **Objective.** User-reported image-click lag + capture-button freeze; user authorized the full audit fix list with scoped-only testing.
