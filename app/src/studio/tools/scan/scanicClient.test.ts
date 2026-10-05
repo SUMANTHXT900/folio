@@ -147,7 +147,7 @@ describe('ScanicClient.detect', () => {
 });
 
 describe('ScanicClient.redetect', () => {
-  it('forces the ML attempt even when the default path resolved classical, and transfers the buffer', async () => {
+  it('always sends ML (D46: no classical path) and transfers the buffer', async () => {
     const workers: FakeWorker[] = [];
     const client = new ScanicClient({
       createWorker: () => {
@@ -155,17 +155,14 @@ describe('ScanicClient.redetect', () => {
         workers.push(worker);
         return worker as unknown as Worker;
       },
-      // A cached warm-failure policy would resolve detect() to classical;
-      // redetect() must bypass it and force ML.
-      defaultDetector: () => 'classical',
     });
 
     const firstImage = new ImageData(2, 2);
     const first = client.detect(firstImage);
-    expect(workers[0].posts[0].message.detector).toBe('classical');
+    expect(workers[0].posts[0].message.detector).toBe('ml');
     expect(workers[0].posts[0].transfer).toEqual([firstImage.data.buffer]);
-    workers[0].deliver(detectReply(workers[0].posts[0].message.id, { detector: 'classical' }));
-    await expect(first).resolves.toMatchObject({ detector: 'classical' });
+    workers[0].deliver(detectReply(workers[0].posts[0].message.id, { detector: 'ml' }));
+    await expect(first).resolves.toMatchObject({ detector: 'ml' });
 
     const secondImage = new ImageData(2, 2);
     const second = client.redetect(secondImage);

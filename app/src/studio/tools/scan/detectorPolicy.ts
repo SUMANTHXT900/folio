@@ -1,24 +1,24 @@
 /**
- * Detector policy for the scanic scan core (D35): ML first, classical a
- * silent fallback.
+ * Detector policy for the scanic scan core (D35, D46): ML only — classical
+ * was removed (its quads were random auto-crops on real photos).
  *
  * The self-hosted ML detector (DocCornerNet via scanic; assets vendored
- * same-origin under `/assets/scanic-ml/`, D34) is the DEFAULT because it is
- * dramatically better on real photos; the classical Canny pipeline runs only
- * when ML cannot produce corners. This module is shared by the main thread
- * (client/UI) and the scan worker: it uses no DOM and no React, and each JS
- * context warms its own scanic ML session.
+ * same-origin under `/assets/scanic-ml/`, D34, precached at install) is the
+ * ONLY detector. A miss means the full frame is used, never a guess.
+ * This module is shared by the main thread (client/UI) and the scan worker:
+ * it uses no DOM and no React, and each JS context warms its own scanic ML
+ * session.
  *
  * `warmMlDetector()` is a fire-and-forget preload for scanner open: it loads
  * the ORT runtime chunk + model bytes, creates the session, and runs one
  * inference; it resolves `true` when the ML pipeline is usable in this
- * context, `false` on any failure (the caller falls back silently). Success
- * is cached; failure is retried by the next call.
+ * context, `false` on any failure (the caller uses the full frame).
+ * Success is cached; failure is retried by the next call.
  */
 
 import type { ScanicDetectorKind } from './scanicProtocol';
 
-/** ML is the default detector (D35); classical is the silent fallback. */
+/** ML is the only detector (D35 default, D46 classical removed). */
 export const DEFAULT_DETECTOR = 'ml' as const;
 
 /**
@@ -74,7 +74,7 @@ async function runMlWarmup(): Promise<boolean> {
   } catch {
     // Any ML failure (chunk import, model fetch, session create, inference)
     // is the normal "ML unavailable in this context" outcome: report it so
-    // the caller can fall back silently.
+    // the caller uses the full frame.
     return false;
   }
 }
@@ -107,21 +107,18 @@ export async function warmMlDetector(): Promise<boolean> {
 }
 
 /**
- * Detector for one attempt: ML when preferred AND expected to work
- * (`mlReady` false means a warm preload already proved ML unavailable in
- * this context), classical otherwise. Callers that send `'ml'` get the
- * worker's one-shot classical fallback for free; this helper is for choosing
- * a single preferred detector up front.
+ * Detector for one attempt: always ML (D46 — classical removed). Kept as a
+ * named policy seam (and re-exported) so call sites read intent, not a
+ * string literal. Arguments accepted and ignored for call-site stability.
  */
-export function detectorForAttempt(preferMl: boolean, mlReady: boolean): ScanicDetectorKind {
-  return preferMl && mlReady ? 'ml' : 'classical';
+export function detectorForAttempt(_preferMl?: boolean, _mlReady?: boolean): ScanicDetectorKind {
+  return 'ml';
 }
 
 /**
- * Default detector for this context: ML unless a warm preload here already
- * proved it unavailable (then classical, silently). This is the resolution
- * `ScanicClient.detect()` uses when the caller names no detector.
+ * Default detector for this context: ML, unconditionally (D46). This is the
+ * resolution `ScanicClient.detect()` uses when the caller names no detector.
  */
 export function defaultDetector(): ScanicDetectorKind {
-  return detectorForAttempt(DEFAULT_DETECTOR === 'ml', mlDetectorWarmState() !== 'failed');
+  return 'ml';
 }

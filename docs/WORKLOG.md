@@ -11,6 +11,13 @@ Chronological record of meaningful development events. Each entry records object
 - **Deploy.** GitHub `dev` + Cloudflare Pages branch `dev` via direct-upload (no Git integration); prod untouched.
 - **Build break fixed post-commit.** Wiring capture onto `ScanicClient` made Vite build `scanic.worker.ts` for the first time (previously dead code, tree-shaken); shared worker/main modules need `worker.format: 'es'` (`app/vite.config.ts`, commit `2dfea3e`). Production build green (precache 43 entries / 5854.37 KiB — down from 7718 with ML assets lazy); deploy `f41b425e`, bundle `index-BeABkBPV.js` live and 200.
 
+## 2026-10-05 — D46: ML-only detection + full ML precache (v1.10.1)
+
+- **Direction.** User: classical quads are random auto-crops (remove it entirely — miss = full frame), and lazy ML violates offline-first (precache everything at first open).
+- **Work.** `runScanicDetection` ML-only (single attempt, miss → null full-frame); `defaultDetector()`/`detectorForAttempt()` unconditional ML; `'classical'` inert on wire/type; ML assets back in workbox precache (`ort` glob, runtime route deleted); copy updates (About, devNotes, worker/client comments); D46 decision entry; rewritten scan suites (detection, policy, client, capture).
+- **Verification.** tsc clean; scan area 141/141 (capture 66, review 35, client 11, protocol 7, processor 6, warp 6, policy 6, detection 4); eslint/prettier clean. Full suite + E2E laptop-side.
+- **Deploy.** Follows this commit: `dev` push + Cloudflare branch-`dev` direct upload; prod untouched.
+
 ## 2026-10-05 — Update feature repair: prompt semantics end-to-end (v1.9.7)
 
 - **Objective.** User-reported buggy About "App updates" feature; two-analyst deep dive (code bug-hunt + industry best-practice research) before the fix.

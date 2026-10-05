@@ -35,7 +35,10 @@ export interface ScanicCorners {
   bottomLeft: ScanicPoint;
 }
 
-/** Detection backend: ML is the default (D35); classical is the silent fallback. */
+/**
+ * Detection backend (D46: ML only — the `'classical'` variant is accepted on
+ * the wire but never runs; every result reports `detector: 'ml'`).
+ */
 export type ScanicDetectorKind = 'classical' | 'ml';
 
 export interface ScanicDetectionResult {
@@ -43,10 +46,8 @@ export interface ScanicDetectionResult {
   corners: ScanicCorners | null;
   confidence: number | null;
   /**
-   * Detector behind this result: the backend that produced `corners` on
-   * success; on failure, the backend that made the final attempt (classical
-   * whenever the ML attempt was followed by the classical fallback). Always
-   * present, so a silent fallback stays reportable.
+   * Detector behind this result: always `'ml'` (D46). Kept on the wire so
+   * the result shape stays untouched.
    */
   detector: ScanicDetectorKind;
 }

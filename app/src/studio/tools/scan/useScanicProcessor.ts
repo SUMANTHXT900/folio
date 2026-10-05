@@ -70,13 +70,12 @@ export interface ScanicEntry {
  * Test/platform seams. Every field defaults to the real implementation;
  * production callers pass nothing. `detector` is read at PROCESS time, so a
  * detector override takes effect for captures still queued or processing;
- * when omitted, the client resolves the ML-first policy (classical only after
- * a warm preload here proved ML unavailable).
+ * when omitted, the client resolves the policy default (ML, D46).
  */
 export interface ScanicProcessorOptions {
   /** Defaults to a fresh `ScanicClient` owned by this hook instance. */
   client?: ScanicClient;
-  /** Explicit detection backend override; omitted = ML-first policy. */
+  /** Explicit detection backend override; omitted = ML (D46: ML only). */
   detector?: ScanicDetectorKind;
   /** Decodes an ORIGINAL File into a full-resolution ImageData copy. */
   decode?: (file: File) => Promise<ImageData>;

@@ -5,30 +5,27 @@
  *
  * ```text
  * Main thread (ScanicClient, see scanicClient.ts)
- *   │  detect:  full-res ImageData → scanic ML-first detection (classical fallback)
+ *   │  detect:  full-res ImageData → scanic ML detection (miss = full frame)
  *   │  extract: full-res ImageData + full-res quad → bilinear warp
  *   ▼
  * this worker: scanic Scanner (init-once), OffscreenCanvas, no DOM
  * ```
  *
- * Runtime status (D34/D35): the shipped UI still calls scanic directly on the
- * main thread; this worker core is the tested swap foundation for background
- * processing — adopting it must keep the review UI's DOM contract unchanged.
+ * Runtime status (D34/D35/D46): capture detection + warp run through this
+ * worker via `ScanicClient`; the review UI's DOM contract is unchanged.
  *
  * Environment contract:
- * - ImageData input only (never DOM elements): scanic's classical pipeline
- *   uses `OffscreenCanvas` when available (`prepareScaleAndGrayscale`) and
- *   falls back to pure JS per stage when its optional WASM is unavailable —
- *   both are NORMAL paths, never fatal. A detection-level throw is mapped to
- *   a normal "no detection" result so a capture always keeps its original.
+ * - ImageData input only (never DOM elements). A detection-level throw is
+ *   mapped to a normal "no detection" result so a capture always keeps its
+ *   original.
  * - Detection downscales internally (scanic default ≤800px) and returns
  *   corners already scaled back to the FULL-RESOLUTION input dimensions.
  * - `extract` uses the DOM-free warp in `scanicWarp.ts` (scanic's own
  *   extract path builds a `<canvas>` and cannot run in a worker).
- * - ML is the DEFAULT detector (D35): `'ml'` requests use the self-hosted
- *   `/assets/scanic-ml/` assets on 1 thread, ANY ML failure falls back to
- *   classical once (see `scanicDetection.ts`), and every result reports the
- *   detector behind it. The worker warms its own ML session on startup.
+ * - ML is the ONLY detector (D35 default, D46 classical removed): requests
+ *   use the self-hosted `/assets/scanic-ml/` assets on 1 thread, any ML
+ *   miss resolves to the full frame, and every result reports `detector:
+ *   'ml'`. The worker warms its own ML session on startup.
  */
 
 import { Scanner } from 'scanic';
@@ -61,9 +58,9 @@ const scannerReady: Promise<void> = scanner.initialize().catch(() => undefined);
 
 /**
  * Fire-and-forget ML preload for THIS worker context: the ORT runtime + model
- * bytes load in parallel with the classical WASM warmup, and the first ML
- * detect reuses the in-flight session. Failure is silent — the detection path
- * still attempts ML and falls back to classical.
+ * bytes load at startup, and the first ML detect reuses the in-flight
+ * session. Failure is silent — the detection path still attempts ML, and a
+ * miss resolves to the full frame.
  */
 void warmMlDetector();
 
@@ -100,8 +97,8 @@ function toImageData(buffer: ArrayBuffer, width: number, height: number): ImageD
 async function runDetect(request: ScanicDetectRequest): Promise<void> {
   await scannerReady;
   const image = toImageData(request.buffer, request.width, request.height);
-  // ML-first with one classical fallback; never throws and always names the
-  // detector behind the result.
+  // ML-only (D46); never throws and always names the detector behind
+  // the result.
   const result = await runScanicDetection(scanner, image, request.detector);
   post({
     protocol: SCANIC_WORKER_PROTOCOL_VERSION,

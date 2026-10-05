@@ -593,7 +593,7 @@ describe('corner editor', () => {
       success: false,
       corners: null,
       confidence: null,
-      detector: 'classical',
+      detector: 'ml',
     });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
@@ -800,23 +800,26 @@ describe('ML detector default', () => {
     expect(SCANIC_ML_ASSET_BASE_URL).toBe('/assets/scanic-ml/');
   });
 
-  it('reports a classical-backed quad when ML sees nothing (worker-internal fallback)', async () => {
+  it('reports an ML miss as full-frame (no fallback quad)', async () => {
     mockDetect.mockResolvedValueOnce({
-      success: true,
-      corners: detectedCorners(),
+      success: false,
+      corners: null,
       confidence: null,
-      detector: 'classical',
+      detector: 'ml',
     });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
-    // Single worker call: the ML→classical fallback lives inside the
-    // worker, not as a second UI-driven attempt.
+    // Single worker call: an ML miss settles full-frame, never a guess.
     await waitFor(() => expect(mockDetect).toHaveBeenCalledTimes(1));
-    expect(mockDetect.mock.calls[0][1]).toBe('ml');
-    // Classical corners land on the page: adjust is seeded, Reset enabled.
+    expect(
+      screen.getByText(
+        'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.',
+      ),
+    ).toBeTruthy();
+    // Adjust is still offered (manual crop), seeded with no baseline.
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     const reset = await screen.findByRole('button', { name: 'Reset to auto' });
-    expect((reset as HTMLButtonElement).disabled).toBe(false);
+    expect((reset as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('adjust-next advances the page with no warp and no verdict change', async () => {

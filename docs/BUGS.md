@@ -262,6 +262,13 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Fix.** Detection + warp routed through the existing tested `ScanicClient` worker (separate clients for detect vs warp); single warp per Apply with cancel-supersede; commits normalized through `prepareImportFile`.
 - **Verification.** `ScanicCapture.test.tsx` 66/66 re-pointed at the client seam; scoped suites green; full-suite/E2E re-verification pending laptop-side.
 
+### P5-5 — Classical detection removed (ML-only, D46)
+
+- **Status.** Resolved (v1.10.1, user direction). **Area.** App scan core (`scanicDetection.ts`, `detectorPolicy.ts`, `ScanicCapture.tsx`, `vite.config.ts`).
+- **Symptoms.** Classical quads were random auto-crops on real photos (worse than no crop); lazy ML precaching violated offline-first.
+- **Fix.** ML-only detection (miss = full frame); full ML precache restored; policy helpers unconditional. Wire/type keep `'classical'` inert.
+- **Verification.** Rewritten scan suites; scoped green; full-suite/E2E laptop-side.
+
 ### Init-fatal — engine worker boot failure hung on the ready timeout
 
 - **Status.** Resolved. **Area.** App (`app/src/engine/engine.worker.ts`, adapter).

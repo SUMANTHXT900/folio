@@ -47,7 +47,7 @@ const ENTRIES: Entry[] = [
     title: 'Scanner + real engine underneath',
     status: 'latest',
     changes: [
-      'On-device document scanner on scanic — ML detection by default with classical as silent fallback; original-feed capture with main-lens default and a persisted camera pick.',
+      'On-device document scanner on scanic — ML-only detection (a miss keeps the full frame, never a guessed crop); original-feed capture with main-lens default and a persisted camera pick.',
       'Auto-accept review with thin-handle adjust, a calm loupe, and a fullscreen finder.',
       'Warped pages commit as full-res JPEG; originals stay byte-identical.',
       'Every tool still runs on the local Rust/WASM engine — Compress stays reserved.',

@@ -75,30 +75,17 @@ export default defineConfig({
         icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
       },
       workbox: {
-        // The Folio WASM engine (~1.6 MB) must be precached for offline
-        // use, so `wasm` joins the default asset types. The vendored
-        // scanic-ml assets (doccornernet_lean.ort ~1.9 MB, custom ORT wasm
-        // ~1.5 MB + loader) are EXCLUDED from the precache — ML defaults
-        // off, so most installs never pay for them. They cache lazily at
-        // runtime on first ML use (see `runtimeCaching` below).
-        globPatterns: ['**/*.{js,mjs,css,html,svg,png,wasm,woff2}'],
-        // Scan install stays lean without the ML detector in precache;
-        // the ceiling covers the engine + app chunks with headroom.
+        // The Folio WASM engine (~1.6 MB) and the vendored scanic-ml assets
+        // (doccornernet_lean.ort ~1.9 MB, custom ORT wasm ~1.5 MB + loader)
+        // must be precached for offline use, so `ort` joins `wasm` alongside
+        // the default asset types. Offline-first is the product rule: after
+        // first open, EVERY feature works with zero network.
+        globPatterns: ['**/*.{js,mjs,css,html,svg,png,wasm,ort,woff2}'],
+        // Raised 8MB -> 10MB for the self-hosted ML detector (D33 vendor plan;
+        // D34 integration): measured worst-case dist/ ~8.4-8.5 MB. Alarm rule:
+        // if measured dist/ crosses 9MB during integration, revisit instead of
+        // bumping blindly.
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
-        // Lazy ML assets: CacheFirst on first detector use only (ML is
-        // opt-in, so unfetched URLs never enter the cache). 30-day
-        // expiration with a small entry cap bounds quota.
-        runtimeCaching: [
-          {
-            urlPattern: /\/assets\/scanic-ml\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'scanic-ml-lazy',
-              expiration: { maxEntries: 24, maxAgeSeconds: 30 * 24 * 60 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
         // Keep outdated precaches: when a new service worker activates it
         // must NOT delete the previous deployment's hashed chunks, or an
         // already-open page from that deployment fails its next lazy

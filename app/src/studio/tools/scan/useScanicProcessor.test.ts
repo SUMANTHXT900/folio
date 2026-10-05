@@ -108,7 +108,7 @@ describe('useScanicProcessor draining', () => {
 
     // Exactly one detect+extract per capture (StrictMode must not double-run
     // the drain) and strict capture order with concurrency 1. No detector is
-    // passed: the client resolves the ML-first policy itself.
+    // passed: the client resolves the ML policy itself.
     expect(kinds).toEqual(['detect', 'extract', 'detect', 'extract']);
     expect(detectors).toEqual([undefined, undefined]);
     expect(maxConcurrent()).toBe(1);

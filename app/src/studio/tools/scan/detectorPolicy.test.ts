@@ -1,8 +1,9 @@
 // @vitest-environment node
 /**
- * `detectorPolicy` tests: ML-first constants, `detectorForAttempt`, and
- * `warmMlDetector` — one real preload scan with the policy options, success
- * caching, honest failure reporting with retry, and concurrent sharing.
+ * `detectorPolicy` tests (D46: ML only): constants, `detectorForAttempt`
+ * always resolving ML, and `warmMlDetector` — one real preload scan with
+ * the policy options, success caching, honest failure reporting with retry,
+ * and concurrent sharing.
  *
  * scanic is mocked: warm-up creates a Scanner and runs one detection pass,
  * which is exactly what these tests observe.
@@ -47,22 +48,23 @@ describe('detectorPolicy constants and helper', () => {
     });
   });
 
-  it('detectorForAttempt prefers ML only when it is preferred and ready', async () => {
+  it('detectorForAttempt always resolves ML (classical removed)', async () => {
     const { detectorForAttempt } = await loadPolicy();
     expect(detectorForAttempt(true, true)).toBe('ml');
-    expect(detectorForAttempt(true, false)).toBe('classical');
-    expect(detectorForAttempt(false, true)).toBe('classical');
-    expect(detectorForAttempt(false, false)).toBe('classical');
+    expect(detectorForAttempt(true, false)).toBe('ml');
+    expect(detectorForAttempt(false, true)).toBe('ml');
+    expect(detectorForAttempt(false, false)).toBe('ml');
+    expect(detectorForAttempt()).toBe('ml');
   });
 
-  it('defaultDetector stays ML while cold and falls back after a failed warm', async () => {
+  it('defaultDetector stays ML even after a failed warm', async () => {
     scanicMock.scan.mockRejectedValue(new Error('model unavailable'));
     const policy = await loadPolicy();
     expect(policy.mlDetectorWarmState()).toBe('cold');
     expect(policy.defaultDetector()).toBe('ml');
     await expect(policy.warmMlDetector()).resolves.toBe(false);
     expect(policy.mlDetectorWarmState()).toBe('failed');
-    expect(policy.defaultDetector()).toBe('classical');
+    expect(policy.defaultDetector()).toBe('ml');
   });
 });
 

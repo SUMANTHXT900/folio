@@ -6,9 +6,9 @@
  * while mounted. The camera phase leads with a full-bleed viewfinder — no
  * scroll needed to find it. The portal is NEVER wrapped in AnimatePresence.
  *
- * Detection is ML-first (self-hosted same-origin assets under
- * `public/assets/scanic-ml/`), classical only as an honest fallback when the
- * ML detector throws. Corner *types* come from the worker agent's barrel
+ * Detection is ML-only (D46 — self-hosted same-origin assets under
+ * `public/assets/scanic-ml/`, precached at install). An ML miss means the
+ * full frame is used, never a guessed crop. Corner *types* come from the worker agent's barrel
  * (`./scan/index`), the single source of truth; detection + warp run through
  * `ScanicClient` (`./scan/scanicClient`) on the module scan worker — scanic
  * never executes on the main thread here (the worker self-warms its own ML
@@ -846,14 +846,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   // fallback drawImage reads raw pixels, never the CSS transform).
   const previewMirrored = facing === 'user' && mirrored;
 
-  /* ---------------- detection (ML default, classical fallback, worker) ---------------- */
+  /* ---------------- detection (ML only, worker) ---------------- */
 
   /**
    * Worker detection for one queued entry. Decodes a full-resolution
    * ImageData COPY of the original (the worker transfers/neuters it, so the
-   * copy is single-use) and sends it to the scan worker ML-first; the
-   * worker's one-shot classical fallback runs inside the worker on ANY ML
-   * miss/failure, and the result names the detector behind the corners.
+   * copy is single-use) and sends it to the scan worker for ML detection.
+   * A null quad means the ML found no page: croppable full-frame.
    * Entries, corners, notes, and statuses are byte-identical to the old
    * inline runtime — only the execution thread changed.
    */
@@ -892,9 +891,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         ),
       );
       try {
-        // ML-first with the worker's internal classical fallback: a null
-        // quad means BOTH missed (croppable full-frame); a classical-backed
-        // quad means ML saw nothing but classical placed an outline.
+        // ML-only (D46): a null quad means the ML found no page, and the
+        // entry settles croppable full-frame below. No guessed crops, ever.
         const result = await getScanClient().detect(image, DEFAULT_DETECTOR);
         if (!mountedRef.current) return;
         if (result.corners !== null) {
@@ -905,10 +903,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     ...e,
                     status: 'ready' as const,
                     corners: result.corners,
-                    note:
-                      result.detector === 'classical'
-                        ? 'ML found no page — classical detection placed this outline; adjust freely.'
-                        : null,
+                    note: null,
                   }
                 : e,
             ),
@@ -929,7 +924,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         );
       } catch {
         // Worker crash/unavailable: degrade to full-frame, honestly labelled.
-        // Classical failure inside the worker lands here the same way.
+        // An ML miss inside the worker lands here the same way.
         if (!mountedRef.current) return;
         setEntries((prev) =>
           prev.map((e) =>

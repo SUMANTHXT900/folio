@@ -8,13 +8,11 @@
  * ScanicClient (this file: lazy worker, epoch guards, cancel-by-terminate)
  *   │  postMessage with the ImageData pixels as TRANSFERRED ArrayBuffer
  *   ▼
- * scanic.worker.ts (scanic Scanner init-once, ML-first + warp)
+ * scanic.worker.ts (scanic Scanner init-once, ML-only + warp)
  * ```
  *
- * Runtime status (D34/D35): the shipped UI still calls scanic directly on the
- * main thread; this client + worker core is the tested swap foundation for
- * background processing — adopting it must keep the review UI's DOM contract
- * unchanged.
+ * Runtime status (D34/D35/D46): capture detection + warp run through this
+ * client; the review UI's DOM contract is unchanged.
  *
  * Ownership rules:
  * - `detect()` and `extract()` TRANSFER the image's pixel buffer
@@ -70,9 +68,8 @@ export interface ScanicClientOptions {
   createWorker?: () => Worker;
   /**
    * Resolves the detector for a `detect()` call made without an explicit
-   * one. Defaults to the ML-first policy: ML, unless a warm preload in this
-   * context already proved ML unavailable (then classical, silently — see
-   * `detectorPolicy.ts`). `redetect()` ignores this seam.
+   * one. Defaults to the policy default: ML, unconditionally (D46).
+   * `redetect()` ignores this seam.
    */
   defaultDetector?: () => ScanicDetectorKind;
 }
@@ -119,14 +116,13 @@ export class ScanicClient {
   }
 
   /**
-   * Document detection on a full-resolution ImageData, ML-first. With no
-   * explicit detector the policy default applies: ML, unless a warm preload
-   * already proved ML unavailable in this context (then classical, silently).
-   * The worker answers `'ml'` requests with one classical fallback on ANY ML
-   * failure, and the result names the detector behind the corners. The
-   * image's pixel buffer is transferred (the caller's ImageData is
-   * neutered); corners come back in FULL-RESOLUTION input pixels and
-   * `confidence` is scanic's own 0–1 confidence (null when unavailable).
+   * Document detection on a full-resolution ImageData, ML-only (D46). With
+   * no explicit detector the policy default (ML) applies. An ML miss
+   * resolves to `success: false` with null corners (the caller uses the
+   * full frame). The image's pixel buffer is transferred (the caller's
+   * ImageData is neutered); corners come back in FULL-RESOLUTION input
+   * pixels and `confidence` is scanic's own 0–1 confidence (null when
+   * unavailable).
    */
   async detect(image: ImageData, detector?: ScanicDetectorKind): Promise<ScanicDetectionResult> {
     const id = this.nextRequestId();
@@ -150,12 +146,9 @@ export class ScanicClient {
   }
 
   /**
-   * Fresh detection for the adjust screen's Re-detect action: forces the ML
-   * attempt, bypassing the cached warm-failure fallback that `detect()` may
-   * have applied. The request itself keeps the worker's ML-then-classical
-   * fallback policy; detection results are never cached, so this is the
-   * explicit re-run. The image's pixel buffer transfers exactly like
-   * `detect()`.
+   * Fresh detection for the adjust screen's Re-detect action: an explicit
+   * ML re-run (detection results are never cached). The image's pixel
+   * buffer transfers exactly like `detect()`.
    */
   async redetect(image: ImageData): Promise<ScanicDetectionResult> {
     return this.detect(image, DEFAULT_DETECTOR);

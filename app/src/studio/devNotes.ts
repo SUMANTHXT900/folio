@@ -41,7 +41,7 @@ export const DEV_NOTES: DevNote[] = [
     date: '2026-10-04',
     notes: [
       'Scanner opens as a full-screen takeover with body scroll-lock instead of an in-page panel.',
-      'ML document detection is the default; when it finds nothing, classical detection silently takes over.',
+      'ML document detection only — a miss keeps the full frame, never a guessed crop (D46: classical removed).',
       'Review keeps the detection overlay for crop-adjust — Apply and Re-detect refresh it in place.',
       'Warped page previews are reactive: a re-warp swaps the image instead of leaving a stale one.',
     ],

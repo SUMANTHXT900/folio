@@ -1,15 +1,15 @@
 // @vitest-environment node
 /**
- * `runScanicDetection` tests: ML-first ordering, exactly one classical
- * fallback on any ML failure (throw, no document, invalid quad), explicit
- * classical without an ML attempt, invalid-quad rejection, and the detector
- * field naming the backend behind every result.
+ * `runScanicDetection` tests (D46: ML only — classical removed): ML success,
+ * ML miss shapes (throw, no document, invalid quad) all resolving to the
+ * full-frame miss result, invalid-quad rejection, and the detector field
+ * always naming ML. A single scanner call per detection, always ML.
  */
 import { describe, expect, it } from 'vitest';
 import './scanicTestImageData';
 import { ML_ASSET_BASE_URL } from './detectorPolicy';
 import { runScanicDetection, type ScanicDetectionScanner } from './scanicDetection';
-import type { ScanicCorners, ScanicDetectorKind } from './scanicProtocol';
+import type { ScanicCorners } from './scanicProtocol';
 
 const CORNERS: ScanicCorners = {
   topLeft: { x: 0, y: 0 },
@@ -25,17 +25,18 @@ type Outcome =
   | { kind: 'throw' };
 
 interface ScannerCall {
-  detector: ScanicDetectorKind;
-  options: { mode: string; detector: ScanicDetectorKind; ml?: unknown };
+  detector: string;
+  options: { mode: string; detector: string; ml?: unknown };
 }
 
-function outcomeToResult(
-  detector: ScanicDetectorKind,
-  outcome: Outcome,
-): { success: boolean; corners: unknown; confidence?: number | null } {
+function outcomeToResult(outcome: Outcome): {
+  success: boolean;
+  corners: unknown;
+  confidence?: number | null;
+} {
   switch (outcome.kind) {
     case 'throw':
-      throw new Error(`${detector} detector exploded`);
+      throw new Error('ml detector exploded');
     case 'no-document':
       return { success: false, corners: null, confidence: null };
     case 'invalid-corners':
@@ -49,26 +50,20 @@ function outcomeToResult(
   }
 }
 
-function makeScanner(outcomes: Record<ScanicDetectorKind, Outcome>): {
-  scanner: ScanicDetectionScanner;
-  calls: ScannerCall[];
-} {
+function makeScanner(outcome: Outcome): { scanner: ScanicDetectionScanner; calls: ScannerCall[] } {
   const calls: ScannerCall[] = [];
   const scanner: ScanicDetectionScanner = {
     async scan(_image, options) {
       calls.push({ detector: options.detector, options });
-      return outcomeToResult(options.detector, outcomes[options.detector]);
+      return outcomeToResult(outcome);
     },
   };
   return { scanner, calls };
 }
 
 describe('runScanicDetection', () => {
-  it('tries ML first with the self-hosted 1-thread options and skips classical on ML success', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'success', confidence: 0.93 },
-      classical: { kind: 'success' },
-    });
+  it('runs ML with the self-hosted 1-thread options and returns its quad', async () => {
+    const { scanner, calls } = makeScanner({ kind: 'success', confidence: 0.93 });
     const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
     expect(result).toEqual({ success: true, corners: CORNERS, confidence: 0.93, detector: 'ml' });
     expect(calls).toHaveLength(1);
@@ -76,90 +71,24 @@ describe('runScanicDetection', () => {
     expect(calls[0].options.ml).toEqual({ assetBaseUrl: ML_ASSET_BASE_URL, numThreads: 1 });
   });
 
-  it('falls back to classical exactly once when ML throws', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'throw' },
-      classical: { kind: 'success', confidence: 0.7 },
-    });
+  it('resolves a full-frame miss (no second attempt) when ML throws', async () => {
+    const { scanner, calls } = makeScanner({ kind: 'throw' });
     const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
-    expect(result).toEqual({
-      success: true,
-      corners: CORNERS,
-      confidence: 0.7,
-      detector: 'classical',
-    });
-    expect(calls.map((call) => call.detector)).toEqual(['ml', 'classical']);
-    expect(calls[1].options.ml).toBeUndefined();
+    expect(result).toEqual({ success: false, corners: null, confidence: null, detector: 'ml' });
+    expect(calls).toHaveLength(1);
   });
 
-  it('falls back to classical exactly once when ML finds no document', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'no-document' },
-      classical: { kind: 'success', confidence: 0.6 },
-    });
+  it('resolves a full-frame miss when ML finds no document', async () => {
+    const { scanner, calls } = makeScanner({ kind: 'no-document' });
     const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
-    expect(result).toEqual({
-      success: true,
-      corners: CORNERS,
-      confidence: 0.6,
-      detector: 'classical',
-    });
-    expect(calls.map((call) => call.detector)).toEqual(['ml', 'classical']);
+    expect(result).toEqual({ success: false, corners: null, confidence: null, detector: 'ml' });
+    expect(calls).toHaveLength(1);
   });
 
-  it('treats an invalid ML quad as a failed attempt and reports the classical result', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'invalid-corners' },
-      classical: { kind: 'success' },
-    });
+  it('treats an invalid ML quad as a miss, never a result', async () => {
+    const { scanner, calls } = makeScanner({ kind: 'invalid-corners' });
     const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
-    expect(result).toMatchObject({ success: true, corners: CORNERS, detector: 'classical' });
-    expect(calls.map((call) => call.detector)).toEqual(['ml', 'classical']);
-  });
-
-  it('never returns invalid corners: both invalid resolves success false with the final detector', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'invalid-corners' },
-      classical: { kind: 'invalid-corners' },
-    });
-    const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
-    expect(result).toEqual({
-      success: false,
-      corners: null,
-      confidence: null,
-      detector: 'classical',
-    });
-    expect(calls.map((call) => call.detector)).toEqual(['ml', 'classical']);
-  });
-
-  it('resolves success false with the final detector when both backends throw', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'throw' },
-      classical: { kind: 'throw' },
-    });
-    const result = await runScanicDetection(scanner, new ImageData(4, 4), 'ml');
-    expect(result).toEqual({
-      success: false,
-      corners: null,
-      confidence: null,
-      detector: 'classical',
-    });
-    expect(calls.map((call) => call.detector)).toEqual(['ml', 'classical']);
-  });
-
-  it('runs classical directly for an explicit classical request (no ML attempt)', async () => {
-    const { scanner, calls } = makeScanner({
-      ml: { kind: 'success' },
-      classical: { kind: 'success', confidence: 0.5 },
-    });
-    const result = await runScanicDetection(scanner, new ImageData(4, 4), 'classical');
-    expect(result).toEqual({
-      success: true,
-      corners: CORNERS,
-      confidence: 0.5,
-      detector: 'classical',
-    });
-    expect(calls.map((call) => call.detector)).toEqual(['classical']);
-    expect(calls[0].options.ml).toBeUndefined();
+    expect(result).toEqual({ success: false, corners: null, confidence: null, detector: 'ml' });
+    expect(calls).toHaveLength(1);
   });
 });

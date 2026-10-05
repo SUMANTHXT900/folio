@@ -332,3 +332,10 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Reason.** A minor bump matches the change (scanner feature wave, no engine/contract break); reserving 2.0.0 keeps the held release checklist meaningful.
 - **Consequences.** Same code ships to both branches via the hostname gate (the About dev-channel card never renders on production — no stripping commit needed). Production is built from `main` with `npm run build` (never dev-server output).
 - **Status.** Release prep on `dev` (2026-10-04); full-suite verification + promotion pending.
+
+## D46 — ML-only detection + full ML precache (user direction 2026-10-05)
+
+- **Decision.** (1) Classical detection fully removed: `runScanicDetection` is ML-only, an ML miss resolves to the full frame uncropped — never a guessed crop. `'classical'` remains accepted on the wire/type but never runs (wire shape untouched). (2) ML assets return to the PWA precache (`ort` in the workbox glob, lazy runtime route deleted): offline-first is the product rule — after first open EVERY feature works with zero network. (3) `defaultDetector()`/`detectorForAttempt()` resolve ML unconditionally.
+- **Reason.** User direction: classical quads were random auto-crops on real photos (worse than no crop); lazy ML violated the offline-first philosophy (a user who never touched ML online would lose it offline). ML was already the default (D35); this makes it the only path.
+- **Consequences.** Precache regrows ~3.4 MB (ML model + runtime back in every install); the 10 MB ceiling / 9 MB alarm rule stands. `ScanicDetectorKind` keeps the `'classical'` variant for wire stability.
+- **Status.** Implemented on `dev`; verification SCOPED (scoped suites + tsc/lint/format; full suite + E2E laptop-side per standing instruction).

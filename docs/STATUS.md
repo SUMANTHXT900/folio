@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current as of v1.10.0 on `dev` (2026-10-05 — interaction-performance pass: Images thumbs at import, scan worker swap, PDF-tool fixes, engine efficiency; scoped verification only, full suite + E2E pending laptop-side). v1.9.7 update-feature repair shipped to dev Cloudflare 2026-10-05. Production (`main`) still carries v1.9.5.
+> Current as of v1.10.1 on `dev` (2026-10-05 — D46 ML-only + full precache; scoped verification, full suite + E2E pending laptop-side). v1.10.0 interaction pass + v1.9.7 update repair on dev Cloudflare. Production (`main`) still carries v1.9.5.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
