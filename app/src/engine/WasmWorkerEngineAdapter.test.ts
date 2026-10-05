@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * `WasmWorkerEngineAdapter` unit tests (offline, fake worker).
  *

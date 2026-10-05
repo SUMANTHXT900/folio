@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * `ScanicClient` tests with a FakeWorker: lazy single-worker creation,
  * transfer semantics (the exact pixel buffer is posted as transferable),

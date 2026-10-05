@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * `detectorPolicy` tests: ML-first constants, `detectorForAttempt`, and
  * `warmMlDetector` — one real preload scan with the policy options, success

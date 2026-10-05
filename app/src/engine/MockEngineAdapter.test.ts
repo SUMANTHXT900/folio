@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Engine adapter tests: success, failure, cancellation, and event /
  * progress / result propagation through the real adapter boundary.

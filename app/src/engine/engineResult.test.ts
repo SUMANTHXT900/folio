@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * imageCount plumbing regression tests (production audit §6).
  *

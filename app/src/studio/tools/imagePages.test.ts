@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Page-collection unit tests (pure logic — no DOM, no workers).
  *

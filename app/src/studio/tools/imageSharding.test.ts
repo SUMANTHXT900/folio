@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Sharded images-build tests (PERFORMANCE.md P3 item 13).
  *

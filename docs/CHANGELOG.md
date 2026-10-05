@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.9.6 — Test-suite speed: node env for logic-only tests (`dev`, 2026-10-05)
+
+Test-only change, no shipped code. 14 pure-logic test files now run under `// @vitest-environment node` instead of the global jsdom (each verified green under node first). Two files stay on jsdom: `usePageThumbs` (needs `@testing-library/react`) and `updateManager` (uses unguarded `window.setTimeout` — feeds the pending update-feature fix batch). Full suite 448/448, lint/format clean; vitest wall time ~270s → ~206s on the 1GB VPS.
+
 ## v1.9.5 — On-device document scanner (scanic ML) (dev → main, 2026-10-04)
 
 Scanner ML wave to production (D33–D45, `dev` line; v2.0.0 stays HELD — scanner ships, engine/tools unchanged). About-page version tree follows automatically via `__FOLIO_VERSION__`; the `latest` entry copy is updated for this release.

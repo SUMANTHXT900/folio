@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Protocol validation tests: corner shape/finiteness/geometry checks and the
  * detector-kind guard. A collapsed or non-finite quad must never reach the

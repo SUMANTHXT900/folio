@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * `runScanicDetection` tests: ML-first ordering, exactly one classical
  * fallback on any ML failure (throw, no document, invalid quad), explicit

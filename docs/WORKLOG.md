@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-05 — Test-suite speed: node env for logic-only tests (v1.9.6)
+
+- **Objective.** Cut full-suite wall time on slow machines; user asked for adaptive test runs (scoped tests by default, full suite pre-push) plus visible timing.
+- **Work.** Test-only: `// @vitest-environment node` pragma on 14 pure-logic test files (each verified green under node before editing). `usePageThumbs` stays jsdom (needs `@testing-library/react`); `updateManager` stays jsdom (unguarded `window.setTimeout` fails under node — recorded as input to the pending update-feature fix batch, not fixed here). New `folio-test-optimizer` agent skill: scoped-first rule, start/end timestamp wrapper, measured suite costs.
+- **Verification.** Full suite 448/448, eslint clean, prettier clean; vitest wall ~270s → ~206s (environment setup 145s → 92s). Version bumped 1.9.5 → 1.9.6 (test-only polish wave).
+- **Remaining.** Re-measure on the laptop (faster box, smaller absolute win, same proportional jsdom saving).
+
 ## 2026-08-16 → 2026-08-17 — Foundation and v1.1.0
 
 - **Objective.** Establish the client-side PDF tools app and its editorial identity.

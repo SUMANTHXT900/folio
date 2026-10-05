@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Windowed page-processing unit tests (Lesson 14).
  *

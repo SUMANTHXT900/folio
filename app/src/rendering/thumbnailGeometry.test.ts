@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Thumbnail geometry unit tests: pure aspect-ratio math.
  *
