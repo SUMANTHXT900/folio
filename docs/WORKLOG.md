@@ -16,7 +16,7 @@ Chronological record of meaningful development events. Each entry records object
 - **Direction.** User: classical quads are random auto-crops (remove it entirely — miss = full frame), and lazy ML violates offline-first (precache everything at first open).
 - **Work.** `runScanicDetection` ML-only (single attempt, miss → null full-frame); `defaultDetector()`/`detectorForAttempt()` unconditional ML; `'classical'` inert on wire/type; ML assets back in workbox precache (`ort` glob, runtime route deleted); copy updates (About, devNotes, worker/client comments); D46 decision entry; rewritten scan suites (detection, policy, client, capture).
 - **Verification.** tsc clean; scan area 141/141 (capture 66, review 35, client 11, protocol 7, processor 6, warp 6, policy 6, detection 4); eslint/prettier clean. Full suite + E2E laptop-side.
-- **Deploy.** Follows this commit: `dev` push + Cloudflare branch-`dev` direct upload; prod untouched.
+- **Deploy.** Pushed `dev` (`40743bc`); production build green (precache 44 entries / 7734.67 KiB — ML back in); Cloudflare branch-`dev` deploy `96a60264`, bundle `index-BfwhUQrM.js` live and 200. Prod untouched.
 
 ## 2026-10-05 — Update feature repair: prompt semantics end-to-end (v1.9.7)
 
