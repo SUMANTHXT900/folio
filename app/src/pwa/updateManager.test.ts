@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  APPLIED_FLAG,
   classifyEnv,
   createUpdateManager,
   statusTextFor,
@@ -145,18 +146,21 @@ describe('createUpdateManager', () => {
 
   it('applyUpdate delegates to the waiting worker (one tap)', async () => {
     let applied: (() => void) | null = null;
+    const reload = vi.fn();
     const manager = createUpdateManager({
       register: () =>
         Promise.resolve({ update: () => Promise.resolve(), applyUpdate: () => applied?.() }),
       env: () => onlineHost,
       settleWaitMs: 100,
+      reload,
     });
     const check = manager.checkForUpdates(true);
     await vi.advanceTimersByTimeAsync(300);
     await check;
     applied = vi.fn();
-    manager.applyUpdate();
+    await manager.applyUpdate();
     expect(applied).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it('caps the diagnostic log', async () => {
@@ -244,20 +248,24 @@ describe('createUpdateManager', () => {
 
   it('applyUpdate sets a visible applying phase before delegating', async () => {
     const applyUpdate = vi.fn();
+    const reload = vi.fn();
     const manager = createUpdateManager({
       register: () => Promise.resolve({ update: () => Promise.resolve(), applyUpdate }),
       env: () => onlineHost,
       settleWaitMs: 100,
+      reload,
     });
     const check = manager.checkForUpdates(true);
     await vi.advanceTimersByTimeAsync(300);
     await check;
-    manager.applyUpdate();
+    const applying = manager.applyUpdate();
     expect(applyUpdate).toHaveBeenCalledTimes(1);
     expect(manager.snapshot().phase).toBe('applying');
     expect(manager.snapshot().statusText).toBe('Installing update… Reloading.');
     expect(manager.snapshot().canCheck).toBe(false);
     expect(manager.snapshot().log.join('\n')).toMatch(/Activating the waiting worker/);
+    await applying;
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it('applyUpdate without a registrar stays put (no crash, no phase change)', () => {
@@ -289,5 +297,178 @@ describe('createUpdateManager', () => {
     await check;
     // UpdateCard reads this flag directly to auto-expand its details.
     expect(manager.snapshot().updateAvailable).toBe(true);
+  });
+
+  it('classifies IPv6 loopback (either spelling), empty, 0.0.0.0 and *.localhost as local', () => {
+    for (const hostname of ['::1', '[::1]', '', '0.0.0.0', 'app.localhost', 'LOCALHOST']) {
+      expect(classifyEnv({ ...onlineHost, hostname })).toBe('local');
+    }
+  });
+
+  it('zero auto-check delay disables the silent launch check (like negative)', async () => {
+    const update = vi.fn(() => Promise.resolve());
+    const register = vi.fn(async (h: RegistrarHooks) => fakeRegistrar(h, { update }));
+    const manager = createUpdateManager({
+      register,
+      env: () => onlineHost,
+      autoCheckDelayMs: 0,
+      settleWaitMs: 100,
+    });
+    manager.init();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('fails loudly when registration.update() hangs (bounded, no stuck checking)', async () => {
+    const manager = createUpdateManager({
+      register: (h) =>
+        Promise.resolve(fakeRegistrar(h, { update: () => new Promise<void>(() => {}) })),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      updateTimeoutMs: 300,
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    await check;
+    expect(manager.snapshot().phase).toBe('error');
+    expect(manager.snapshot().log.join('\n')).toMatch(/timed out/);
+    expect(manager.snapshot().canCheck).toBe(true);
+  });
+
+  it('reports missing registration as an error, never false up-to-date', async () => {
+    const manager = createUpdateManager({
+      register: (h) =>
+        Promise.resolve(
+          fakeRegistrar(h, {
+            update: () => Promise.reject(new Error('no service worker registration')),
+          }),
+        ),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    expect(manager.snapshot().phase).toBe('error');
+    expect(manager.snapshot().phase).not.toBe('up-to-date');
+  });
+
+  it('failed activation unfreezes the UI with a retry instead of sticking on applying', async () => {
+    const reload = vi.fn();
+    let onNeedRefresh: (() => void) | undefined;
+    const manager = createUpdateManager({
+      register: (h) => {
+        onNeedRefresh = h.onNeedRefresh;
+        return Promise.resolve({
+          update: () => Promise.resolve(),
+          applyUpdate: () => Promise.reject(new Error('stuck')),
+        });
+      },
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      reload,
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    onNeedRefresh?.();
+    await manager.applyUpdate();
+    expect(manager.snapshot().phase).toBe('update-available');
+    expect(manager.snapshot().log.join('\n')).toMatch(/Activation failed/);
+    expect(manager.snapshot().canCheck).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('apply is latched exactly-once per page load (double tap, one activation)', async () => {
+    const applyUpdate = vi.fn(() => Promise.resolve());
+    const reload = vi.fn();
+    const manager = createUpdateManager({
+      register: () => Promise.resolve({ update: () => Promise.resolve(), applyUpdate }),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      reload,
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    await Promise.all([manager.applyUpdate(), manager.applyUpdate()]);
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('offline phase stays checkable so the button itself is the retry', async () => {
+    const manager = createUpdateManager({
+      register: (h) => Promise.resolve(fakeRegistrar(h)),
+      env: () => ({ ...onlineHost, online: false }),
+      settleWaitMs: 100,
+    });
+    await manager.checkForUpdates(true);
+    expect(manager.snapshot().phase).toBe('offline');
+    expect(manager.snapshot().canCheck).toBe(true);
+  });
+
+  it('coming back online re-checks without a reload', async () => {
+    let online = false;
+    const update = vi.fn(() => Promise.resolve());
+    const manager = createUpdateManager({
+      register: (h) => Promise.resolve(fakeRegistrar(h, { update })),
+      env: () => ({ ...onlineHost, online }),
+      settleWaitMs: 100,
+    });
+    manager.init();
+    expect(manager.snapshot().phase).toBe('offline');
+    online = true;
+    window.dispatchEvent(new Event('online'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(update).toHaveBeenCalled();
+  });
+
+  it('returning to a visible tab re-checks after the resurface interval', async () => {
+    const update = vi.fn(() => Promise.resolve());
+    const manager = createUpdateManager({
+      register: (h) => Promise.resolve(fakeRegistrar(h, { update })),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      autoCheckDelayMs: -1,
+      resurfaceIntervalMs: 1000,
+    });
+    manager.init();
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    expect(update).toHaveBeenCalledTimes(1);
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(1500);
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(500);
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor);
+    }
+    expect(update).toHaveBeenCalledTimes(2);
+  });
+
+  it('post-reload worker signal names the iOS full-close recovery (no reload loop)', async () => {
+    let onNeedRefresh: (() => void) | undefined;
+    sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+    const manager = createUpdateManager({
+      register: (h) => {
+        onNeedRefresh = h.onNeedRefresh;
+        return Promise.resolve(fakeRegistrar(h));
+      },
+      env: () => onlineHost,
+      autoCheckDelayMs: -1,
+      settleWaitMs: 100,
+    });
+    manager.init();
+    expect(sessionStorage.getItem(APPLIED_FLAG)).toBeNull();
+    onNeedRefresh?.();
+    expect(manager.snapshot().phase).toBe('update-available');
+    expect(manager.snapshot().log.join('\n')).toMatch(/fully close and reopen/);
   });
 });

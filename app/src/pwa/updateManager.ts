@@ -6,14 +6,16 @@
  * diagnostic log), adapted to Folio: framework-free external store so the
  * global banner and the About card share one state without prop drilling.
  *
- * Why this exists (BUGS F-13): `registerType: 'autoUpdate'` updates the
- * service worker in the background, but the open page keeps serving the
- * old precache until it reloads — and nothing in the UI ever said an
- * update was waiting. On mobile that meant "hard refresh roulette" after
- * every deploy. This manager surfaces the pending update (banner + About
- * card) and applies it with one tap (`updateSW(true)` → reload into the
- * new worker). Stale-chunk recovery (`ErrorBlock`, F-12) stays as the
- * backstop for pages that miss the banner.
+ * Why this exists (BUGS F-13): with no update UI, users sat on the stale
+ * precache after every deploy. The manager surfaces the pending update
+ * (banner + About card) and applies it with one tap. Stale-chunk recovery
+ * (`ErrorBlock`, F-12) stays as the backstop for pages that miss the banner.
+ *
+ * Hard requirement, verified against the installed `vite-plugin-pwa`
+ * client: this manager assumes `registerType: 'prompt'` semantics. Under
+ * `'autoUpdate'` the client never calls `onNeedRefresh` (it activates in
+ * the background and force-reloads, and `updateSW(true)` is a skip-waiting
+ * no-op) — the whole UI below would go dead. See `vite.config.ts`.
  */
 
 export type UpdatePhase =
@@ -52,10 +54,26 @@ export type EnvClass = 'local' | 'unsupported' | 'ok';
  * Classifies the runtime for OTA updates (SYNAPSE logic, trimmed):
  * localhost and insecure LAN origins can never receive a worker update,
  * and some browsers/contexts have no Service Worker at all.
+ *
+ * Note: `location.hostname` strips IPv6 brackets, so the loopback check
+ * is `'::1'`, never `'[::1]'`. Empty hostname covers `file://`.
  */
 export function classifyEnv(env: UpdateEnv): EnvClass {
-  const h = env.hostname;
-  if (h === 'localhost' || h === '127.0.0.1' || h === '[::1]') return 'local';
+  // Brackets stripped defensively: location.hostname never yields them,
+  // but callers/tests may pass the '[::1]' literal.
+  const h = env.hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  if (
+    h === '' ||
+    h === 'localhost' ||
+    h.endsWith('.localhost') ||
+    h === '127.0.0.1' ||
+    h === '::1' ||
+    h === '0.0.0.0'
+  )
+    return 'local';
   const lan =
     h.startsWith('192.168.') ||
     h.startsWith('10.') ||
@@ -86,6 +104,7 @@ export interface Registrar {
 export interface RegistrarHooks {
   onNeedRefresh: () => void;
   onOfflineReady: () => void;
+  onRegisterError: (error: unknown) => void;
 }
 
 /** Default wiring over `virtual:pwa-register` (production build only). */
@@ -95,6 +114,7 @@ async function defaultRegister(hooks: RegistrarHooks): Promise<Registrar> {
   const updateSW = mod.registerSW({
     onNeedRefresh: hooks.onNeedRefresh,
     onOfflineReady: hooks.onOfflineReady,
+    onRegisterError: hooks.onRegisterError,
     onRegisteredSW: (_url, reg) => {
       registration = reg ?? undefined;
     },
@@ -102,8 +122,11 @@ async function defaultRegister(hooks: RegistrarHooks): Promise<Registrar> {
   return {
     update: async () => {
       const reg = registration ?? (await navigator.serviceWorker.getRegistration());
-      await reg?.update();
+      if (!reg) throw new Error('no service worker registration (worker blocked or unsupported)');
+      await reg.update();
     },
+    // Prompt mode: skip-waiting + reload. (Under autoUpdate this is a no-op —
+    // hence the prompt requirement documented at the top of this file.)
     applyUpdate: () => updateSW(true),
   };
 }
@@ -111,14 +134,27 @@ async function defaultRegister(hooks: RegistrarHooks): Promise<Registrar> {
 export interface UpdateManagerOptions {
   register?: (hooks: RegistrarHooks) => Promise<Registrar>;
   env?: () => UpdateEnv;
-  /** Silent launch-check delay (SYNAPSE: ~3s). Zero/negative disables. */
+  /** Page reload used after activation. Injectable so tests never navigate. */
+  reload?: () => void;
+  /** Silent launch-check delay. Zero/negative disables. */
   autoCheckDelayMs?: number;
   /** How long a manual check waits for the worker signal before calling it current. */
   settleWaitMs?: number;
+  /** Upper bound on `registration.update()` before the check fails loudly. */
+  updateTimeoutMs?: number;
+  /** Upper bound on worker activation before the UI unfreezes with a retry. */
+  applyTimeoutMs?: number;
+  /** Re-check at most this often when the app returns to the foreground. */
+  resurfaceIntervalMs?: number;
   maxLogLines?: number;
 }
 
 const MAX_LOG_DEFAULT = 30;
+const UPDATE_TIMEOUT_DEFAULT_MS = 15000;
+const APPLY_TIMEOUT_DEFAULT_MS = 8000;
+const RESURFACE_DEFAULT_MS = 60 * 60 * 1000;
+/** sessionStorage flag: set before the apply-reload, read on next launch. Exported for tests. */
+export const APPLIED_FLAG = 'folio-update-applied-at';
 
 export function statusTextFor(phase: UpdatePhase): string {
   switch (phase) {
@@ -145,11 +181,33 @@ export function statusTextFor(phase: UpdatePhase): string {
   }
 }
 
+/** Rejects if `work` takes longer than `ms`. Timer via globalThis: works in workers/tests, not just windows. */
+function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let id: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    id = globalThis.setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+      ms,
+    );
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (id !== undefined) globalThis.clearTimeout(id);
+  });
+}
+
 export function createUpdateManager(options: UpdateManagerOptions = {}) {
   const register = options.register ?? defaultRegister;
   const readEnv = options.env ?? defaultEnv;
+  const reloadFn =
+    options.reload ??
+    (() => {
+      window.location.reload();
+    });
   const autoCheckDelayMs = options.autoCheckDelayMs ?? 3000;
   const settleWaitMs = options.settleWaitMs ?? 5000;
+  const updateTimeoutMs = options.updateTimeoutMs ?? UPDATE_TIMEOUT_DEFAULT_MS;
+  const applyTimeoutMs = options.applyTimeoutMs ?? APPLY_TIMEOUT_DEFAULT_MS;
+  const resurfaceIntervalMs = options.resurfaceIntervalMs ?? RESURFACE_DEFAULT_MS;
   const maxLog = options.maxLogLines ?? MAX_LOG_DEFAULT;
 
   let phase: UpdatePhase = 'unknown';
@@ -158,7 +216,12 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   let log: string[] = [];
   let registrar: Registrar | null = null;
   let initialized = false;
+  let listenersAttached = false;
   let checkGen = 0;
+  let lastCheckAt = 0;
+  let applyLatched = false;
+  /** True when this launch follows our own apply-reload (iOS may still serve the old worker). */
+  let justReloadedForUpdate = false;
   let cached: UpdateSnapshot | null = null;
   const listeners = new Set<() => void>();
 
@@ -192,7 +255,11 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         checking,
         statusText: statusTextFor(phase),
         log,
-        canCheck: !checking && (phase === 'idle' || phase === 'up-to-date' || phase === 'error'),
+        // 'offline' stays checkable: it is the retry button once back online.
+        // 'applying' stays locked (the apply path is latched, exactly-once).
+        canCheck:
+          !checking &&
+          (phase === 'idle' || phase === 'up-to-date' || phase === 'error' || phase === 'offline'),
       };
     }
     return cached;
@@ -201,6 +268,13 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   const onNeedRefresh = () => {
     updateAvailable = true;
     pushLog('Service worker reported a waiting update.');
+    if (justReloadedForUpdate) {
+      // The apply-reload happened but the old worker is still in charge —
+      // the iOS standalone signature (worker updates only stick after the
+      // app is fully closed). Say so plainly instead of looping reloads.
+      pushLog('Still on the old version after reload — fully close and reopen the app to finish.');
+      justReloadedForUpdate = false;
+    }
     setPhase('update-available');
   };
 
@@ -209,13 +283,32 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     try {
       registrar = await register({
         onNeedRefresh,
-        onOfflineReady: () => pushLog('Assets cached for offline use.'),
+        onOfflineReady: () => {
+          pushLog('Assets cached for offline use.');
+          emit();
+        },
+        onRegisterError: (error) => {
+          pushLog(
+            `Worker registration error: ${error instanceof Error ? error.message : 'unknown error'}`,
+          );
+          emit();
+        },
       });
       return registrar;
     } catch (error) {
       pushLog(`Registration failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+      emit();
       return null;
     }
+  };
+
+  /** Retire an in-flight check (offline mid-check): unblocks the UI without lying about the result. */
+  const retireCheck = (gen: number, reason: string) => {
+    if (checkGen !== gen) return;
+    checkGen += 1;
+    checking = false;
+    pushLog(reason);
+    setPhase('offline');
   };
 
   /** Silent or manual check. Manual runs always log; silent runs stay quiet unless an update is found. */
@@ -249,6 +342,7 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       return;
     }
     checking = true;
+    lastCheckAt = Date.now();
     const gen = (checkGen += 1);
     // Literal truth for the settle window label (e.g. 5000ms → "5s").
     const secsValue = settleWaitMs / 1000;
@@ -260,7 +354,10 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       emit();
     }
     try {
-      await reg.update();
+      // Bounded: a stalled update() must fail loudly, never hang the UI in
+      // 'checking' with a dead button (previous behavior had no timeout —
+      // the settle window only started after update() resolved).
+      await withTimeout(reg.update(), updateTimeoutMs, 'Re-fetching sw.js');
       if (manual) pushLog(`Waiting ${secsLabel} for the worker to answer…`);
       // The worker signals via onNeedRefresh; if nothing arrives within
       // the settle window the running version is current (SYNAPSE wait).
@@ -279,7 +376,7 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
             resolve(false);
             return;
           }
-          window.setTimeout(tick, 200);
+          globalThis.setTimeout(tick, 200);
         };
         tick();
       });
@@ -302,20 +399,88 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     }
   };
 
-  /** One-tap apply: activates the waiting worker and reloads into it. */
-  const applyUpdate = () => {
-    if (registrar === null) return;
-    // Visible phase first: updateSW(true) reloads the page, so this status
+  /**
+   * One-tap apply: activates the waiting worker and reloads into it.
+   * Latched exactly-once per page load; a failed activation unfreezes the
+   * UI back to the waiting version with a retry instead of sticking on
+   * 'applying' forever (the previous `void applyUpdate()` had no error
+   * path at all — and under autoUpdate it was a silent no-op).
+   */
+  const applyUpdate = async (): Promise<void> => {
+    const active = registrar;
+    if (active === null || applyLatched || phase === 'applying') return;
+    applyLatched = true;
+    // Visible phase first: the reload lands a moment later, so this status
     // shows only briefly — but the tap must acknowledge before the reload.
     pushLog('Activating the waiting worker and reloading…');
     setPhase('applying');
-    void registrar.applyUpdate();
+    try {
+      // Invoked synchronously (not deferred): a throwing registrar fails
+      // fast into the retry path below instead of an unhandled rejection.
+      const activation = active.applyUpdate();
+      await withTimeout(
+        Promise.resolve(activation),
+        applyTimeoutMs,
+        'Activating the waiting worker',
+      );
+      try {
+        sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+      } catch {
+        // Private mode / blocked storage: the iOS resume hint is skipped,
+        // the update itself still proceeds.
+      }
+      reloadFn();
+    } catch (error) {
+      applyLatched = false;
+      pushLog(
+        `Activation failed (${error instanceof Error ? error.message : 'unknown error'}) — still on the waiting version. Retry, or reload manually.`,
+      );
+      // Back to the waiting version when one is known; plain error when the
+      // apply was somehow tapped with no signalled update (banner keys on
+      // the flag, so only the matching phase can unfreeze its UI).
+      setPhase(updateAvailable ? 'update-available' : 'error');
+    }
+  };
+
+  /** Foreground resurface: long-lived/mobile tabs re-check when visible again. */
+  const attachResurfaceListeners = () => {
+    if (listenersAttached) return;
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    listenersAttached = true;
+    window.addEventListener('online', () => {
+      if (phase === 'offline') {
+        pushLog('Back online — re-checking for updates.');
+        setPhase('idle');
+        void checkForUpdates(false);
+      }
+    });
+    window.addEventListener('offline', () => {
+      if (checking) retireCheck(checkGen, 'Connection lost mid-check — tap Check to retry.');
+    });
+    const resurface = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (checking || updateAvailable) return;
+      if (Date.now() - lastCheckAt < resurfaceIntervalMs) return;
+      if (phase !== 'idle' && phase !== 'up-to-date') return;
+      void checkForUpdates(false);
+    };
+    document.addEventListener('visibilitychange', resurface);
+    // pageshow covers bfcache restores, where visibilitychange may not fire.
+    window.addEventListener('pageshow', resurface);
   };
 
   /** Idempotent launch wiring: registers the worker, then a silent check. */
   const init = () => {
     if (initialized) return;
     initialized = true;
+    try {
+      if (sessionStorage.getItem(APPLIED_FLAG) !== null) {
+        sessionStorage.removeItem(APPLIED_FLAG);
+        justReloadedForUpdate = true;
+      }
+    } catch {
+      // Blocked storage: skip the resume hint, nothing else changes.
+    }
     const env = readEnv();
     const cls = classifyEnv(env);
     if (cls === 'local') {
@@ -326,6 +491,7 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       setPhase('unsupported');
       return;
     }
+    attachResurfaceListeners();
     if (!env.online) {
       setPhase('offline');
       return;
@@ -333,8 +499,10 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     setPhase('idle');
     void ensureRegistrar().then((reg) => {
       if (reg === null) return;
-      if (autoCheckDelayMs >= 0 && typeof window !== 'undefined') {
-        window.setTimeout(() => {
+      // Zero/negative disables the silent launch check (matches the option
+      // comment; the old `>= 0` scheduled a 0ms check for zero).
+      if (autoCheckDelayMs > 0 && typeof globalThis.setTimeout !== 'undefined') {
+        globalThis.setTimeout(() => {
           void checkForUpdates(false);
         }, autoCheckDelayMs);
       }

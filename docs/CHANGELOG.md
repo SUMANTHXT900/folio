@@ -2,6 +2,13 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.9.7 — Update feature repair: prompt semantics end-to-end (`dev`, 2026-10-05)
+
+Fixes the About "App updates" feature the user reported as buggy. Root cause: `registerType: 'autoUpdate'` in `vite.config.ts` bypasses `onNeedRefresh` entirely (background activate + forced reload; `updateSW(true)` a no-op), while the banner/About UI was written for prompt semantics — verified against the installed plugin client. Now `registerType: 'prompt'` with user-gated activation (exactly-once reload latch, bounded activation with retry fallback, injectable reload for tests).
+- Manager: `registration.update()` bounded (15s timeout, loud failure instead of stuck checking); missing registration is an error, never false up-to-date; failed activation unfreezes to a retry instead of sticking on applying; offline phase stays checkable + auto re-checks on `online`; foreground resurface (`visibilitychange`/`pageshow`, hourly); iOS resume hint (fully close and reopen) instead of reload loops; `::1`/`0.0.0.0`/`*.localhost`/empty guards; silent-init failures now logged+emitted.
+- UI: banner dismiss resets on newer arrivals; busy guard observes attributes; About details toggle authoritative; React key/index fix.
+- Tests: 10 new manager tests + new 4-test banner suite (incl. framer-motion mock + explicit RTL cleanup notes); suite 462/462.
+
 ## v1.9.6 — Test-suite speed: node env for logic-only tests (`dev`, 2026-10-05)
 
 Test-only change, no shipped code. 14 pure-logic test files now run under `// @vitest-environment node` instead of the global jsdom (each verified green under node first). Two files stay on jsdom: `usePageThumbs` (needs `@testing-library/react`) and `updateManager` (uses unguarded `window.setTimeout` — feeds the pending update-feature fix batch). Full suite 448/448, lint/format clean; vitest wall time ~270s → ~206s on the 1GB VPS.

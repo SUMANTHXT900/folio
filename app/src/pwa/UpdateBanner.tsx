@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { usePwaUpdate } from './usePwaUpdate';
 
 /**
  * Global update prompt. Renders only while a worker update waits —
  * otherwise it renders nothing (no layout, no listeners beyond the store).
- * Floats above the mobile tool nav (`z-50`) with safe-area clearance.
+ * Floats above the mobile tool nav (`z-[70]`) with safe-area clearance.
  *
  * The whole banner links to the About updates card, where the waiting
  * version is reviewed and applied with one tap. The banner itself never
@@ -16,6 +16,13 @@ import { usePwaUpdate } from './usePwaUpdate';
 export default function UpdateBanner() {
   const state = usePwaUpdate();
   const [dismissed, setDismissed] = useState(false);
+  // A dismiss covers the update it was tapped on — not every future one.
+  // Reset on the false→true transition so a newer arrival re-surfaces.
+  const wasAvailable = useRef(state.updateAvailable);
+  useEffect(() => {
+    if (state.updateAvailable && !wasAvailable.current) setDismissed(false);
+    wasAvailable.current = state.updateAvailable;
+  }, [state.updateAvailable]);
   const busy = useBusyGuard();
   const applying = state.phase === 'applying';
   // Enter/exit is an opacity-only fade (180ms): the banner conditionally
@@ -93,7 +100,10 @@ function useBusyGuard(): boolean {
       setBusy(document.querySelector('[data-scanner-root],[data-import-progress]') !== null);
     check();
     const observer = new MutationObserver(check);
-    observer.observe(document.body, { childList: true, subtree: true });
+    // attributes:true: a mounted progress bar that only updates its value
+    // would otherwise leave the busy copy stale mid-task. querySelector per
+    // mutation is cheap (two selectors, no layout); correctness wins.
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
     return () => observer.disconnect();
   }, []);
   return busy;

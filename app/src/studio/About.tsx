@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { updateManager, usePwaUpdate } from '../pwa/usePwaUpdate';
 import { formatIso } from '../utils/format';
 import { ToolHeading } from './components/ui';
@@ -237,10 +237,12 @@ function DevChannelCard() {
 function UpdateCard() {
   const state = usePwaUpdate();
   const [showLog, setShowLog] = useState(false);
-  // Auto-expand while an update waits: the banner links here, so the pending
-  // version's evidence is visible on arrival. Reads updateAvailable directly —
-  // no extra snapshot field. While waiting, details stay open by design.
-  const expanded = showLog || state.updateAvailable;
+  // Auto-expand when an update arrives (the banner links here), but the
+  // toggle stays authoritative: it owns the state, so Hide always hides.
+  useEffect(() => {
+    if (state.updateAvailable) setShowLog(true);
+  }, [state.updateAvailable]);
+  const expanded = showLog;
   const applying = state.phase === 'applying';
   return (
     <motion.section
@@ -296,7 +298,7 @@ function UpdateCard() {
       {expanded && state.log.length > 0 && (
         <ol className="mt-3 space-y-1 rounded-xl bg-ink-900/[0.04] dark:bg-ink-950/60 p-3 font-mono text-[11px] leading-relaxed text-ink-500 dark:text-ink-300">
           {state.log.map((line, i) => (
-            <li key={`${i}-${line.slice(0, 16)}`}>› {line}</li>
+            <li key={i}>› {line}</li>
           ))}
         </ol>
       )}
@@ -328,9 +330,9 @@ export default function About() {
       />
 
       {/* App updates — one-tap escape from a hard-cached PWA (F-13).
-          The worker updates in the background; this card surfaces the
-          waiting version and applies it, with diagnostics for debugging
-          stale installs on phones. */}
+          The worker downloads in the background and waits; this card
+          surfaces the waiting version and applies it on tap, with
+          diagnostics for debugging stale installs on phones. */}
       <UpdateCard />
 
       {/* Dev channel — visible on every host except production (D36). The

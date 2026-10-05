@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-05 — Update feature repair: prompt semantics end-to-end (v1.9.7)
+
+- **Objective.** User-reported buggy About "App updates" feature; two-analyst deep dive (code bug-hunt + industry best-practice research) before the fix.
+- **Root cause.** `registerType: 'autoUpdate'` bypasses `onNeedRefresh` (verified in the installed plugin client: auto branch never calls it, force-reloads instead, `updateSW(true)` a no-op) while the entire UI assumed prompt semantics — frozen applying state, false up-to-date, surprise mid-session reloads.
+- **Work.** `vite.config.ts` → `registerType: 'prompt'`; manager rewrite (bounded `update()` 15s, missing-registration error, failed-activation retry with latch, offline-checkable + `online` re-check, `visibilitychange`/`pageshow` resurface hourly, iOS full-close hint via apply-reload flag, `::1`/`0.0.0.0`/`*.localhost`/empty guards, `window.setTimeout` → `globalThis`, silent-init failures emitted); banner dismiss-reset + attributes observer + z-index comment; About authoritative details toggle + index keys. 10 new manager tests + new 4-test banner suite (framer-motion mock, explicit RTL cleanup — repo vitest lacks globals so auto-cleanup never runs).
+- **Verification.** VPS-side: 462/462 vitest, eslint/prettier/tsc clean (one iteration: removed unsupported `immediate` option, prettier pass). Version 1.9.6 → 1.9.7.
+- **Remaining.** Canonical E2E (About card flows) re-run on the laptop; Cloudflare Pages `dev` deploy verification after push.
+
 ## 2026-10-05 — Test-suite speed: node env for logic-only tests (v1.9.6)
 
 - **Objective.** Cut full-suite wall time on slow machines; user asked for adaptive test runs (scoped tests by default, full suite pre-push) plus visible timing.
