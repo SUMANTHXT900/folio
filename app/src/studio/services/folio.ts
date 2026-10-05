@@ -768,14 +768,46 @@ export async function encodeThumbCanvases(
 }
 
 /**
+ * Thumbnail size tiers (list/grid vs zoomed).
+ *
+ * List/grid tiles are ~64 CSS px wide, so the default window box is
+ * derived from the display (`64 CSS px × devicePixelRatio`, clamped to
+ * 96–192 — ≈128 at 2×). The 400 box is kept only for zoomed callers
+ * that need a mid-size window render; dialog-scale zoom goes through
+ * `studioPreview` (full-res, DPR-capped) instead.
+ */
+export const THUMB_LIST_BOX = 128;
+export const THUMB_ZOOM_BOX = 400;
+
+/** Display-derived list box: 64 CSS px × DPR, clamped to a sane window. */
+export function thumbListBox(): number {
+  let dpr = 1;
+  try {
+    const v = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      dpr = Math.min(v, 3);
+    }
+  } catch {
+    // Non-DOM (unit tests): fall through at 1×.
+  }
+  return Math.min(192, Math.max(96, Math.round(64 * dpr)));
+}
+
+/**
  * Renders a window of thumbnails with bounded concurrency (engine
  * concurrency 2) and resolves page→objectURL in input order. Canvases
  * are released as their URLs are encoded; windows stay small (the hook
  * uses 24), so transient memory is bounded. Returns a cancellable job.
+ *
+ * Per-page fault isolation: when the bounded batch rejects, the missing
+ * pages are retried one by one — every success is cached and resolved,
+ * every failure is marked by absence (holes stay holes for the hook to
+ * mark failed). Only a total failure (nothing salvaged) rejects.
  */
 export function studioThumbWindow(
   docId: string,
   pages: number[],
+  opts?: { box?: number },
 ): { done: Promise<Map<number, string>>; cancel: () => void } {
   let cancelled = false;
   let cancelJob: (() => void) | null = null;
@@ -795,6 +827,9 @@ export function studioThumbWindow(
       );
     }
     const cache = touchDoc(docId);
+    // List/grid tier by default (≈128 box at 2×); zoomed callers pass an
+    // explicit box (THUMB_ZOOM_BOX). Never the old fixed 400 for lists.
+    const box = opts?.box ?? thumbListBox();
     const missing = pages.filter((page) => cache.get(page) === undefined);
     const out = new Map<number, string>();
     for (const page of pages) {
@@ -807,7 +842,7 @@ export function studioThumbWindow(
       return out;
     }
     const job = thumbs.generateThumbnails(renderId, missing, {
-      size: { width: 400, height: 400 },
+      size: { width: box, height: box },
       concurrency: 2,
     });
     cancelJob = (): void => job.cancel();
@@ -890,6 +925,95 @@ export function studioThumbWindow(
           thumbCacheSet(live, docId, page, url);
           out.set(page, url);
         }
+      }
+      return out;
+    } catch (batchError) {
+      // Per-page fault isolation: one bad page must not sink the window.
+      // Retry the missing pages individually — cache every success, mark
+      // every failure by absence (holes stay holes; the hook marks them
+      // failed so later waves never retry them). Cancellation and a closed
+      // document still fail the window; only a total failure rethrows the
+      // original batch error.
+      if (cancelJob !== null) {
+        untrackThumbJob(docId, cancelJob);
+        cancelJob = null;
+      }
+      const batchCode = (batchError as { code?: string })?.code;
+      if (cancelled || batchCode === 'CANCELLED') {
+        throw batchError;
+      }
+      const cancelledError = (): StudioError =>
+        toStudioError({ code: 'CANCELLED', message: 'thumbnail job was cancelled' }, 'pdf.inspect');
+      for (const page of missing) {
+        if (cancelled) {
+          throw cancelledError();
+        }
+        const single = thumbs.generateThumbnail(renderId, page, {
+          size: { width: box, height: box },
+        });
+        const cancelSingle = (): void => single.cancel();
+        cancelJob = cancelSingle;
+        trackThumbJob(docId, cancelSingle);
+        let canvas: HTMLCanvasElement | null = null;
+        try {
+          const one = await single.promise;
+          canvas = one.canvas;
+          if (cancelled) {
+            throw cancelledError();
+          }
+          const url = await canvasToUrl(canvas);
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas = null;
+          if (cancelled) {
+            try {
+              URL.revokeObjectURL(url);
+            } catch {
+              // Best effort.
+            }
+            throw cancelledError();
+          }
+          const liveSingle = liveThumbCache(docId);
+          if (liveSingle === null) {
+            try {
+              URL.revokeObjectURL(url);
+            } catch {
+              // Best effort.
+            }
+            throw toStudioError(
+              { code: 'INVALID_INPUT', message: 'document is no longer open' },
+              'pdf.inspect',
+            );
+          }
+          thumbCacheSet(liveSingle, docId, page, url);
+          out.set(page, url);
+        } catch (singleError) {
+          if (canvas !== null) {
+            try {
+              canvas.width = 0;
+              canvas.height = 0;
+            } catch {
+              // Canvas teardown never masks the real failure.
+            }
+          }
+          const singleCode = (singleError as { code?: string })?.code;
+          if (
+            cancelled ||
+            singleCode === 'CANCELLED' ||
+            singleCode === 'INVALID_INPUT' ||
+            singleCode === 'THUMBNAIL_CLOSED' ||
+            singleCode === 'THUMBNAIL_CANCELLED'
+          ) {
+            throw singleError;
+          }
+          // Marked failure: skip — the page stays a hole.
+        } finally {
+          untrackThumbJob(docId, cancelSingle);
+        }
+      }
+      cancelJob = null;
+      if (out.size === 0) {
+        throw batchError;
       }
       return out;
     } finally {
@@ -1018,45 +1142,110 @@ function purgePreviewsForRender(renderId: string): void {
   }
 }
 
+/** Cancellable full-resolution preview job (mirrors `studioThumbWindow`). */
+export interface StudioPreviewJob {
+  done: Promise<string>;
+  cancel: () => void;
+}
+
 /**
  * Full-resolution preview as an object URL (service-owned, borrowed by
  * the caller — see the ownership rule above; never revoke the result).
+ * Returns a cancellable job: the caller awaits `done` and calls `cancel`
+ * on cleanup/unmount so a superseded render never writes the cache.
+ *
+ * Render scale is capped to the display (`devicePixelRatio`, max 2)
+ * instead of a fixed scale 2: at 1× the dialog shows ~768 CSS px, so a
+ * fixed scale-2 render over-renders by 2× for no visible gain.
  */
-export async function studioPreview(docId: string, pageNumber: number): Promise<string> {
-  const { renders } = await engines();
-  const renderId = renderDocIds.get(docId);
-  if (renderId === undefined) {
-    throw toStudioError(
-      { code: 'INVALID_INPUT', message: 'document is no longer open' },
-      'pdf.inspect',
-    );
-  }
-  const key = previewCacheKey(renderId, pageNumber);
-  const cached = previewCacheHit(key);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const canvas = document.createElement('canvas');
-  const job = renders.renderPage(renderId, pageNumber, canvas, { scale: 2 });
-  const cancel = (): void => job.cancel();
-  trackThumbJob(docId, cancel);
-  const endRender = beginPerfSpan('studio:preview:render');
-  try {
-    await job.promise;
-  } finally {
-    endRender();
-  }
-  const endEncode = beginPerfSpan('studio:preview:encode');
-  try {
-    const url = await canvasToUrl(canvas);
-    previewCacheTouch(key, url);
-    return url;
-  } finally {
-    endEncode();
-    untrackThumbJob(docId, cancel);
-    canvas.width = 0;
-    canvas.height = 0;
-  }
+export function studioPreview(docId: string, pageNumber: number): StudioPreviewJob {
+  let cancelled = false;
+  let cancelActive: (() => void) | null = null;
+  const done = (async (): Promise<string> => {
+    const { renders } = await engines();
+    if (cancelled) {
+      throw toStudioError(
+        { code: 'CANCELLED', message: 'preview job was cancelled' },
+        'pdf.inspect',
+      );
+    }
+    const renderId = renderDocIds.get(docId);
+    if (renderId === undefined) {
+      throw toStudioError(
+        { code: 'INVALID_INPUT', message: 'document is no longer open' },
+        'pdf.inspect',
+      );
+    }
+    const key = previewCacheKey(renderId, pageNumber);
+    const cached = previewCacheHit(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    let dpr = 1;
+    try {
+      const v = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+        dpr = Math.min(v, 3);
+      }
+    } catch {
+      // Non-DOM (unit tests): fall through at 1×.
+    }
+    const scale = Math.min(2, Math.max(1, dpr));
+    const canvas = document.createElement('canvas');
+    const job = renders.renderPage(renderId, pageNumber, canvas, { scale });
+    cancelActive = (): void => job.cancel();
+    const cancel = (): void => job.cancel();
+    trackThumbJob(docId, cancel);
+    const endRender = beginPerfSpan('studio:preview:render');
+    try {
+      await job.promise;
+    } finally {
+      endRender();
+    }
+    if (cancelled) {
+      canvas.width = 0;
+      canvas.height = 0;
+      throw toStudioError(
+        { code: 'CANCELLED', message: 'preview job was cancelled' },
+        'pdf.inspect',
+      );
+    }
+    // Never resurrect a dropped entry: a close mid-flight fails instead
+    // of caching under a stale key.
+    if (renderDocIds.get(docId) === undefined) {
+      canvas.width = 0;
+      canvas.height = 0;
+      throw toStudioError(
+        { code: 'INVALID_INPUT', message: 'document is no longer open' },
+        'pdf.inspect',
+      );
+    }
+    const endEncode = beginPerfSpan('studio:preview:encode');
+    try {
+      const url = await canvasToUrl(canvas);
+      if (cancelled) {
+        revokePreviewUrl(url);
+        throw toStudioError(
+          { code: 'CANCELLED', message: 'preview job was cancelled' },
+          'pdf.inspect',
+        );
+      }
+      previewCacheTouch(key, url);
+      return url;
+    } finally {
+      endEncode();
+      untrackThumbJob(docId, cancel);
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  })();
+  return {
+    done,
+    cancel: () => {
+      cancelled = true;
+      cancelActive?.();
+    },
+  };
 }
 
 /**

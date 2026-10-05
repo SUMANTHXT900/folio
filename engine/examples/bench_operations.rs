@@ -2,7 +2,8 @@
 //!
 //! Benchmarks `pdf.merge` / `pdf.split` / `pdf.rotate` / `pdf.inspect`
 //! (detailed) / `pdf.images_to_pdf` over synthetic in-memory documents at
-//! {1, 10, 50 pages}, plus optional local corpus files via `--dir`.
+//! {1, 10, 50, 500, 2000 pages}, plus optional local corpus files via
+//! `--dir`.
 //!
 //! Filesystem access lives here (a dev-only example), never in the
 //! processing core. Synthetic fixtures are built in memory with `lopdf`
@@ -39,8 +40,10 @@ use folio_engine::testing::pdf::{
     BenchmarkReport,
 };
 
-/// Synthetic document sizes (pages) benched for every operation.
-const SYNTHETIC_SIZES: [u32; 3] = [1, 10, 50];
+/// Synthetic document sizes (pages) benched for every operation. 500/2000
+/// exercise the linear-scaling regime (per-page loops, progress throttle);
+/// the pages are empty US Letter shells, so even 2000 pages stay small.
+const SYNTHETIC_SIZES: [u32; 5] = [1, 10, 50, 500, 2000];
 
 /// One bench target: label plus bytes plus known page count.
 struct BenchDoc {
@@ -53,7 +56,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: cargo run --example bench_operations -- [--dir DIR] [--repeat N] [--json]\n\
          \n\
-         Without --dir only synthetic in-memory documents ({{1, 10, 50 pages}}) are benched.\n\
+         Without --dir only synthetic in-memory documents ({{1, 10, 50, 500, 2000 pages}}) are benched.\n\
          With --dir DIR, every *.pdf in DIR is additionally benched (read-only)."
     );
     std::process::exit(2);

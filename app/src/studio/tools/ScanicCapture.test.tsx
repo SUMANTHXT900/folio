@@ -4,10 +4,11 @@
  * semantics (warped JPEG q0.9 vs byte-identical original, capture order,
  * `scan-NNN.jpg` naming), main-lens scoring, and the portaled corner editor.
  *
- * `scanic` is doubled (jsdom has no camera, no canvas 2D, no WASM): the
- * doubles stay faithful — DOM handle buttons with `data-corner`, arrow-key
- * nudges, Enter/Escape confirm/cancel — so these tests pin the integration
- * contract, not just the component.
+ * `ScanicClient` is doubled (jsdom has no workers, no camera, no canvas 2D,
+ * no WASM): every constructed client shares one set of doubles, and a fake
+ * 2D context bridges decode/encode. Corner handles are the dependency-free
+ * ScanicReview buttons (`data-crop-handle`), so these tests pin the
+ * integration contract, not just the component.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,18 +31,32 @@ import ScanicCapture, {
   scoreBackCamera,
   shouldAutoFire,
 } from './ScanicCapture';
-import { createCornerEditor, extractDocument, scanDocument } from 'scanic';
 import type { ScanicCorners } from './scan/index';
 
-vi.mock('scanic', () => ({
-  scanDocument: vi.fn(),
-  extractDocument: vi.fn(),
-  createCornerEditor: vi.fn(),
+// Detection + warp run through `ScanicClient` (module scan worker); jsdom
+// has no workers/WASM, so every constructed client shares one set of
+// doubles. `ScanicClientError` stays a real class so the component's
+// `instanceof` cancel-swallow checks behave.
+const { __clientMocks } = vi.hoisted(() => ({
+  __clientMocks: { detect: vi.fn(), extract: vi.fn(), terminate: vi.fn() },
 }));
 
-const mockScan = vi.mocked(scanDocument);
-const mockExtract = vi.mocked(extractDocument);
-const mockEditorFactory = vi.mocked(createCornerEditor);
+vi.mock('./scan/scanicClient', () => ({
+  ScanicClient: vi.fn(function (this: unknown) {
+    return __clientMocks;
+  }),
+  ScanicClientError: class ScanicClientError extends Error {
+    code: string;
+    constructor(code: string, message: string) {
+      super(message);
+      this.name = 'ScanicClientError';
+      this.code = code;
+    }
+  },
+}));
+
+const mockDetect = __clientMocks.detect;
+const mockWarpExtract = __clientMocks.extract;
 
 const W = 640;
 const H = 480;
@@ -53,85 +68,6 @@ function detectedCorners(): ScanicCorners {
     bottomLeft: { x: 64, y: 432 },
   };
 }
-function cloneCorners(c: ScanicCorners): ScanicCorners {
-  return {
-    topLeft: { ...c.topLeft },
-    topRight: { ...c.topRight },
-    bottomRight: { ...c.bottomRight },
-    bottomLeft: { ...c.bottomLeft },
-  };
-}
-
-type EditorOpts = {
-  container: HTMLElement;
-  image: unknown;
-  corners?: ScanicCorners;
-  onChange?: (c: ScanicCorners) => void;
-  onConfirm?: (c: ScanicCorners) => void;
-  onCancel?: () => void;
-};
-
-/** Faithful editor double: DOM handles + keyboard, Enter/Escape, reset. */
-function installEditorDouble() {
-  mockEditorFactory.mockImplementation((opts: unknown) => {
-    const o = opts as EditorOpts;
-    let corners = cloneCorners(o.corners ?? detectedCorners());
-    const buttons: HTMLButtonElement[] = [];
-    (['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const).forEach((name) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'scanic-handle';
-      b.dataset.corner = name;
-      b.addEventListener('keydown', (ev: Event) => {
-        const e = ev as KeyboardEvent;
-        if (e.key === 'Enter') {
-          o.onConfirm?.(cloneCorners(corners));
-          return;
-        }
-        if (e.key === 'Escape') {
-          o.onCancel?.();
-          return;
-        }
-        const delta = e.shiftKey ? 10 : 1;
-        const next = { ...corners[name] };
-        if (e.key === 'ArrowLeft') next.x -= delta;
-        else if (e.key === 'ArrowRight') next.x += delta;
-        else if (e.key === 'ArrowUp') next.y -= delta;
-        else if (e.key === 'ArrowDown') next.y += delta;
-        else return;
-        corners = { ...corners, [name]: next };
-        o.onChange?.(cloneCorners(corners));
-      });
-      o.container.appendChild(b);
-      buttons.push(b);
-    });
-    return {
-      getCorners: () => cloneCorners(corners),
-      setCorners: (c: ScanicCorners) => {
-        corners = cloneCorners(c);
-        return true;
-      },
-      reset: () => {
-        corners = cloneCorners(o.corners ?? detectedCorners());
-        o.onChange?.(cloneCorners(corners));
-      },
-      nudge: () => true,
-      refreshTheme: () => undefined,
-      confirm: () => {
-        const c = cloneCorners(corners);
-        o.onConfirm?.(c);
-        return c;
-      },
-      cancel: () => {
-        o.onCancel?.();
-      },
-      destroy: () => {
-        for (const b of buttons) b.remove();
-      },
-    };
-  });
-}
-
 function photo(name: string, bytes: number[]): File {
   return new File([new Uint8Array(bytes)], name, { type: 'image/jpeg' });
 }
@@ -221,27 +157,29 @@ beforeEach(() => {
       }
     },
   );
-  mockScan.mockResolvedValue({
+  // Fake 2D canvas: jsdom has no canvas 2D. Detection decodes via the
+  // stubbed Image (W×H) + getImageData; warp encodes via putImageData +
+  // per-test toBlob stubs.
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    drawImage: () => undefined,
+    putImageData: () => undefined,
+    getImageData: () => ({
+      width: W,
+      height: H,
+      data: new Uint8ClampedArray(W * H * 4),
+    }),
+  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  mockDetect.mockResolvedValue({
     success: true,
-    message: 'ok',
+    corners: detectedCorners(),
     confidence: 0.9,
-    score: null,
-    output: null,
-    corners: detectedCorners(),
-    contour: null,
-    debug: null,
-    timings: [],
+    detector: 'ml',
   });
-  mockExtract.mockResolvedValue({
-    success: true,
-    message: 'ok',
-    output: document.createElement('canvas'),
-    corners: detectedCorners(),
-    contour: null,
-    debug: null,
-    timings: [],
+  mockWarpExtract.mockResolvedValue({
+    width: W,
+    height: H,
+    data: new Uint8ClampedArray(W * H * 4),
   });
-  installEditorDouble();
 });
 
 afterEach(() => {
@@ -489,10 +427,10 @@ describe('result-FIRST queue', () => {
     // Eager warp fills each page's blob on view; no accept click needed —
     // Next is already gated open (>=1 page) and builds everything remaining.
     // Visit page 2 so its eager warp completes before building.
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     fireEvent.click(q('[data-page-next]'));
     await screen.findByText('Page 2 of 2');
-    await waitFor(() => expect(mockExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
     const next = screen.getByText('Next', { exact: true }) as HTMLButtonElement;
     expect(next.disabled).toBe(false);
     fireEvent.click(next);
@@ -502,7 +440,7 @@ describe('result-FIRST queue', () => {
     expect(screen.getByText('Back to camera', { exact: true })).toBeTruthy();
 
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
-    expect(onCommit).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     expect(onExit).toHaveBeenCalledTimes(1);
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages.map((p) => p.name)).toEqual(['scan-001.jpg', 'scan-002.jpg']);
@@ -528,6 +466,7 @@ describe('result-FIRST queue', () => {
     fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].name).toBe('scan-001.jpg');
@@ -542,7 +481,7 @@ describe('result-FIRST queue', () => {
     const onCommit = vi.fn();
     render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [7, 7, 7]));
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     // Warped -> original -> warped: two toggles land back on the crop.
     fireEvent.click(screen.getByText('Use original', { exact: true }));
     fireEvent.click(screen.getByText('Use original', { exact: true }));
@@ -550,6 +489,7 @@ describe('result-FIRST queue', () => {
     fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].file.type).toBe('image/jpeg');
@@ -566,16 +506,14 @@ describe('result-FIRST queue', () => {
   it('re-runs ML detection via Re-detect', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
-    await waitFor(() => expect(mockScan).toHaveBeenCalled());
-    const callsBefore = mockScan.mock.calls.length;
+    await waitFor(() => expect(mockDetect).toHaveBeenCalled());
+    const callsBefore = mockDetect.mock.calls.length;
     fireEvent.click(screen.getByText('Re-detect', { exact: true }));
     await waitFor(() => {
-      expect(mockScan.mock.calls.length).toBeGreaterThan(callsBefore);
+      expect(mockDetect.mock.calls.length).toBeGreaterThan(callsBefore);
     });
-    const lastOptions = mockScan.mock.calls[mockScan.mock.calls.length - 1][1] as {
-      detector: string;
-    };
-    expect(lastOptions.detector).toBe('ml');
+    const lastDetector = mockDetect.mock.calls[mockDetect.mock.calls.length - 1][1] as string;
+    expect(lastDetector).toBe('ml');
   });
 });
 
@@ -589,7 +527,7 @@ describe('eager warp', () => {
     // Eager warp fills the single canvas; implicit accept needs no click.
     const img = (await findQ('[data-crop-result-img]')) as HTMLImageElement;
     expect(img.src).toMatch(/^blob:mock-/);
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     // Visited on show; Next is gated open (>=1 page) without any accept.
     await waitFor(() => {
       expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 1 viewed');
@@ -604,10 +542,10 @@ describe('eager warp', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
     await findQ('[data-crop-result-img]');
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
-    const calls = mockExtract.mock.calls.length;
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
+    const calls = mockWarpExtract.mock.calls.length;
     await new Promise((r) => setTimeout(r, 200));
-    expect(mockExtract.mock.calls.length).toBe(calls);
+    expect(mockWarpExtract.mock.calls.length).toBe(calls);
   });
 });
 
@@ -650,25 +588,12 @@ describe('corner editor', () => {
   });
 
   it('disables Reset to auto when there is no detection baseline', async () => {
-    // BOTH detectors miss: the ML attempt finds nothing AND the one
-    // classical fallback finds nothing (null-means-missed policy).
-    mockScan.mockResolvedValueOnce({
+    // Detection misses entirely (null quad): no baseline to reset to.
+    mockDetect.mockResolvedValueOnce({
       success: false,
-      message: 'none',
-      output: null,
       corners: null,
-      contour: null,
-      debug: null,
-      timings: [],
-    });
-    mockScan.mockResolvedValueOnce({
-      success: false,
-      message: 'none',
-      output: null,
-      corners: null,
-      contour: null,
-      debug: null,
-      timings: [],
+      confidence: null,
+      detector: 'classical',
     });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
@@ -750,7 +675,7 @@ describe('capture mode + gallery cluster', () => {
   it('shows Scanning… hold steady while a capture is being detected', async () => {
     mockLiveCamera();
     // Never-resolving detection keeps the entry in `detecting`.
-    mockScan.mockReturnValue(new Promise(() => {}) as ReturnType<typeof scanDocument>);
+    mockDetect.mockReturnValue(new Promise(() => {}));
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     expect(q('[data-finder-status]').textContent).toBe('Point at the page');
@@ -863,37 +788,31 @@ describe('implicit accept navigation', () => {
 });
 
 describe('ML detector default', () => {
-  it('detects ML-first with the vendored base URL and no toggle', async () => {
+  it('detects with the ML detector by default and no toggle', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     expect(document.querySelector('[data-ml-detector]')).toBeNull();
     await injectAndReview(photo('a.jpg', [1]));
-    await waitFor(() => expect(mockScan).toHaveBeenCalled());
-    const options = mockScan.mock.calls[0][1] as {
-      detector: string;
-      ml?: { assetBaseUrl: string };
-    };
-    expect(options.detector).toBe('ml');
-    expect(options.ml?.assetBaseUrl).toBe(SCANIC_ML_ASSET_BASE_URL);
+    await waitFor(() => expect(mockDetect).toHaveBeenCalled());
+    // Worker contract: detect(pixels, detector). Model assets are owned by
+    // the worker; the UI only names the detector.
+    const detector = mockDetect.mock.calls[0][1] as string;
+    expect(detector).toBe('ml');
     expect(SCANIC_ML_ASSET_BASE_URL).toBe('/assets/scanic-ml/');
   });
 
-  it('falls back to classical when ML succeeds but finds no quad (null-means-missed)', async () => {
-    mockScan.mockResolvedValueOnce({
-      success: false,
-      message: 'no confident document (ml)',
+  it('reports a classical-backed quad when ML sees nothing (worker-internal fallback)', async () => {
+    mockDetect.mockResolvedValueOnce({
+      success: true,
+      corners: detectedCorners(),
       confidence: null,
-      score: 0.1,
-      output: null,
-      corners: null,
-      contour: null,
-      debug: null,
-      timings: [],
+      detector: 'classical',
     });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
-    await waitFor(() => expect(mockScan.mock.calls.length).toBeGreaterThanOrEqual(2));
-    const second = mockScan.mock.calls[1][1] as { detector: string };
-    expect(second.detector).toBe('classical');
+    // Single worker call: the ML→classical fallback lives inside the
+    // worker, not as a second UI-driven attempt.
+    await waitFor(() => expect(mockDetect).toHaveBeenCalledTimes(1));
+    expect(mockDetect.mock.calls[0][1]).toBe('ml');
     // Classical corners land on the page: adjust is seeded, Reset enabled.
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     const reset = await screen.findByRole('button', { name: 'Reset to auto' });
@@ -903,17 +822,17 @@ describe('ML detector default', () => {
   it('adjust-next advances the page with no warp and no verdict change', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     const nextBtn = await screen.findByRole('button', { name: 'Next page' });
     fireEvent.click(nextBtn);
     // Page 2 shows (its first eager warp may legitimately run once).
     expect(await screen.findByText('Page 2 of 2')).toBeTruthy();
-    await waitFor(() => expect(mockExtract).toHaveBeenCalled());
-    const settled = mockExtract.mock.calls.length;
+    await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
+    const settled = mockWarpExtract.mock.calls.length;
     await new Promise((r) => setTimeout(r, 300));
     // Steady state: the tap itself warped nothing and decided nothing.
-    expect(mockExtract.mock.calls.length).toBe(settled);
+    expect(mockWarpExtract.mock.calls.length).toBe(settled);
     expect(screen.getByText('Page 2 of 2')).toBeTruthy();
   });
 });
@@ -996,6 +915,7 @@ describe('original-blob capture (ImageCapture)', () => {
     fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');
     fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].file.type).toBe('image/jpeg');

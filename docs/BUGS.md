@@ -234,6 +234,34 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Fix.** Last-mile `sanitizeFileName` in both service functions; glue parity (dot/space trim, 40-char char-boundary cap, `document` fallback).
 - **Verification.** Fix + regression tests recorded in wave1/wave2 (`ad592f9`, `b0b58df`: 4 glue sanitize tests); canonical re-verification pending (STATUS gate 2).
 
+### P5-1 — Rearrange/Split file-remove leaked bytes, render docs, and thumb URLs
+
+- **Status.** Resolved (v1.10.0). **Area.** App (`RearrangeTool.tsx`, `SplitTool.tsx`).
+- **Symptoms.** `onRemove={() => setFiles([])}` bypassed `closeStudioDoc` — binaries map, PDF.js doc, and thumb/preview URLs never freed. Rotate/Merge already used `remove`/`clear` correctly.
+- **Fix.** Call `remove(file.id)` like RotateTool.
+- **Verification.** Scoped suites green; full-suite/E2E re-verification pending laptop-side.
+
+### P5-2 — Images preview modal keyed by positional index
+
+- **Status.** Resolved (v1.10.0). **Area.** App (`PageGrid.tsx`).
+- **Symptoms.** `viewing = pages[viewer]` with `viewer: number` — reorder/remove with the modal open showed the wrong image.
+- **Fix.** Viewer stores the page `id`, resolved via `findIndex`.
+- **Verification.** Scoped suites green; full-suite/E2E re-verification pending laptop-side.
+
+### P5-3 — Images sharding pixel gate never fired
+
+- **Status.** Resolved (v1.10.0). **Area.** App (`ImagesTool.tsx`, `imageSharding.ts` caller).
+- **Symptoms.** `preStageShardEstimate` hardcoded `totalPixels: 0` and `onBuild` never passed `stagedPixels`, so `MAX_SHARD_PIXELS` never tripped; dims known at import were discarded.
+- **Fix.** `width/height` plumbed from `prepareImportFile` through `ImagePage` into `buildImagesPdf({stagedPixels})`.
+- **Verification.** `ImagesTool.test.ts` real-pixel gate test; scoped suites green.
+
+### P5-4 — Capture detection/warp ran on the main thread
+
+- **Status.** Resolved (v1.10.0). **Area.** App (`ScanicCapture.tsx`).
+- **Symptoms.** `scanDocument`/`extractDocument` called inline on the UI thread (header-admitted); shutter tap froze the app through ML detect + full-res warp + encode.
+- **Fix.** Detection + warp routed through the existing tested `ScanicClient` worker (separate clients for detect vs warp); single warp per Apply with cancel-supersede; commits normalized through `prepareImportFile`.
+- **Verification.** `ScanicCapture.test.tsx` 66/66 re-pointed at the client seam; scoped suites green; full-suite/E2E re-verification pending laptop-side.
+
 ### Init-fatal — engine worker boot failure hung on the ready timeout
 
 - **Status.** Resolved. **Area.** App (`app/src/engine/engine.worker.ts`, adapter).

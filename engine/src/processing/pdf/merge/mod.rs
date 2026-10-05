@@ -12,6 +12,9 @@
 //!   deduplicated, or reordered — not even identical inputs.
 //! * At least one input document is required; at least one input page
 //!   across all documents is required (no zero-page output).
+//! * The combined source byte size is capped at the loader's per-input
+//!   limit: merges whose inputs total more than that fail as `InvalidInput`
+//!   before anything is constructed (mobile/WASM memory protection).
 //! * Empty source documents contribute zero pages without breaking the
 //!   merge, as long as some other input provides pages.
 //! * The whole input collection is validated before anything is
@@ -25,6 +28,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::copy::merge_documents;
 use crate::processing::pdf::core::PdfDocument;
 
@@ -167,6 +171,9 @@ impl Operation for MergeOperation {
                 input.documents.len(),
             )));
         }
+        // Combined-size gate: each input was capped individually by the
+        // loader, but their sum is only visible here.
+        check_total_input_bytes(&input.documents)?;
 
         ctx.report_progress(Some("preparing"), 10, 100, Some("preparing destination"));
         ctx.check_cancellation()?;
@@ -175,23 +182,30 @@ impl Operation for MergeOperation {
         // progress never resets between input documents.
         let total = u64::from(input_page_count);
         let mut done: u64 = 0;
+        let mut throttle = ProgressThrottle::new();
         let sources: Vec<&PdfDocument> = input.documents.iter().collect();
         let document = merge_documents(&sources, |progress| {
             ctx.check_cancellation()?;
             done += 1;
-            let completed = 10 + (done * 85) / total.max(1);
-            ctx.report_progress(
-                Some("merging"),
-                completed.min(95),
-                100,
-                Some(&format!(
-                    "document {} of {}, page {} of {}",
-                    progress.doc_index + 1,
-                    progress.doc_count,
-                    progress.page_done,
-                    progress.page_total,
-                )),
-            );
+            let completed = (10 + (done * 85) / total.max(1)).min(95);
+            // Source-side throttle mirroring the glue sink rule (phase
+            // changes always pass here — one phase per loop; Δ≥1 pp or
+            // every N pages otherwise). Same shape, fewer messages;
+            // cancellation stays per page above.
+            if throttle.should_report(completed, done) {
+                ctx.report_progress(
+                    Some("merging"),
+                    completed,
+                    100,
+                    Some(&format!(
+                        "document {} of {}, page {} of {}",
+                        progress.doc_index + 1,
+                        progress.doc_count,
+                        progress.page_done,
+                        progress.page_total,
+                    )),
+                );
+            }
             Ok(())
         })?;
 
@@ -211,6 +225,34 @@ impl Operation for MergeOperation {
 /// failures stay attributable to this operation's input layer.
 fn load_single(bytes: &[u8]) -> Result<PdfDocument, EngineError> {
     crate::processing::pdf::core::loader::load_pdf(bytes)
+}
+
+/// Rejects combined merge input over the loader's size cap as
+/// `InvalidInput` (a caller-input problem, reusing the existing per-input
+/// limit — not a new knob, not a malformed document).
+///
+/// Only source lengths recorded by the loader count; documents built by
+/// earlier engine steps carry no recorded length and contribute zero. Each
+/// parsed input was already capped individually, so this gate only catches
+/// the combined size no single-input check can see.
+fn check_total_input_bytes(documents: &[PdfDocument]) -> Result<usize, EngineError> {
+    use crate::processing::pdf::core::loader::MAX_PDF_BYTES;
+
+    let total: usize = documents
+        .iter()
+        .filter_map(PdfDocument::source_byte_len)
+        .fold(0, usize::saturating_add);
+    if total > MAX_PDF_BYTES {
+        return Err(EngineError::new(
+            ErrorCode::InvalidInput,
+            "merge input exceeds the supported total size",
+        )
+        .with_details(format!(
+            "total_bytes={total} max_bytes={MAX_PDF_BYTES} input_document_count={}",
+            documents.len(),
+        )));
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -279,6 +321,38 @@ mod tests {
 
     fn ctx() -> NullCtx {
         NullCtx { id: JobId::new() }
+    }
+
+    /// Context recording every reported event, for throttle assertions.
+    struct RecordingCtx {
+        id: JobId,
+        events: std::cell::RefCell<Vec<(Option<String>, u64, u64)>>,
+    }
+
+    impl OperationContext for RecordingCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.merge"
+        }
+        fn report_progress(
+            &self,
+            phase: Option<&str>,
+            completed: u64,
+            total: u64,
+            _message: Option<&str>,
+        ) {
+            self.events
+                .borrow_mut()
+                .push((phase.map(str::to_string), completed, total));
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            Ok(())
+        }
     }
 
     fn doc(bytes: Vec<u8>) -> PdfDocument {
@@ -758,5 +832,100 @@ mod tests {
         assert_eq!(reparsed.page_count(), 2);
         assert_eq!(reparsed.effective_rotation(1).expect("rotation"), 90);
         assert_eq!(reparsed.effective_rotation(2).expect("rotation"), 0);
+    }
+
+    #[test]
+    fn progress_is_throttled_but_monotonic_to_100() {
+        // 200 pages through one merge: the source-side throttle must emit
+        // strictly fewer per-page events than pages, while every emitted
+        // event keeps the historical shape (phase + completed/total band)
+        // and the run still ends at exactly 100, monotonically.
+        let labels: Vec<String> = (1..=200).map(|n| format!("PAGE {n}")).collect();
+        let texts: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let bytes = fixtures::text_pages_pdf(&texts);
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = MergeOperation
+            .execute(&ctx, input(vec![doc(bytes)]), MergeOptions::new())
+            .expect("merge succeeds");
+        assert_eq!(out.output_page_count, 200);
+        let events = ctx.events.borrow();
+        // Unthrottled history: validating + preparing + 200 pages +
+        // finalizing. The throttle must cut the per-page reports.
+        assert!(
+            events.len() < 200 + 3,
+            "throttle must drop redundant events: {}",
+            events.len()
+        );
+        assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
+        assert!(
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
+        );
+        assert_eq!(*completed.last().expect("events"), 100);
+    }
+
+    #[test]
+    fn combined_input_over_byte_cap_is_rejected() {
+        // Recorded source lengths (set by the loader in production) total
+        // over the cap: the merge must fail as InvalidInput before
+        // constructing anything, even though every input is valid.
+        let mut first = doc(fixtures::single_page_pdf());
+        let mut second = doc(fixtures::single_page_pdf());
+        first.set_source_byte_len(60 * 1024 * 1024);
+        second.set_source_byte_len(60 * 1024 * 1024);
+        let err = MergeOperation
+            .execute(&ctx(), input(vec![first, second]), MergeOptions::new())
+            .expect_err("over-cap must fail");
+        assert_eq!(err.code(), ErrorCode::InvalidInput);
+        assert!(err.message().contains("total size"));
+        let details = err.details().expect("structured details");
+        assert!(details.contains("total_bytes="), "{details}");
+        assert!(details.contains("max_bytes="), "{details}");
+    }
+
+    #[test]
+    fn combined_input_at_byte_cap_is_accepted() {
+        // Exactly at the cap: the gate passes and the merge succeeds.
+        let mut first = doc(fixtures::single_page_pdf());
+        let mut second = doc(fixtures::single_page_pdf());
+        first.set_source_byte_len(50 * 1024 * 1024);
+        second.set_source_byte_len(50 * 1024 * 1024);
+        let out = MergeOperation
+            .execute(&ctx(), input(vec![first, second]), MergeOptions::new())
+            .expect("at-cap merge succeeds");
+        assert_eq!(out.output_page_count, 2);
+    }
+
+    #[test]
+    fn total_input_bytes_counts_only_recorded_lengths() {
+        // Loader-parsed documents contribute their byte length;
+        // engine-built documents (no recorded length) contribute zero.
+        let parsed = doc(fixtures::single_page_pdf());
+        let parsed_len = parsed.source_byte_len().expect("loader records length");
+        assert_eq!(
+            check_total_input_bytes(&[parsed]).expect("under cap"),
+            parsed_len
+        );
+        let mut built = MergeOperation
+            .execute(
+                &ctx(),
+                input(vec![doc(fixtures::single_page_pdf())]),
+                MergeOptions::new(),
+            )
+            .expect("merge succeeds")
+            .document;
+        assert_eq!(built.source_byte_len(), None);
+        let reparsed = {
+            let bytes = built.save_to_bytes().expect("serializes");
+            doc(bytes)
+        };
+        assert!(reparsed.source_byte_len().is_some());
     }
 }

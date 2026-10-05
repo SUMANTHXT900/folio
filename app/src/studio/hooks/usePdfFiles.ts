@@ -3,7 +3,16 @@ import { closeStudioDoc, openStudioDocs, type StudioDoc } from '../services/foli
 
 export type { StudioDoc };
 
-/** Warn when the app holds more than this many PDF bytes (mobile safety). */
+/** Warn when the app holds more than this many PDF bytes (mobile safety).
+ *
+ * NOTE — true resident cost is a multiple of file bytes, not 1×: the
+ * folio service module store holds one full copy AND PDF.js owns a second
+ * copy for rendering (PERFORMANCE.md P0.2 measured the staging slice and
+ * shelved its removal, so both copies stay), plus per-page render bitmaps
+ * and thumbnail/preview object URLs. Budget roughly 3–4× file bytes of
+ * RSS per open document on desktop; a phone tab feels pressure sooner,
+ * hence this file-bytes gate well below any single-copy limit.
+ */
 const LARGE_PAYLOAD_BYTES = 150 * 1024 * 1024;
 
 /**

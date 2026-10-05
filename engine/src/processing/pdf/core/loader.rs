@@ -9,8 +9,9 @@ use crate::processing::pdf::core::document::PdfDocument;
 
 /// Maximum accepted input size (100 MiB). `lopdf` allocates multiples of
 /// the input while parsing; bounding the bytes up front keeps pathological
-/// inputs from exhausting mobile (WASM) memory mid-parse.
-const MAX_PDF_BYTES: usize = 100 * 1024 * 1024;
+/// inputs from exhausting mobile (WASM) memory mid-parse. Also bounds the
+/// combined merge input (see `pdf.merge`).
+pub(crate) const MAX_PDF_BYTES: usize = 100 * 1024 * 1024;
 
 /// Maximum accepted page count (10 000). Page-tree walks and per-page
 /// operations scale with this; the ceiling keeps them proportionate to
@@ -44,7 +45,11 @@ pub fn load_pdf(bytes: &[u8]) -> Result<PdfDocument, EngineError> {
         .with_details(format!("bytes={} max_bytes={MAX_PDF_BYTES}", bytes.len())));
     }
     let document = match lopdf::Document::load_mem(bytes) {
-        Ok(document) => PdfDocument::from_lopdf(document),
+        Ok(document) => {
+            let mut doc = PdfDocument::from_lopdf(document);
+            doc.set_source_byte_len(bytes.len());
+            doc
+        }
         Err(err) => {
             return Err(EngineError::new(
                 ErrorCode::InvalidDocument,
@@ -103,6 +108,14 @@ mod tests {
     fn rejects_empty_input() {
         let err = load_pdf(&[]).expect_err("empty input must fail");
         assert_eq!(err.code(), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn records_source_byte_length_for_size_gates() {
+        let bytes =
+            fixtures::build_pdf(&fixtures::pdf_spec("1.7", vec![(612.0, 792.0, None)], None));
+        let doc = load_pdf(&bytes).expect("valid fixture loads");
+        assert_eq!(doc.source_byte_len(), Some(bytes.len()));
     }
 
     #[test]

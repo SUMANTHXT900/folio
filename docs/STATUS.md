@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current as of the v1.9.5 release SHIPPED (2026-10-04 — scanner D33–D45 live on dev + prod; package.json 1.9.5, v2.0.0 release HELD).
+> Current as of v1.10.0 on `dev` (2026-10-05 — interaction-performance pass: Images thumbs at import, scan worker swap, PDF-tool fixes, engine efficiency; scoped verification only, full suite + E2E pending laptop-side). v1.9.7 update-feature repair shipped to dev Cloudflare 2026-10-05. Production (`main`) still carries v1.9.5.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
@@ -40,9 +40,10 @@
 
 ## Current work
 
-- **v1.9.5 release is verified GREEN (full suite on the release commit)**: engine 382 + fmt/clippy clean + build:wasm pass; frontend 447/35; production build clean (precache 43 entries / 7789.60 KiB); canonical E2E 102/102 + 4 SKIP.
+- **v1.10.0 is implemented on `dev` (scoped verification only)**: interaction-performance pass across Images/Scan/PDF-tools/engine (see `docs/CHANGELOG.md` v1.10.0, `docs/BUGS.md` P5-1–P5-4). Rust 395 pass + fmt/clippy clean; frontend scoped suites green (incl. 66/66 `ScanicCapture`); tsc/eslint/prettier clean. Full vitest + canonical E2E intentionally skipped per instruction — laptop-side before any prod decision.
+- **v1.9.5 release was verified GREEN (full suite on the release commit)**: engine 382 + fmt/clippy clean + build:wasm pass; frontend 447/35; production build clean (precache 43 entries / 7789.60 KiB); canonical E2E 102/102 + 4 SKIP.
 - **Real-device validation is next (not started)**: hit-rate + ML annoyance + handle feel on the user's phone; gates any camera-capture claim.
-- Performance program closed: P0–P4 implemented, P0.2 measured-and-shelved with real-device evidence (see `docs/PERFORMANCE.md`); threaded WASM explicitly gated behind a future decision.
+- Performance program: P0–P5 implemented (P5 interaction pass 2026-10-05, scoped verification), P0.2 measured-and-shelved with real-device evidence (see `docs/PERFORMANCE.md`); threaded WASM explicitly gated behind a future decision.
 
 ## Pending work
 

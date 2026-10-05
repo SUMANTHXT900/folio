@@ -107,7 +107,7 @@ export function DownloadCard({
   );
 
   if (card.downloaded) {
-    return <DoneBanner name={finalName} blob={blob} shareable={shareable} />;
+    return <DoneBanner name={finalName} blob={blob} shareable={shareable} url={url} />;
   }
 
   return (

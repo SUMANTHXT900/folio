@@ -21,6 +21,7 @@
  */
 
 import type { ImagePage, ImageRotation } from './imagePages';
+import { encodeBitmapToJpeg, EncodeWorkerUnavailableError } from './imageImport';
 
 export interface PreparedImage {
   name: string;
@@ -64,8 +65,12 @@ export async function preparePageBytes(
  * before drawing so transparent PNG pixels composite to white (JPEG
  * has no alpha; an unfilled canvas would bake them to black) — the
  * same fill as the import normalization path, so rotated screenshots
- * match their imported look. The canvas is released (width/height
- * reset) as soon as the blob exists; no frames retained.
+ * match their imported look. The JPEG encode runs in `imageEncode.worker`
+ * (same pattern as `imageImport.resizeToJpeg`: worker first, verbatim
+ * main-thread `toBlob` fallback when workers are unavailable); the
+ * rotation draw itself stays on the calling thread. Canvases are
+ * released (width/height reset) as soon as the blob exists; no frames
+ * retained.
  */
 export const browserImageRenderer: ImageRenderer = {
   async rotateToBytes(file: File | Blob, degrees: NonZeroRotation, mime: string) {
@@ -82,6 +87,28 @@ export const browserImageRenderer: ImageRenderer = {
       ctx.translate(canvas.width / 2, canvas.height / 2);
       ctx.rotate((degrees * Math.PI) / 180);
       ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+      const width = canvas.width;
+      const height = canvas.height;
+      // Snapshot for the worker: the transfer neuters only the snapshot,
+      // never the source bitmap (released in `finally` below).
+      let snapshot: ImageBitmap | null = null;
+      try {
+        snapshot = await createImageBitmap(canvas);
+      } catch {
+        snapshot = null;
+      }
+      if (snapshot !== null) {
+        canvas.width = 0;
+        canvas.height = 0;
+        try {
+          return await encodeBitmapToJpeg(snapshot, { width, height }, 0.95);
+        } catch (error) {
+          if (!(error instanceof EncodeWorkerUnavailableError)) throw error;
+          return snapshotToJpegBytes(snapshot, width, height, mime);
+        } finally {
+          snapshot.close();
+        }
+      }
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, 0.95));
       canvas.width = 0;
       canvas.height = 0;
@@ -92,3 +119,29 @@ export const browserImageRenderer: ImageRenderer = {
     }
   },
 };
+
+/**
+ * Verbatim main-thread fallback for a rotated snapshot (worker
+ * unavailable): white-fill + draw + `toBlob`, same pixels the worker
+ * would produce. The snapshot stays open for the caller to release.
+ */
+async function snapshotToJpegBytes(
+  snapshot: ImageBitmap,
+  width: number,
+  height: number,
+  mime: string,
+): Promise<Uint8Array> {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) throw new Error('2D canvas unavailable for image rotation.');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(snapshot, 0, 0, width, height);
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, 0.95));
+  canvas.width = 0;
+  canvas.height = 0;
+  if (blob === null) throw new Error('Image re-encode failed during rotation.');
+  return new Uint8Array(await blob.arrayBuffer());
+}

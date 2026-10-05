@@ -159,7 +159,7 @@ describe('useImagePages', () => {
       delete globalThis.OffscreenCanvas;
     });
 
-    it('commits normalized pages one at a time with progress', async () => {
+    it('commits normalized pages in one batch with progress, thumbs, and dims', async () => {
       stubDecode({ width: 4000, height: 3000 });
       const { result } = renderHook(() => useImagePages());
       const progress: Array<[number, number]> = [];
@@ -185,9 +185,18 @@ describe('useImagePages', () => {
         [2, 3],
         [3, 3],
       ]);
-      // Each page got exactly one preview URL; all are live.
-      expect(created).toEqual(['blob:mock-1', 'blob:mock-2', 'blob:mock-3']);
+      // One batched commit: each page got a full preview URL plus a
+      // downscaled thumb URL minted from the same single decode; all live.
+      expect(created).toHaveLength(6);
       expect(revoked).toEqual([]);
+      for (const page of result.current.pages) {
+        expect(page.previewUrl).toMatch(/^blob:mock-/);
+        expect(page.thumbUrl).toMatch(/^blob:mock-/);
+        expect(page.thumbUrl).not.toBe(page.previewUrl);
+        // Normalized dims ride along for the sharding pixel gate.
+        expect(page.width).toBe(2500);
+        expect(page.height).toBe(1875);
+      }
     });
 
     it('keeps already-committed pages on cancellation', async () => {
@@ -248,6 +257,22 @@ describe('useImagePages', () => {
       expect(summary.failed).toBe(1);
       expect(summary.firstError).toContain('unsupported format');
       expect(result.current.pages.map((p) => p.name)).toEqual(['a.jpg', 'c.jpg']);
+    });
+
+    it('revokes preview and thumb URLs together on remove', async () => {
+      stubDecode({ width: 4000, height: 3000 });
+      const { result } = renderHook(() => useImagePages());
+      await act(async () => {
+        await result.current.importFiles([upload('a.jpg'), upload('b.jpg')], 'upload');
+      });
+      expect(result.current.pages).toHaveLength(2);
+      expect(created).toHaveLength(4);
+      const [first] = result.current.pages;
+      act(() => {
+        result.current.remove(first.id);
+      });
+      expect(result.current.pages).toHaveLength(1);
+      expect(revoked).toEqual([first.previewUrl, first.thumbUrl]);
     });
   });
 });

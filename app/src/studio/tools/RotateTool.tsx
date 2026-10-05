@@ -14,9 +14,9 @@ import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
-  closeStudioDoc,
-  openStudioBytes,
+  releaseStagedBytes,
   runStudioOperation,
+  stageStudioBytes,
   formatDurationMs,
   studioShareAvailable,
   type StudioJob,
@@ -108,7 +108,7 @@ const RotateTile = memo(function RotateTile({
 export default function RotateTool() {
   const { files, addFiles, remove } = usePdfFiles();
   const file = files[0] ?? null;
-  const { thumbs, load, fillAll, loading } = usePageThumbs();
+  const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
 
   useEffect(() => {
     if (!file) return;
@@ -236,12 +236,17 @@ export default function RotateTool() {
         lastPageCount = first.pageCount;
         lastByteLength = first.byteLength;
         if (gi < groups.length - 1) {
-          const temp = await openStudioBytes(`${file.name} (step ${gi + 1})`, first.bytes);
+          // Frontend-only chaining: stage the intermediate bytes WITHOUT a
+          // PDF.js render-load (`openStudioBytes` would parse + count pages
+          // we never display). Staged ids transfer zero-copy to the next
+          // run and release with no renderer involved — no engine protocol
+          // change, just a cheaper temp owner.
+          const tempId = stageStudioBytes(`${file.name} (step ${gi + 1})`, first.bytes);
           if (currentTemp !== null) {
-            await closeStudioDoc(currentTemp).catch(() => undefined);
+            releaseStagedBytes(currentTemp);
           }
-          currentTemp = temp.id;
-          currentId = temp.id;
+          currentTemp = tempId;
+          currentId = tempId;
         } else {
           const name = smartOutputName('rotate', [file.name]);
           setDone({
@@ -274,7 +279,7 @@ export default function RotateTool() {
       setFraction(null);
       setStage(null);
       if (currentTemp !== null) {
-        await closeStudioDoc(currentTemp).catch(() => undefined);
+        releaseStagedBytes(currentTemp);
       }
     }
   };
@@ -386,7 +391,11 @@ export default function RotateTool() {
                   >
                     <span className="text-lg">+{hiddenCount}</span>
                     <span className="text-xs">
-                      {thumbs.filter(Boolean).length < thumbs.length ? 'Load more' : 'Show all'}
+                      {progress && progress.done < progress.total
+                        ? `Load more (${progress.done}/${progress.total})`
+                        : thumbs.filter(Boolean).length < thumbs.length
+                          ? 'Load more'
+                          : 'Show all'}
                     </span>
                   </button>
                 )}

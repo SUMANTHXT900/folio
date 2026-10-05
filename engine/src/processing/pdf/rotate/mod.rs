@@ -25,11 +25,12 @@
 //! Never mutates the caller's input. No range-string parsing in the core,
 //! no rendering, no compression, no encryption — those are later lessons.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::copy::find_invalid_page;
 use crate::processing::pdf::core::document::normalize_quarter_turn;
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
@@ -199,6 +200,9 @@ impl Operation for RotateOperation {
         // documents skip them entirely instead of traversing the full map.
         let planned = options.pages.len();
         let mut plan: Vec<(PageNumber, i32)> = Vec::with_capacity(planned);
+        // Source-side throttle (mirrors the glue sink rule): fewer
+        // messages, same shape; cancellation stays per page.
+        let mut plan_throttle = ProgressThrottle::new();
         for (index, page_number) in options.pages.iter().copied().enumerate() {
             ctx.check_cancellation()?;
             let base = document.effective_rotation(page_number)?;
@@ -206,27 +210,32 @@ impl Operation for RotateOperation {
             debug_assert_eq!(rotated % 90, 0, "quarter-turn inputs stay quarter-turn");
             plan.push((page_number, rotated));
             let done = index + 1;
-            let completed = 10 + (done as u64 * 70) / (planned as u64).max(1);
-            ctx.report_progress(
-                Some("copying pages"),
-                completed.min(80),
-                100,
-                Some(&format!("page {done} of {planned}")),
-            );
+            let completed = (10 + (done as u64 * 70) / (planned as u64).max(1)).min(80);
+            if plan_throttle.should_report(completed, done as u64) {
+                ctx.report_progress(
+                    Some("copying pages"),
+                    completed,
+                    100,
+                    Some(&format!("page {done} of {planned}")),
+                );
+            }
         }
 
         // Applying rotations occupies the 80–95% band over selected pages.
         let selected = options.pages.len();
+        let mut apply_throttle = ProgressThrottle::new();
         for (index, (page_number, rotated)) in plan.iter().enumerate() {
             ctx.check_cancellation()?;
             document.set_page_rotation_resolved(*page_number, *rotated)?;
-            let completed = 80 + ((index + 1) as u64 * 15) / (selected as u64).max(1);
-            ctx.report_progress(
-                Some("applying rotations"),
-                completed.min(95),
-                100,
-                Some(&format!("page {} of {selected}", index + 1)),
-            );
+            let completed = (80 + ((index + 1) as u64 * 15) / (selected as u64).max(1)).min(95);
+            if apply_throttle.should_report(completed, (index + 1) as u64) {
+                ctx.report_progress(
+                    Some("applying rotations"),
+                    completed,
+                    100,
+                    Some(&format!("page {} of {selected}", index + 1)),
+                );
+            }
         }
         if selected == 0 {
             ctx.report_progress(
@@ -269,13 +278,11 @@ fn validate_pages(source: &PdfDocument, pages: &[PageNumber]) -> Result<(), Engi
         )));
     }
     let mut seen = HashSet::with_capacity(pages.len());
+    // First-seen positions: O(1) per duplicate instead of re-scanning.
+    let mut first_seen: HashMap<PageNumber, usize> = HashMap::with_capacity(pages.len());
     for (entry_index, page_number) in pages.iter().enumerate() {
         if !seen.insert(page_number) {
-            let first = pages
-                .iter()
-                .position(|entry| entry == page_number)
-                .map(|position| position + 1)
-                .unwrap_or(1);
+            let first = first_seen.get(page_number).copied().unwrap_or(0) + 1;
             let duplicate_number = entry_index + 1;
             return Err(EngineError::new(
                 ErrorCode::DuplicatePage,
@@ -286,6 +293,7 @@ fn validate_pages(source: &PdfDocument, pages: &[PageNumber]) -> Result<(), Engi
                  duplicate_position={duplicate_number} page_count={page_count}"
             )));
         }
+        first_seen.entry(*page_number).or_insert(entry_index);
     }
     Ok(())
 }

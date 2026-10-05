@@ -147,7 +147,7 @@ const DragRow = memo(function DragRow({
 });
 
 export default function RearrangeTool() {
-  const { files, setFiles, addFiles, error: filesError, busy, setBusy, setError } = usePdfFiles();
+  const { files, addFiles, remove, error: filesError, busy, setBusy, setError } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress, renderPreview } = usePageThumbs();
   const [order, setOrder] = useState<number[]>([]);
@@ -160,24 +160,34 @@ export default function RearrangeTool() {
   const [stage, setStage] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
 
-  // render the inspected page at full res (cached per page, revoked on file change/unmount)
+  // render the inspected page at full res (cached per page, revoked on file change/unmount).
+  // `order`/`hiRes` ride refs so rapid reorders while the viewer is open
+  // never restart the in-flight preview render.
+  const orderRef = useRef(order);
+  orderRef.current = order;
+  const hiResRef = useRef(hiRes);
+  hiResRef.current = hiRes;
   useEffect(() => {
     if (viewer === null || !file) return;
-    const pageNum = order[viewer] + 1;
-    if (hiRes[pageNum]) return;
-    let cancelled = false;
+    const pageIdx = orderRef.current[viewer];
+    if (pageIdx === undefined) return;
+    const pageNum = pageIdx + 1;
+    if (hiResRef.current[pageNum]) return;
+    const job = renderPreview(file.id, pageNum);
+    let alive = true;
     (async () => {
       try {
-        const url = await renderPreview(file.id, pageNum);
-        if (!cancelled) setHiRes((prev) => ({ ...prev, [pageNum]: url }));
+        const url = await job.done;
+        if (alive) setHiRes((prev) => ({ ...prev, [pageNum]: url }));
       } catch {
         /* keep thumb fallback */
       }
     })();
     return () => {
-      cancelled = true;
+      alive = false;
+      job.cancel();
     };
-  }, [viewer, file, order, hiRes, renderPreview]);
+  }, [viewer, file, renderPreview]);
   // Full-res preview URLs are service-owned borrows (see `studioPreview`:
   // never revoke the result). Dropping the cache entry is enough — the
   // service purges its keys on close/evict, so no caller-side revoke here.
@@ -319,7 +329,7 @@ export default function RearrangeTool() {
             name={file.name}
             size={file.sizeBytes}
             onRemove={() => {
-              setFiles([]);
+              remove(file.id);
               setResult(null);
             }}
           />
@@ -367,9 +377,11 @@ export default function RearrangeTool() {
                   }}
                   className="mt-3 w-full rounded-xl border-2 border-dashed border-paper-300 dark:border-ink-700 py-3 text-sm text-ink-500 hover:border-brass-400 hover:text-brass-600 transition-colors"
                 >
-                  {thumbs.filter(Boolean).length < order.length
-                    ? `Load & show ${Math.min(hiddenCount, 48)} more of ${hiddenCount}`
-                    : `Show ${hiddenCount} more pages`}
+                  {progress && progress.done < progress.total
+                    ? `Load & show ${Math.min(hiddenCount, 48)} more of ${hiddenCount} (${progress.done}/${progress.total} ready)`
+                    : thumbs.filter(Boolean).length < order.length
+                      ? `Load & show ${Math.min(hiddenCount, 48)} more of ${hiddenCount}`
+                      : `Show ${hiddenCount} more pages`}
                 </button>
               )}
               {hiddenCount === 0 && order.length > 30 && showAll && (

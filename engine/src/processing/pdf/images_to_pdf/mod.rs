@@ -249,8 +249,11 @@ impl Operation for ImagesToPdfOperation {
         // input order; outputs commit only after the last page succeeds,
         // so failure on page N still aborts with no partial PDF (atomic).
         let total = input.images.len() as u64;
+        let page_count = input.images.len() as u32;
         let mut pdf = PdfBuild::begin(input.images.len());
-        for (index, image) in input.images.iter().enumerate() {
+        // Drained, not borrowed: each input moves into decode, so the JPEG
+        // passthrough path embeds the original bytes without cloning them.
+        for (index, image) in input.images.into_iter().enumerate() {
             ctx.check_cancellation()?;
             let item = decode_image(image, index, options.background_rgb)?;
             // `item` moves into the document here and drops at the end of
@@ -278,7 +281,6 @@ impl Operation for ImagesToPdfOperation {
 
         ctx.check_cancellation()?;
         ctx.report_progress(Some("finalizing"), 100, 100, Some("images_to_pdf complete"));
-        let page_count = input.images.len() as u32;
         Ok(ImagesToPdfOutput {
             document,
             page_count,
@@ -336,7 +338,11 @@ impl JpegColorSpace {
 }
 
 /// Validates headers, decodes, applies EXIF orientation, composites alpha,
-/// and detects DPI. Input bytes are only borrowed, never mutated.
+/// and detects DPI. Takes ownership of the input: the JPEG passthrough path
+/// moves the bytes into the PDF (no clone); every other path only borrows.
+///
+/// EXIF is parsed once up front and threaded through (orientation gate,
+/// pixel transform, DPI) instead of re-parsed per use.
 ///
 /// JPEG fast path: baseline RGB/gray/Adobe-CMYK frames with EXIF
 /// orientation 1 are returned untouched (passthrough) — no decode, no
@@ -344,7 +350,7 @@ impl JpegColorSpace {
 /// non-passthrough JPEGs are re-encoded once at
 /// [`FALLBACK_JPEG_QUALITY`] so the worst case stays ~10× below raw RGB.
 fn decode_image(
-    image: &ImageInput,
+    image: ImageInput,
     index: usize,
     background: [u8; 3],
 ) -> Result<DecodedImage, EngineError> {
@@ -366,21 +372,24 @@ fn decode_image(
     // JPEG fast path first: orientation-1 baseline frames skip the
     // decode entirely. The frame dims must agree with the header probe
     // (paranoia against malformed SOF); anything doubtful falls through
-    // to the decode path below.
-    if is_jpeg_magic(&image.bytes) && read_exif_orientation(&image.bytes) == 1 {
+    // to the decode path below. EXIF comes from the single up-front parse.
+    let exif = read_exif_info(&image.bytes);
+    if is_jpeg_magic(&image.bytes) && exif.orientation == 1 {
         if let Some(frame) = parse_jpeg_frame(&image.bytes) {
             if frame.width == probe_w
                 && frame.height == probe_h
                 && jpeg_color_space(&frame).is_some()
             {
                 validate_dimensions(frame.width, frame.height, image_number, &image.name)?;
-                let dpi = detect_dpi(&image.bytes).unwrap_or(DEFAULT_DPI);
+                let dpi = detect_dpi_with_exif(&image.bytes, exif.dpi).unwrap_or(DEFAULT_DPI);
                 let color_space = jpeg_color_space(&frame).expect("checked");
                 return Ok(DecodedImage {
                     width_px: frame.width,
                     height_px: frame.height,
                     payload: ImagePayload::Jpeg(JpegPayload {
-                        bytes: image.bytes.clone(),
+                        // Moved, not cloned: the caller drained this input
+                        // for embedding, so no second copy ever exists.
+                        bytes: image.bytes,
                         color_space,
                     }),
                     dpi,
@@ -393,61 +402,56 @@ fn decode_image(
         map_image_error(&image.bytes, &err.to_string(), image_number, &image.name)
     })?;
 
-    let orientation = read_exif_orientation(&image.bytes);
-    let oriented = apply_exif_orientation(dynamic, orientation);
+    let oriented = apply_exif_orientation(dynamic, exif.orientation);
     let (width_px, height_px) = (oriented.width(), oriented.height());
     validate_dimensions(width_px, height_px, image_number, &image.name)?;
 
-    // Checked allocation guard: w*h*3 must fit and stay under the cap.
+    // Checked allocation guard: the pixel count stays under the cap, so
+    // the RGBA decode below and the RGB repack after it both fit.
+    // (`validate_dimensions` already bounded the count; the multiply cannot
+    // overflow.)
     let pixels = u64::from(width_px)
         .checked_mul(u64::from(height_px))
         .ok_or_else(|| oversized_error(image_number, &image.name, &tag))?;
     if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
         return Err(oversized_error(image_number, &image.name, &tag));
     }
-    let needed = pixels.checked_mul(3).ok_or_else(|| {
-        EngineError::new(
-            ErrorCode::InvalidInput,
-            format!(
-                "image {image_number} (\"{}\") dimensions overflow RGB allocation",
-                image.name
-            ),
-        )
-        .with_details(tag.clone())
-    })?;
-    if needed > MAX_IMAGE_PIXELS * 3 {
-        return Err(oversized_error(image_number, &image.name, &tag));
-    }
 
     // Uniform RGBA → RGB compositing against the background. Handles RGB,
     // RGBA, grayscale, and grayscale+alpha identically; transparent pixels
     // take the background instead of silently going black.
-    let rgba = oriented.to_rgba8();
-    let (actual_w, actual_h) = (rgba.width(), rgba.height());
+    //
+    // Single-buffer streaming: the decoded RGBA buffer is repacked to RGB
+    // in place — the write cursor never passes the read cursor (3k ≤ 4k),
+    // so the peak is one buffer, never RGBA + RGB side by side.
+    let rgba_image = oriented.into_rgba8();
+    let (actual_w, actual_h) = (rgba_image.width(), rgba_image.height());
     debug_assert_eq!(actual_w, width_px);
     debug_assert_eq!(actual_h, height_px);
-    let raw = rgba.as_raw();
-    let mut rgb = Vec::with_capacity(needed as usize);
+    let mut rgb = rgba_image.into_raw();
     let (br, bg, bb) = (
         u16::from(background[0]),
         u16::from(background[1]),
         u16::from(background[2]),
     );
-    for pixel in raw.chunks_exact(4) {
+    let mut write = 0usize;
+    for read in (0..rgb.len()).step_by(4) {
         let (r, g, b, a) = (
-            u16::from(pixel[0]),
-            u16::from(pixel[1]),
-            u16::from(pixel[2]),
-            u16::from(pixel[3]),
+            u16::from(rgb[read]),
+            u16::from(rgb[read + 1]),
+            u16::from(rgb[read + 2]),
+            u16::from(rgb[read + 3]),
         );
         // Blend: out = fg*a + bg*(255-a), rounded.
         let inv = 255 - a;
-        rgb.push(((r * a + br * inv + 127) / 255) as u8);
-        rgb.push(((g * a + bg * inv + 127) / 255) as u8);
-        rgb.push(((b * a + bb * inv + 127) / 255) as u8);
+        rgb[write] = ((r * a + br * inv + 127) / 255) as u8;
+        rgb[write + 1] = ((g * a + bg * inv + 127) / 255) as u8;
+        rgb[write + 2] = ((b * a + bb * inv + 127) / 255) as u8;
+        write += 3;
     }
+    rgb.truncate(write);
 
-    let dpi = detect_dpi(&image.bytes).unwrap_or(DEFAULT_DPI);
+    let dpi = detect_dpi_with_exif(&image.bytes, exif.dpi).unwrap_or(DEFAULT_DPI);
     let is_jpeg = is_jpeg_magic(&image.bytes);
     let payload = if is_jpeg {
         // Fallback path (progressive, YCCK, EXIF-rotated): pixels are
@@ -684,11 +688,44 @@ fn parse_jpeg_frame(bytes: &[u8]) -> Option<JpegFrame> {
 // EXIF orientation
 // ---------------------------------------------------------------------------
 
+/// Parses the EXIF envelope once per image. Orientation and resolution are
+/// both derived from this single parse and threaded through decode, so each
+/// image pays one EXIF parse instead of three (passthrough gate,
+/// orientation, DPI). Returns `None` when absent or unparseable — never an
+/// error.
+fn parse_exif(bytes: &[u8]) -> Option<exif::Exif> {
+    exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()
+}
+
+/// Orientation + resolution from one EXIF parse, threaded through
+/// [`decode_image`] so the bytes are parsed exactly once.
+struct ExifInfo {
+    orientation: u32,
+    dpi: Option<f64>,
+}
+
+fn read_exif_info(bytes: &[u8]) -> ExifInfo {
+    let parsed = parse_exif(bytes);
+    ExifInfo {
+        orientation: exif_orientation(parsed.as_ref()),
+        dpi: exif_resolution_dpi(parsed.as_ref()).filter(|dpi| valid_dpi(*dpi)),
+    }
+}
+
 /// Reads EXIF orientation (1–8) from the original bytes. Returns 1 (normal)
 /// when absent, unparseable, or out of range. Never fails the operation.
+///
+/// Test-only seam: production threads [`read_exif_info`] through decode so
+/// the bytes parse once; tests pin the single-read behavior here.
+#[cfg(test)]
 fn read_exif_orientation(bytes: &[u8]) -> u32 {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
+    exif_orientation(parse_exif(bytes).as_ref())
+}
+
+fn exif_orientation(exif: Option<&exif::Exif>) -> u32 {
+    let Some(exif) = exif else {
         return 1;
     };
     let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY) else {
@@ -742,23 +779,30 @@ fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::
 /// Detects DPI from EXIF → JFIF (JPEG) / pHYs (PNG), falling back to
 /// [`DEFAULT_DPI`]. Returns `None` only when nothing valid was found (the
 /// caller applies the fallback). Invalid values are ignored, never errors.
+///
+/// Test-only seam: production threads [`read_exif_info`] plus
+/// [`detect_dpi_with_exif`] through decode; tests pin the combined
+/// behavior here.
+#[cfg(test)]
 fn detect_dpi(bytes: &[u8]) -> Option<f64> {
-    if let Some(dpi) = read_exif_dpi(bytes) {
-        if valid_dpi(dpi) {
-            return Some(dpi);
-        }
+    detect_dpi_with_exif(bytes, read_exif_info(bytes).dpi)
+}
+
+/// [`detect_dpi`] with an already-parsed EXIF resolution, for callers that
+/// hold one ([`decode_image`] parses once and threads it through). The
+/// EXIF value arrives validity-filtered from [`read_exif_info`]; JFIF/pHYs
+/// fallbacks are filtered here, exactly as in [`detect_dpi`].
+fn detect_dpi_with_exif(bytes: &[u8], exif_dpi: Option<f64>) -> Option<f64> {
+    if let Some(dpi) = exif_dpi.filter(|dpi| valid_dpi(*dpi)) {
+        return Some(dpi);
     }
     if is_png_magic(bytes) {
-        if let Some(dpi) = read_png_phys_dpi(bytes) {
-            if valid_dpi(dpi) {
-                return Some(dpi);
-            }
+        if let Some(dpi) = read_png_phys_dpi(bytes).filter(|dpi| valid_dpi(*dpi)) {
+            return Some(dpi);
         }
     } else if is_jpeg_magic(bytes) {
-        if let Some(dpi) = read_jpeg_jfif_dpi(bytes) {
-            if valid_dpi(dpi) {
-                return Some(dpi);
-            }
+        if let Some(dpi) = read_jpeg_jfif_dpi(bytes).filter(|dpi| valid_dpi(*dpi)) {
+            return Some(dpi);
         }
     }
     None
@@ -768,14 +812,21 @@ fn valid_dpi(dpi: f64) -> bool {
     dpi.is_finite() && (MIN_DPI..=MAX_DPI).contains(&dpi)
 }
 
-/// Reads XResolution/YResolution + ResolutionUnit from EXIF.
+/// Reads XResolution/YResolution + ResolutionUnit from the original bytes
+/// (single parse, via [`parse_exif`]).
+///
+/// Test-only seam: production reads [`exif_resolution_dpi`] off the shared
+/// parse; tests pin the byte-level behavior here.
+#[cfg(test)]
+fn read_exif_dpi(bytes: &[u8]) -> Option<f64> {
+    exif_resolution_dpi(parse_exif(bytes).as_ref())
+}
 ///
 /// Non-square pixels use `min(X, Y)`: the smaller DPI yields the larger
 /// natural size, so the image is never rendered smaller than intended on
 /// either axis. A missing Y falls back to X alone.
-fn read_exif_dpi(bytes: &[u8]) -> Option<f64> {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let exif = exif::Reader::new().read_from_container(&mut cursor).ok()?;
+fn exif_resolution_dpi(exif: Option<&exif::Exif>) -> Option<f64> {
+    let exif = exif?;
     let x = exif.get_field(exif::Tag::XResolution, exif::In::PRIMARY)?;
     let dots_x = exif_dots(&x.value)?;
     let dots_y = exif
@@ -1528,7 +1579,7 @@ mod tests {
         {
             let bytes = solid_rgb_png(32, 32, *color);
             let image = ImageInput::new(format!("{i}.png"), bytes).expect("input builds");
-            let item = decode_image(&image, i, [255, 255, 255]).expect("decodes");
+            let item = decode_image(image, i, [255, 255, 255]).expect("decodes");
             pdf.append(item, PageSizePolicy::FitImage).expect("embeds");
         }
         assert_eq!(
@@ -1718,6 +1769,24 @@ mod tests {
         assert_eq!((images[0].0, images[0].1), (12, 8));
     }
 
+    #[test]
+    fn single_exif_parse_threads_orientation_and_dpi() {
+        // One parse feeds orientation + DPI together (decode threads this
+        // through instead of parsing per use); values agree with the
+        // separate readers.
+        let base = solid_jpeg(16, 16, [1, 2, 3]);
+        let tagged = inject_exif_orientation(&base, 6);
+        let info = read_exif_info(&tagged);
+        assert_eq!(info.orientation, 6);
+        assert_eq!(info.orientation, read_exif_orientation(&tagged));
+        // No DPI tags injected → None (the fallback applies downstream).
+        assert_eq!(info.dpi, None);
+        let resolved = inject_exif_resolution(&base, 300, 1, 300, 1, 2);
+        let resolved_info = read_exif_info(&resolved);
+        assert_eq!(resolved_info.dpi, Some(300.0));
+        assert_eq!(resolved_info.dpi, detect_dpi(&resolved));
+    }
+
     // -- JPEG passthrough ----------------------------------------------------------
 
     /// Filter + ColorSpace + raw content per embedded image page.
@@ -1757,7 +1826,7 @@ mod tests {
     fn baseline_jpeg_passes_through_untouched() {
         let input = solid_jpeg(64, 48, [200, 30, 30]);
         let item = decode_image(
-            &ImageInput::new("photo.jpg", input.clone()).expect("input builds"),
+            ImageInput::new("photo.jpg", input.clone()).expect("input builds"),
             0,
             [255, 255, 255],
         )
@@ -1797,7 +1866,7 @@ mod tests {
         let base = solid_jpeg(64, 48, [180, 40, 40]);
         let tagged = inject_exif_orientation(&base, 6);
         let item = decode_image(
-            &ImageInput::new("exif.jpg", tagged.clone()).expect("input builds"),
+            ImageInput::new("exif.jpg", tagged.clone()).expect("input builds"),
             0,
             [255, 255, 255],
         )

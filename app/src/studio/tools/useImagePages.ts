@@ -2,9 +2,11 @@
  * Page-collection state for Images → PDF.
  *
  * Holds `ImagePage[]` (handles + metadata only — never decoded bytes).
- * Owns every preview object URL: created on add, revoked on remove,
- * clear, replace, and tool unmount. Revocation is synchronous in the
- * handlers so no URL outlives its page (see L-3/L-4).
+ * Owns every preview/thumb object URL: created on add, revoked on
+ * remove, clear, replace, and tool unmount. Revocation runs in the event
+ * handlers (outside `setPages` updaters, which must stay pure — StrictMode
+ * may double-invoke them) against a `pagesRef` mirror, and is idempotent
+ * via the tracked-URL set so a stale double-remove never double-revokes.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -35,17 +37,35 @@ export interface ImportCallbacks {
   signal?: AbortSignal;
 }
 
+interface EntryInput {
+  file: File | Blob;
+  name: string;
+  source: ImageSource;
+  /** Downscaled thumb bytes from normalization (hook mints the URL). */
+  thumb?: Blob | null;
+  width?: number;
+  height?: number;
+}
+
 export function useImagePages() {
   const [pages, setPages] = useState<ImagePage[]>([]);
   const idRef = useRef(0);
-  // Mirror of live preview URLs for synchronous revocation + unmount sweep.
+  // Mirror of live preview/thumb URLs for synchronous revocation + unmount sweep.
   const urlsRef = useRef(new Set<string>());
+  // Read mirror of the collection so handlers can revoke OUTSIDE the
+  // setPages updaters (updaters must stay side-effect free).
+  const pagesRef = useRef<ImagePage[]>([]);
+  pagesRef.current = pages;
 
   const track = (url: string) => {
     if (url) urlsRef.current.add(url);
   };
   const revoke = (url: string) => {
     if (url && urlsRef.current.delete(url)) URL.revokeObjectURL(url);
+  };
+  const revokePageUrls = (page: ImagePage) => {
+    revoke(page.previewUrl);
+    revoke(page.thumbUrl);
   };
 
   // Unmount sweep: no preview URL survives the tool.
@@ -62,26 +82,31 @@ export function useImagePages() {
     return `img-${idRef.current}`;
   };
 
-  const addEntries = useCallback(
-    (entries: Array<{ file: File | Blob; name: string; source: ImageSource }>): string[] => {
-      // Created OUTSIDE the updater: updaters may double-invoke under
-      // StrictMode, which would leak URLs and burn ids (see usePdfFiles).
-      const made = entries.map((e) => {
-        const url = URL.createObjectURL(e.file);
-        track(url);
-        return createPage({
-          id: nextId(),
-          source: e.source,
-          file: e.file,
-          name: e.name,
-          previewUrl: url,
-        });
+  const addEntries = useCallback((entries: EntryInput[]): string[] => {
+    // Created OUTSIDE the updater: updaters may double-invoke under
+    // StrictMode, which would leak URLs and burn ids (see usePdfFiles).
+    const made = entries.map((e) => {
+      const url = URL.createObjectURL(e.file);
+      track(url);
+      let thumbUrl = '';
+      if (e.thumb !== null && e.thumb !== undefined) {
+        thumbUrl = URL.createObjectURL(e.thumb);
+        track(thumbUrl);
+      }
+      return createPage({
+        id: nextId(),
+        source: e.source,
+        file: e.file,
+        name: e.name,
+        previewUrl: url,
+        thumbUrl,
+        width: e.width,
+        height: e.height,
       });
-      setPages((prev) => [...prev, ...made]);
-      return made.map((p) => p.id);
-    },
-    [],
-  );
+    });
+    setPages((prev) => [...prev, ...made]);
+    return made.map((p) => p.id);
+  }, []);
 
   /** Adds picked files; non-JPEG/PNG entries are skipped and counted. */
   const addFiles = useCallback(
@@ -95,10 +120,11 @@ export function useImagePages() {
 
   /**
    * Memory-safe bulk import (M3.x): prepares ONE file at a time
-   * (pixel-budget normalization via `imageImport.ts`) and commits each
-   * normalized page immediately — never a batch of decoded bitmaps.
-   * Pages already committed survive cancellation; the AbortSignal stops
-   * the run before the next file.
+   * (pixel-budget normalization via `imageImport.ts`, thumb minted from
+   * the same single decode) and commits the whole batch in ONE `setPages`
+   * — one render for the run instead of one per file. Progress still
+   * reports per file. Pages prepared before a cancellation are still
+   * committed; the AbortSignal stops the run before the next file.
    */
   const importFiles = useCallback(
     async (
@@ -110,16 +136,25 @@ export function useImagePages() {
       const skipped = files.length - good.length;
       let added = 0;
       let firstError: string | null = null;
+      const batch: EntryInput[] = [];
       const { outcomes, cancelled } = await runImportQueue(
         good,
         (file) => prepareImportFile(file),
         (completed, total, result) => {
-          addEntries([{ file: result.file, name: result.name, source }]);
+          batch.push({
+            file: result.file,
+            name: result.name,
+            source,
+            thumb: result.thumb,
+            width: result.width,
+            height: result.height,
+          });
           added += 1;
           callbacks.onProgress?.(completed, total, result);
         },
         () => callbacks.signal?.aborted === true,
       );
+      if (batch.length > 0) addEntries(batch);
       for (const outcome of outcomes) {
         if (outcome.error !== null && firstError === null) {
           firstError = outcome.error;
@@ -145,11 +180,9 @@ export function useImagePages() {
   }, []);
 
   const remove = useCallback((id: string) => {
-    setPages((prev) => {
-      const target = prev.find((p) => p.id === id);
-      if (target) revoke(target.previewUrl);
-      return removePage(prev, id);
-    });
+    const target = pagesRef.current.find((p) => p.id === id);
+    if (target !== undefined) revokePageUrls(target);
+    setPages((prev) => removePage(prev, id));
   }, []);
 
   const rotate = useCallback((id: string) => {
@@ -157,10 +190,9 @@ export function useImagePages() {
   }, []);
 
   const clear = useCallback(() => {
-    setPages((prev) => {
-      for (const p of prev) revoke(p.previewUrl);
-      return [];
-    });
+    const live = pagesRef.current;
+    for (const p of live) revokePageUrls(p);
+    setPages([]);
   }, []);
 
   return {

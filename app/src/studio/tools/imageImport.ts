@@ -50,6 +50,14 @@ export interface PrepareImportResult {
   retainedOriginal: boolean;
   width: number;
   height: number;
+  /**
+   * Downscaled (~256px JPEG) thumb bytes for the row list, minted from
+   * the same single decode. Null when the source is already at/below
+   * thumb scale (rows fall back to the full preview) or the thumb
+   * encode fails (best-effort: never fails the import). The hook wraps
+   * this in a Blob + object URL — bytes never enter React state.
+   */
+  thumb: Blob | null;
 }
 
 export interface PrepareImportOptions {
@@ -409,11 +417,14 @@ export async function encodeBitmapToJpeg(
  * The pre-P2 main-thread encode: white-fill + draw + `toBlob` /
  * `convertToBlob` on the calling thread. Unchanged behavior — this is
  * the synchronous fallback whenever the worker is unavailable.
+ * `flipHorizontal` mirrors the worker's front-camera un-mirror so the
+ * fallback produces identical pixels.
  */
 async function mainThreadResizeToJpeg(
   bitmap: ImageBitmap,
   target: ImageDimensions,
   quality: number,
+  flipHorizontal = false,
 ): Promise<Uint8Array> {
   const canvas =
     typeof OffscreenCanvas !== 'undefined'
@@ -430,6 +441,10 @@ async function mainThreadResizeToJpeg(
   // (JPEG has no alpha; an unfilled canvas bakes them to black).
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, target.width, target.height);
+  if (flipHorizontal) {
+    ctx.translate(target.width, 0);
+    ctx.scale(-1, 1);
+  }
   ctx.drawImage(bitmap, 0, 0, target.width, target.height);
   if (canvas instanceof HTMLCanvasElement) {
     const blob = await new Promise<Blob | null>((resolve) =>
@@ -466,6 +481,62 @@ export const browserImportRenderer: ImportRenderer = {
   },
 };
 
+/** Row-list thumb long edge (engineering constant — small enough that a
+ * 100-row list stays cheap to decode, large enough for a 48px render). */
+export const THUMB_LONG_EDGE = 256;
+
+/** Thumb JPEG quality: previews only, kept small. */
+export const THUMB_JPEG_QUALITY = 0.8;
+
+/**
+ * Pure decision: thumb target for source dims — longest edge clamped to
+ * [`THUMB_LONG_EDGE`], aspect preserved, never upscaled. Returns null
+ * when the source is already at/below thumb scale (callers fall back to
+ * the full preview; no second encode spent on an already-tiny image).
+ */
+export function thumbTargetFor(
+  source: ImageDimensions,
+  maxLongEdge: number = THUMB_LONG_EDGE,
+): ImageDimensions | null {
+  const longest = Math.max(source.width, source.height);
+  if (
+    !Number.isFinite(source.width) ||
+    !Number.isFinite(source.height) ||
+    source.width <= 0 ||
+    source.height <= 0
+  )
+    return null;
+  if (longest <= maxLongEdge) return null;
+  const scale = maxLongEdge / longest;
+  return {
+    width: Math.max(1, Math.round(source.width * scale)),
+    height: Math.max(1, Math.round(source.height * scale)),
+  };
+}
+
+/**
+ * Best-effort thumb encode from an already-decoded bitmap (same single
+ * decode as normalization — no second `createImageBitmap`). Always runs
+ * on the calling thread: at ~256px the encode is trivial work, and the
+ * worker path would TRANSFER the bitmap the main resize still needs.
+ * Never throws: null means "fall back to the full preview" (already
+ * tiny source, or no 2D canvas in this runtime).
+ */
+async function tryEncodeThumb(decoded: DecodedImage, dims: ImageDimensions): Promise<Blob | null> {
+  try {
+    const target = thumbTargetFor(dims);
+    if (target === null) return null;
+    const bytes = await mainThreadResizeToJpeg(
+      decoded.bitmap as ImageBitmap,
+      target,
+      THUMB_JPEG_QUALITY,
+    );
+    return new Blob([bytes as unknown as BlobPart], { type: 'image/jpeg' });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Prepares ONE selected file for import. Decodes a single bitmap ONCE
  * (dimension check + re-encode share it), decides by pixel dimensions,
@@ -488,6 +559,9 @@ export async function prepareImportFile(
     if (!(dims.width > 0 && dims.height > 0)) {
       throw new Error(`could not read image dimensions for ${file.name}`);
     }
+    // Thumb first, from the same single decode: best-effort, never fails
+    // the import (the main resize below is the fallible path that matters).
+    const thumb = await tryEncodeThumb(decoded, dims);
     const target = planNormalization(dims, maxLongEdge);
     if (target === null && !isPngFile(file)) {
       return {
@@ -496,6 +570,7 @@ export async function prepareImportFile(
         retainedOriginal: true,
         width: dims.width,
         height: dims.height,
+        thumb,
       };
     }
     const size = target ?? dims;
@@ -507,6 +582,7 @@ export async function prepareImportFile(
       retainedOriginal: false,
       width: size.width,
       height: size.height,
+      thumb,
     };
   } finally {
     renderer.close(decoded);

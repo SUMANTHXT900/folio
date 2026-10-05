@@ -10,6 +10,7 @@ pub mod scheduler;
 
 pub use cancellation::{CancellationSource, CancellationToken};
 pub use context::ExecutionContext;
+pub use context::ProgressThrottle;
 pub use job::{Job, JobId, JobState};
 pub use progress::{ProgressEvent, ProgressSink, SubProgressMapper};
 pub use scheduler::{ExecutionEngine, ExecutionStrategy, InlineScheduler, SchedulerPolicy};

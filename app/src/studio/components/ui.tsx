@@ -496,26 +496,35 @@ export function DoneBanner({
   name,
   blob,
   shareable = false,
+  url: externalUrl,
 }: {
   name: string;
   blob?: Blob;
   shareable?: boolean;
+  /**
+   * Caller-owned object URL (e.g. `DownloadCard`'s): when provided the
+   * banner reuses it instead of minting a second URL for the same blob —
+   * one URL per completion, revoked once by its owner.
+   */
+  url?: string;
 }) {
-  const [url, setUrl] = useState<string | undefined>(undefined);
+  const [internalUrl, setInternalUrl] = useState<string | undefined>(undefined);
   const [shared, setShared] = useState(false);
 
   // (re)create the object URL per blob; revoke on replace and unmount.
+  // Skipped entirely when the caller shares its URL (single-URL path).
   useEffect(() => {
-    if (!blob) {
-      setUrl(undefined);
+    if (externalUrl !== undefined || !blob) {
+      if (!blob) setInternalUrl(undefined);
       return;
     }
     const next = URL.createObjectURL(blob);
-    setUrl(next);
+    setInternalUrl(next);
     return () => {
       URL.revokeObjectURL(next);
     };
-  }, [blob]);
+  }, [blob, externalUrl]);
+  const url = externalUrl ?? internalUrl;
   return (
     <motion.div
       initial={{ opacity: 0, y: 6, scale: 0.99 }}

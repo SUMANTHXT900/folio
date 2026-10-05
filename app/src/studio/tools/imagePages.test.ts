@@ -43,6 +43,27 @@ describe('createPage', () => {
     expect(p.size).toBe(10);
     expect(p.rotationDeg).toBe(0);
     expect(p.previewUrl).toBe('');
+    expect(p.thumbUrl).toBe('');
+    expect(p.width).toBe(0);
+    expect(p.height).toBe(0);
+  });
+
+  it('carries import-time thumb URL and normalized dims', () => {
+    const file = new File(['0123456789'], 'photo.jpg', { type: 'image/jpeg' });
+    const p = createPage({
+      id: 'p1',
+      source: 'upload',
+      file,
+      name: 'photo.jpg',
+      previewUrl: 'blob:full',
+      thumbUrl: 'blob:thumb',
+      width: 2500,
+      height: 1875,
+    });
+    expect(p.previewUrl).toBe('blob:full');
+    expect(p.thumbUrl).toBe('blob:thumb');
+    expect(p.width).toBe(2500);
+    expect(p.height).toBe(1875);
   });
 });
 

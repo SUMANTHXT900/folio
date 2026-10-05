@@ -50,7 +50,7 @@ const MergeDragRow = memo(function MergeDragRow({
   const controls = useDragControls();
   return (
     <Reorder.Item
-      value={file}
+      value={file.id}
       dragListener={false}
       dragControls={controls}
       className="list-none relative"
@@ -270,10 +270,20 @@ export default function MergeTool() {
             </button>
           </div>
 
+          {/* Stable id values: framer-motion diffs values by identity —
+              object values break reorder after any state refresh that
+              rebuilds handles; ids survive it. */}
           <Reorder.Group
             axis="y"
-            values={files}
-            onReorder={setFiles}
+            values={files.map((f) => f.id)}
+            onReorder={(ids) => {
+              setFiles((prev) => {
+                const byId = new Map(prev.map((f) => [f.id, f] as const));
+                return ids
+                  .map((id) => byId.get(id))
+                  .filter((f): f is (typeof prev)[number] => f !== undefined);
+              });
+            }}
             className="flex flex-col gap-2 mb-6"
           >
             {files.map((f, i) => (

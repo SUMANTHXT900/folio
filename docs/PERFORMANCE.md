@@ -107,6 +107,17 @@ Status: ✅ = fixed in the 2026-09-26 performance pass; ◻ = open (phase in par
 15. **Engine bench CLI:** ✅ `engine/examples/bench_operations.rs` benches merge/split/rotate/inspect/images over synthetic docs at {1, 10, 50 pages} plus optional `--dir` corpus (read-only, never required); `--repeat N` + `--json` follow the existing example conventions. Run: `cd engine && cargo run --example bench_operations -- --repeat 3 --json`.
 16. **App-side attribution:** ✅ `performance.mark/measure` spans around intake → staging → transfer → wait → outputs in `runStudioOperation` plus render/encode spans for thumbnails/previews, exposed as dev-only `perfMarks` on the studio result (production shape unchanged; engine duration stays authoritative).
 
+## Pass record — 2026-10-05 (P5 interaction performance, v1.10.0)
+
+| Verification        | Result                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Engine Rust suite   | 395 passing (267 unit + 14 integration binaries + 12 new: throttle, merge gate, sharing, geometry, EXIF, loader)    |
+| Frontend unit tests | scoped suites green per area (images 62, scan capture 66/66 re-pointed, PDF path 62, plus encode/download/ui areas) |
+| Builds              | typecheck/lint/format clean (prettier pass over 5 files); production build + dev deploy follow this commit          |
+| E2E                 | intentionally skipped per instruction — canonical re-run is laptop-side before any prod decision                    |
+
+Implemented across `app/src/studio/tools/` (Images, PageGrid, scan, PDF tools), `app/src/studio/services/folio.ts`, hooks, `app/vite.config.ts` (lazy ML assets), and `engine/src` (copy/images/progress/merge/delete/geometry/bench/EXIF). Engine contract untouched (no op IDs, wire shapes, or protocol changes). Prior P0–P4 verdicts stand (P0.2 shelved, single-threaded WASM baseline).
+
 ## Pass record — 2026-09-26 (P3)
 
 | Verification        | Result                                                                                                           |

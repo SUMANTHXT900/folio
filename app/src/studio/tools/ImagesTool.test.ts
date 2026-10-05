@@ -103,6 +103,30 @@ describe('preStageShardEstimate', () => {
     // pre-stage and post-stage evaluations agree — behavior identical.
     expect(preStageShardEstimate(pages).shards).toBe(1);
   });
+
+  it('sums real w×h pixels for the pixel gate when dims are known', () => {
+    const pages = [
+      createPage({
+        id: 'a',
+        source: 'upload',
+        file: upload('a.jpg', [1, 2]),
+        name: 'a.jpg',
+        width: 2500,
+        height: 1875,
+      }),
+      createPage({
+        id: 'b',
+        source: 'upload',
+        file: upload('b.jpg', [3]),
+        name: 'b.jpg',
+        width: 800,
+        height: 600,
+      }),
+    ];
+    const estimate = preStageShardEstimate(pages);
+    expect(estimate.totalBytes).toBe(3);
+    expect(estimate.totalPixels).toBe(2500 * 1875 + 800 * 600);
+  });
 });
 
 describe('camera entry (scanic reintegration)', () => {

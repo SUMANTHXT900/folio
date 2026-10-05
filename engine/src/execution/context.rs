@@ -20,6 +20,58 @@ pub struct ExecutionContext {
     cancellation: CancellationToken,
 }
 
+/// Minimum pages between source-side progress reports when the integer
+/// percentage has not advanced. Mirrors the glue sink rule
+/// (`should_forward_progress` in `wasm/src/lib.rs`: phase-first, Δ≥1 pp,
+/// always 100%) at the emission site, so thousand-page loops emit tens of
+/// events instead of thousands. The wire shape is unchanged — only
+/// redundant in-between events are skipped. Terminal 100% events bypass
+/// the throttle: callers emit their `finalizing` report directly.
+pub const PROGRESS_REPORT_EVERY_N_PAGES: u64 = 64;
+
+/// Source-side progress throttle for per-page operation loops.
+///
+/// Pass-through quota: the first observation always reports; afterwards an
+/// observation reports when the integer percentage advanced (any change is
+/// ≥ 1 pp) or when [`PROGRESS_REPORT_EVERY_N_PAGES`] pages elapsed since
+/// the last report (liveness heartbeat for giant documents where one point
+/// spans many pages). Cancellation stays per-page at the call site — only
+/// `report_progress` calls are gated, never `check_cancellation`.
+#[derive(Debug, Default)]
+pub struct ProgressThrottle {
+    last_completed: Option<u64>,
+    last_page: u64,
+}
+
+impl ProgressThrottle {
+    /// Creates a throttle that reports its first observation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last_completed: None,
+            last_page: 0,
+        }
+    }
+
+    /// Returns `true` when this observation should be emitted via
+    /// `report_progress`. Updates the cursor on `true` only, so a dropped
+    /// event never moves the baseline (identical to the sink rule).
+    pub fn should_report(&mut self, completed: u64, pages_done: u64) -> bool {
+        let report = match self.last_completed {
+            None => true,
+            Some(last) => {
+                completed != last
+                    || pages_done.saturating_sub(self.last_page) >= PROGRESS_REPORT_EVERY_N_PAGES
+            }
+        };
+        if report {
+            self.last_completed = Some(completed);
+            self.last_page = pages_done;
+        }
+        report
+    }
+}
+
 impl ExecutionContext {
     /// Creates a context for the given job.
     pub fn new(
@@ -106,5 +158,49 @@ mod tests {
         assert_eq!(events[0].job_id(), &job);
         assert_eq!(events[0].phase(), Some("processing"));
         assert!(!ctx.is_cancelled());
+    }
+
+    #[test]
+    fn throttle_reports_first_observation() {
+        let mut throttle = ProgressThrottle::new();
+        assert!(throttle.should_report(10, 1));
+    }
+
+    #[test]
+    fn throttle_suppresses_repeated_percentage() {
+        let mut throttle = ProgressThrottle::new();
+        assert!(throttle.should_report(10, 1));
+        // Same integer percentage, few pages later: redundant, drop it.
+        assert!(!throttle.should_report(10, 2));
+        assert!(!throttle.should_report(10, 3));
+    }
+
+    #[test]
+    fn throttle_reports_any_percentage_advance() {
+        let mut throttle = ProgressThrottle::new();
+        assert!(throttle.should_report(10, 1));
+        assert!(!throttle.should_report(10, 2));
+        // Any integer change is >= 1 pp: forward, like the sink rule.
+        assert!(throttle.should_report(11, 3));
+        assert!(!throttle.should_report(11, 4));
+    }
+
+    #[test]
+    fn throttle_heartbeats_every_n_pages_without_advance() {
+        let mut throttle = ProgressThrottle::new();
+        assert!(throttle.should_report(50, 1));
+        let quiet = PROGRESS_REPORT_EVERY_N_PAGES - 1;
+        assert!(!throttle.should_report(50, quiet));
+        assert!(throttle.should_report(50, PROGRESS_REPORT_EVERY_N_PAGES + 1));
+    }
+
+    #[test]
+    fn throttle_never_moves_baseline_on_dropped_events() {
+        // A dropped event must not shift the heartbeat window: pages are
+        // counted from the last *reported* page, mirroring the sink cursor.
+        let mut throttle = ProgressThrottle::new();
+        assert!(throttle.should_report(50, 100));
+        assert!(!throttle.should_report(50, 101));
+        assert!(throttle.should_report(50, 100 + PROGRESS_REPORT_EVERY_N_PAGES));
     }
 }

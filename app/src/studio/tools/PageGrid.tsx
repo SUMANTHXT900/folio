@@ -49,16 +49,36 @@ const GripIcon = (
  * object URL from the page's retained File handle once; a second
  * failure reports `failed` so callers render an explicit placeholder —
  * never a silent blank (real-phone report: "light background, not the image").
+ *
+ * Rows (`'thumb'`) render the downscaled `thumbUrl` minted at import
+ * (cheap decode for long lists) and fall back to the full `previewUrl`
+ * before healing from the file; the modal (`'full'`) renders the full
+ * `previewUrl` directly. The source re-syncs whenever the page's URLs
+ * change (rotation re-import, thumb arrival), so a row never shows a
+ * stale object URL.
  */
-function usePreviewSrc(page: ImagePage): {
+function usePreviewSrc(
+  page: ImagePage,
+  which: 'thumb' | 'full',
+): {
   src: string;
   failed: boolean;
   onError: () => void;
 } {
-  const [src, setSrc] = useState(page.previewUrl);
-  const [failed, setFailed] = useState(page.previewUrl === '');
+  const canonical = which === 'thumb' ? page.thumbUrl || page.previewUrl : page.previewUrl;
+  const [src, setSrc] = useState(canonical);
+  const [failed, setFailed] = useState(canonical === '');
   const [retried, setRetried] = useState(false);
   const recoveredUrlRef = useRef<string | null>(null);
+
+  // Sync when the page's URLs change (thumb minted, preview replaced):
+  // rows must not keep rendering a revoked object URL.
+  useEffect(() => {
+    if (recoveredUrlRef.current === null) {
+      setSrc(canonical);
+      setFailed(canonical === '');
+    }
+  }, [canonical]);
 
   useEffect(() => {
     return () => {
@@ -70,6 +90,11 @@ function usePreviewSrc(page: ImagePage): {
   }, []);
 
   const onError = () => {
+    // Thumb rows step down to the full preview before healing from file.
+    if (which === 'thumb' && page.previewUrl !== '' && src !== page.previewUrl) {
+      setSrc(page.previewUrl);
+      return;
+    }
     if (retried) {
       setFailed(true);
       return;
@@ -88,7 +113,7 @@ function usePreviewSrc(page: ImagePage): {
 }
 
 function PageThumb({ page, position }: { page: ImagePage; position: number }) {
-  const { src, failed, onError } = usePreviewSrc(page);
+  const { src, failed, onError } = usePreviewSrc(page, 'thumb');
 
   if (failed) {
     return (
@@ -146,7 +171,7 @@ const PageRow = memo(function PageRow({
   onMove: (id: string, dir: -1 | 1) => void;
   onRemove: (id: string) => void;
   onRotate: (id: string) => void;
-  onPreview: (index: number) => void;
+  onPreview: (id: string) => void;
   dragControls: DragControls;
 }) {
   return (
@@ -165,7 +190,7 @@ const PageRow = memo(function PageRow({
         {position + 1}
       </span>
       <button
-        onClick={() => onPreview(position)}
+        onClick={() => onPreview(page.id)}
         aria-label={`Preview ${page.name}`}
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left sm:gap-3"
       >
@@ -269,7 +294,7 @@ const DragRow = memo(function DragRow({
   onMove: (id: string, dir: -1 | 1) => void;
   onRemove: (id: string) => void;
   onRotate: (id: string) => void;
-  onPreview: (index: number) => void;
+  onPreview: (id: string) => void;
 }) {
   const controls = useDragControls();
   return (
@@ -279,7 +304,7 @@ const DragRow = memo(function DragRow({
       dragControls={controls}
       className="list-none"
       style={{ touchAction: 'pan-y' }}
-      whileDrag={{ scale: 1.015, boxShadow: '0 12px 28px -12px rgba(23,19,14,0.25)' }}
+      whileDrag={{ scale: 1.015, opacity: 0.9 }}
       aria-label={`Page ${position + 1}: ${page.name}`}
     >
       <PageRow
@@ -299,13 +324,16 @@ const DragRow = memo(function DragRow({
 
 export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageGridProps) {
   const ids = useMemo(() => pages.map((p) => p.id), [pages]);
-  const [viewer, setViewer] = useState<number | null>(null);
-  const viewing = viewer === null ? null : (pages[viewer] ?? null);
+  // Viewer keyed by page id, not index: reorder/remove while the modal
+  // is open keeps showing the same page instead of sliding to a neighbor.
+  const [viewerId, setViewerId] = useState<string | null>(null);
+  const viewerIndex = viewerId === null ? -1 : pages.findIndex((p) => p.id === viewerId);
+  const viewing = viewerIndex < 0 ? null : pages[viewerIndex];
 
   // Stable preview callback: rows receive this reference (plus their
-  // position) instead of fresh per-row closures, so memo holds.
-  const handlePreview = useCallback((index: number) => {
-    setViewer(index);
+  // page id) instead of fresh per-row closures, so memo holds.
+  const handlePreview = useCallback((id: string) => {
+    setViewerId(id);
   }, []);
 
   return (
@@ -351,7 +379,7 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18, ease: 'easeOut' }}
               className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
-              onClick={() => setViewer(null)}
+              onClick={() => setViewerId(null)}
             >
               <motion.div
                 initial={{ opacity: 0, scale: 0.98 }}
@@ -361,18 +389,18 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
                 className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
                 role="dialog"
-                aria-label={`Preview page ${(viewer ?? 0) + 1}: ${viewing.name}`}
+                aria-label={`Preview page ${viewerIndex + 1}: ${viewing.name}`}
               >
                 <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
-                  <span className="font-display text-lg">Page {(viewer ?? 0) + 1}</span>
+                  <span className="font-display text-lg">Page {viewerIndex + 1}</span>
                   <button
-                    onClick={() => setViewer(null)}
+                    onClick={() => setViewerId(null)}
                     className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
                   >
                     Close
                   </button>
                 </div>
-                <PreviewFull page={viewing} position={viewer ?? 0} />
+                <PreviewFull page={viewing} position={viewerIndex} />
               </motion.div>
             </motion.div>,
             document.body,
@@ -384,7 +412,7 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
 
 /** Full-size modal preview with the same self-healing source as rows. */
 function PreviewFull({ page, position }: { page: ImagePage; position: number }) {
-  const { src, failed, onError } = usePreviewSrc(page);
+  const { src, failed, onError } = usePreviewSrc(page, 'full');
   if (failed) {
     return (
       <div className="flex h-64 flex-col items-center justify-center gap-2 rounded-xl bg-white/10 text-center text-paper-100">

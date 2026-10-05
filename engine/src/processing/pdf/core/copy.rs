@@ -9,9 +9,13 @@
 //!
 //! * The full selection is validated before any output is constructed, so
 //!   an invalid request can never yield a partial document.
-//! * Each selection entry is copied independently with a fresh reference
-//!   table, so duplicates (`[2, 2, 5]`) produce independent pages and the
-//!   output order always matches the requested order.
+//! * Each distinct page is copied through a shared reference table, so
+//!   immutable objects reachable from several pages (fonts, images,
+//!   resource dictionaries) are copied exactly once and referenced by
+//!   every page that uses them. Explicit duplicates (`[2, 2, 5]`) take a
+//!   fresh scope per extra occurrence instead, so duplicates stay
+//!   independent pages and the output order always matches the requested
+//!   order.
 //! * Inheritable page attributes (`Resources`, `MediaBox`, `CropBox`,
 //!   `Rotate`) are materialized explicitly on copied pages, so pages that
 //!   relied on ancestors stay correct in the flat output tree.
@@ -26,7 +30,7 @@
 //! Crate-internal: operations use this through `PdfDocument`-level APIs,
 //! never `lopdf` directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use lopdf::{dictionary, Dictionary, Object, ObjectId, Stream};
 
@@ -120,10 +124,27 @@ pub(crate) fn copy_pages_with_map(
     let out_pages_id = out.new_object_id();
     let mut kids = Vec::with_capacity(pages.len());
 
+    // Two-tier remap: the first occurrence of each distinct page copies
+    // through the shared table (immutable objects copied once, referenced
+    // by every page); each extra occurrence of an explicit duplicate takes
+    // a fresh scope, keeping duplicates independent.
+    let mut seen: HashSet<u32> = HashSet::with_capacity(pages.len());
+    let mut shared: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
     for (index, page_number) in pages.iter().enumerate() {
         // Validated above; the lookup cannot fail.
         let src_page_id = page_map[page_number];
-        let new_page_id = copy_single_page(src, src_page_id, *page_number, &mut out, out_pages_id)?;
+        let new_page_id = if seen.insert(*page_number) {
+            copy_shared_page(
+                src,
+                src_page_id,
+                *page_number,
+                &mut out,
+                out_pages_id,
+                &mut shared,
+            )?
+        } else {
+            copy_single_page(src, src_page_id, *page_number, &mut out, out_pages_id)?
+        };
         kids.push(Object::Reference(new_page_id));
         on_page_copied(index + 1, pages.len())?;
     }
@@ -305,6 +326,10 @@ fn max_version(versions: &[&str]) -> String {
 
 /// Copies one page plus its reachable closure. `Parent` is never copied;
 /// the page is re-parented to the new `Pages` node.
+///
+/// Fresh scope: the table maps only this page's own closure, so the copy
+/// is fully independent of every other page. Used for explicit duplicates
+/// inside one extraction.
 fn copy_single_page(
     src: &lopdf::Document,
     src_page_id: ObjectId,
@@ -324,15 +349,45 @@ fn copy_single_page(
     Ok(new_page_id)
 }
 
+/// Copies one page through a caller-owned remap table shared with other
+/// pages, so immutable objects reachable from several distinct pages are
+/// copied once and referenced by every page that uses them.
+///
+/// First registration wins (as in [`merge_documents`]): if an earlier
+/// page's closure already pulled this page in as a shadow, the fresh body
+/// below overwrites the shadow in place, and inbound references (e.g. link
+/// destinations) keep pointing at the real copied page.
+fn copy_shared_page(
+    src: &lopdf::Document,
+    src_page_id: ObjectId,
+    page_number: u32,
+    out: &mut lopdf::Document,
+    out_pages_id: ObjectId,
+    shared: &mut BTreeMap<ObjectId, ObjectId>,
+) -> Result<ObjectId, EngineError> {
+    // Pre-register so back-references to the page itself (e.g. annotation
+    // `/P` entries) resolve to the new page instead of dragging in the
+    // source tree. `or_insert` keeps an earlier shadow registration, which
+    // the body insert below then heals into the real page.
+    let fresh_id = out.new_object_id();
+    shared.entry(src_page_id).or_insert(fresh_id);
+    let new_page_id = shared[&src_page_id];
+    let new_dict = copy_page_body(src, src_page_id, page_number, out, out_pages_id, shared)?;
+    out.objects
+        .insert(new_page_id, Object::Dictionary(new_dict));
+    Ok(new_page_id)
+}
+
 /// Builds the copied page dictionary for `src_page_id` (without allocating
 /// or inserting it): copies every entry except `Parent`, re-parents to
 /// `out_pages_id`, and materializes missing inheritable attributes.
 /// Reference remapping flows through `table`, which must already map
 /// `src_page_id` itself so self-references resolve to the new page.
 ///
-/// Shared by single-document extraction (fresh table per entry, hence
-/// independent duplicate copies) and multi-document merge (one table per
-/// source document, hence shared objects stay shared within a document).
+/// Shared by single-document extraction (shared table across distinct
+/// pages, fresh scope per explicit duplicate) and multi-document merge
+/// (one table per source document, hence shared objects stay shared
+/// within a document).
 fn copy_page_body(
     src: &lopdf::Document,
     src_page_id: ObjectId,
@@ -559,6 +614,30 @@ mod tests {
         assert_eq!(reparsed.page_geometry(1).expect("p1").rotation_deg, 90);
         assert_eq!(reparsed.page_geometry(2).expect("p2").rotation_deg, 90);
         assert_eq!(reparsed.page_geometry(3).expect("p3").rotation_deg, 0);
+    }
+
+    #[test]
+    fn shares_immutable_objects_across_distinct_pages() {
+        // Both text pages share one font object; extraction must copy it
+        // exactly once (previously once per page), while each page keeps
+        // its own dictionary and content.
+        let bytes = fixtures::text_pages_pdf(&["A", "B"]);
+        let doc = load_pdf(&bytes).expect("fixture loads");
+        let mut out = copy_pages(&doc, &[1, 2], |_, _| Ok(())).expect("copy succeeds");
+        assert_eq!(out.page_count(), 2);
+        let out_bytes = out.save_to_bytes().expect("output serializes");
+        let raw = lopdf::Document::load_mem(&out_bytes).expect("output re-parses");
+        let fonts = raw
+            .objects
+            .values()
+            .filter(|obj| {
+                obj.as_dict().is_ok_and(|dict| {
+                    dict.get(b"Subtype")
+                        .is_ok_and(|subtype| subtype.as_name().is_ok_and(|name| name == b"Type1"))
+                })
+            })
+            .count();
+        assert_eq!(fonts, 1, "shared font copied exactly once");
     }
 
     #[test]

@@ -2,6 +2,16 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.10.0 — Interaction-performance pass (Images, Scan, PDF tools, engine)
+
+User-reported lag on image clicks + capture-button app freeze. Full-repo audit (3 analysts, every file) → 4 parallel implementers → integrated centrally. No behavior changes; engine contract untouched.
+
+- **Images.** 256px JPEG thumbs minted at import (rows render thumbs, modal keeps full bytes); preview modal keyed by page id; rotate re-encode via the encode worker; sharding pixel gate wired to real dims; batched import commits; single build-progress state; revoke outside updaters; `whileDrag` transform/opacity only; completion state clears only when a build exists; shared DownloadCard URL; flip applied in fallback; upload errors caught.
+- **Scan.** Capture detection + warp moved onto the existing `ScanicClient` worker (main-thread `scanic` import gone); single warp per Apply with cancel-supersede; no retained decoded images; commits normalized through `prepareImportFile` (async `buildPdf`); sampler canvas reused; review loupe rAF-coalesced with scoped deps; source cache LRU-3.
+- **PDF tools.** Rearrange/Split remove now closes docs (leak fixed); cancellable `studioPreview`; thumb tiers (~128px lists, 400 zoom-only) + DPR-capped preview scale; live-job set in `usePageThumbs`; narrowed preview effect deps; per-page thumb fault isolation; id-based Merge reorder; range clamp/cap; progress-count labels; `pageWindows` adopted; rotate intermediates skip render-load; payload warning annotated; ORT/ML assets moved to lazy runtime cache.
+- **Engine.** Shared-object table for extract (fonts/images copied once across distinct pages, fresh scope per explicit duplicate); in-place RGBA→RGB compositing; source-side progress throttle; merge total-bytes gate (`INVALID_INPUT`); O(D) delete/rotate duplicate checks; geometry early-break; passthrough byte drain; EXIF parsed once; bench to 500/2000 pages.
+- **Verification (scoped only, per instruction).** Rust: 395 pass + fmt + clippy clean. Frontend: scoped suites for every touched area green (incl. 66/66 re-pointed `ScanicCapture` tests); tsc/eslint/prettier clean. Full vitest + E2E intentionally skipped — laptop-side before any prod decision.
+
 ## v1.9.7 — Update feature repair: prompt semantics end-to-end (`dev`, 2026-10-05)
 
 Fixes the About "App updates" feature the user reported as buggy. Root cause: `registerType: 'autoUpdate'` in `vite.config.ts` bypasses `onNeedRefresh` entirely (background activate + forced reload; `updateSW(true)` a no-op), while the banner/About UI was written for prompt semantics — verified against the installed plugin client. Now `registerType: 'prompt'` with user-gated activation (exactly-once reload latch, bounded activation with retry fallback, injectable reload for tests).

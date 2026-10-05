@@ -9,14 +9,15 @@
  * Detection is ML-first (self-hosted same-origin assets under
  * `public/assets/scanic-ml/`), classical only as an honest fallback when the
  * ML detector throws. Corner *types* come from the worker agent's barrel
- * (`./scan/index`), the single source of truth; the queue runtime here is
- * intentionally inline (main-thread `scanDocument`/`extractDocument` per
- * capture) so the review UI works standalone — swapping the internals onto
- * `useScanicProcessor` later must keep the DOM contract below byte-for-byte.
+ * (`./scan/index`), the single source of truth; detection + warp run through
+ * `ScanicClient` (`./scan/scanicClient`) on the module scan worker — scanic
+ * never executes on the main thread here (the worker self-warms its own ML
+ * session at startup). The DOM contract below is byte-for-byte the same as
+ * the old inline runtime, so unit + E2E selectors keep holding.
  *
  * Preview vs detection: the <video> preview pixels are NEVER the detection
  * input — detection runs on the captured still through scanic's own internal
- * downscale (`scanDocument` scales to detection size itself). Preview
+ * downscale (the worker scales to detection size itself). Preview
  * resolution (up to 1080p) only affects what the user sees.
  *
  * Mirror invariant: the front-camera preview is CSS-mirrored (`scaleX(-1)`,
@@ -78,12 +79,15 @@
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
- * JPEG q0.9 renders from `extractDocument(..., { output: 'canvas' })` via
- * `canvasToJpeg(0.9)` — warped pages are NEW renders (never original bytes;
- * originals still pass through byte-identical), and JPEG q0.9 full-res cuts
- * multi-MB PNG bloat to a fraction with no readable-text loss (4-page 22MB
- * class problem). Committed warped files keep `scan-NNN.jpg` names with
- * `image/jpeg` type.
+ * JPEG q0.9 renders of the worker's warp output via `imageDataToJpeg(0.9)` —
+ * warped pages are NEW renders (never original bytes; originals still pass
+ * through byte-identical when inside the import pixel budget), and JPEG q0.9
+ * full-res cuts multi-MB PNG bloat to a fraction with no readable-text loss
+ * (4-page 22MB class problem). Commits run through `prepareImportFile`
+ * normalization (same pixel budget as gallery imports) so 48MP sensor photos
+ * can't bypass it — the commit never loses a page (normalization failure
+ * falls back to the candidate file). Committed warped files keep
+ * `scan-NNN.jpg` names with `image/jpeg` type.
  *
  * Corner adjust lives in `./ScanicReview` (dependency-free handles on the
  * overlay coordinate space, same E2E labels + 44px targets); this file owns
@@ -93,13 +97,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { extractDocument, scanDocument } from 'scanic';
+import { prepareImportFile } from './imageImport';
 import type { ScanicCorners } from './scan/index';
 import {
   DEFAULT_DETECTOR,
   ML_ASSET_BASE_URL as POLICY_ML_ASSET_BASE_URL,
-  warmMlDetector,
 } from './scan/detectorPolicy';
+import { ScanicClient, ScanicClientError } from './scan/scanicClient';
 import ScanicReview from './ScanicReview';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
@@ -492,13 +496,20 @@ export function shouldAutoFire(
   return nowMs - lastFireMs >= cooldownMs;
 }
 
+/** Shared auto-capture sampler canvas (one 48x27 allocation, reused per tick). */
+let samplerCanvas: HTMLCanvasElement | null = null;
+
 /** Downscaled grayscale snapshot of the live preview; null when unreadable. */
 function samplePreviewGrayscale(video: HTMLVideoElement): Uint8Array | null {
   try {
-    const canvas = document.createElement('canvas');
-    canvas.width = AUTO_CAPTURE_SAMPLE_W;
-    canvas.height = AUTO_CAPTURE_SAMPLE_H;
-    const ctx = canvas.getContext('2d');
+    // One shared 48x27 sampler for the whole session: the auto-capture tick
+    // fires every 300ms and must never allocate a canvas per tick.
+    if (samplerCanvas === null) {
+      samplerCanvas = document.createElement('canvas');
+      samplerCanvas.width = AUTO_CAPTURE_SAMPLE_W;
+      samplerCanvas.height = AUTO_CAPTURE_SAMPLE_H;
+    }
+    const ctx = samplerCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, AUTO_CAPTURE_SAMPLE_W, AUTO_CAPTURE_SAMPLE_H);
     const data = ctx.getImageData(0, 0, AUTO_CAPTURE_SAMPLE_W, AUTO_CAPTURE_SAMPLE_H).data;
@@ -576,18 +587,86 @@ function loadImage(
 }
 
 /**
- * Warped-page encoder: full-res `image/jpeg` at quality 0.9.
+ * Exact-size 2D canvas; null when the platform has no canvas 2D (jsdom).
+ * Warp/decode callers treat null as an honest failure, never a fallback.
+ */
+function makeCanvas(width: number, height: number): HTMLCanvasElement | null {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(width));
+    canvas.height = Math.max(1, Math.floor(height));
+    return canvas;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decodes an ORIGINAL File into a full-resolution ImageData COPY for the
+ * scan worker. The worker transfers (neuters) the pixels it receives, so
+ * every detection/warp needs its own copy; the File bytes are never
+ * touched. `createImageBitmap` is preferred (no DOM element); the
+ * object-URL `<img>` path is the fallback for older browsers.
+ */
+async function decodeFileToImageData(file: File): Promise<ImageData> {
+  if (typeof createImageBitmap === 'function') {
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error(`could not decode ${file.name}`);
+    }
+    try {
+      const canvas = makeCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+      if (!canvas || !ctx) throw new Error('2D canvas unavailable for scan decode');
+      ctx.drawImage(bitmap, 0, 0);
+      return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+    } finally {
+      try {
+        bitmap.close();
+      } catch {
+        // Release is best-effort; the copy is already detached.
+      }
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const { el, w, h } = await loadImage(url);
+    if (w === 0 || h === 0) {
+      throw new Error(`could not decode ${file.name}`);
+    }
+    const canvas = makeCanvas(w, h);
+    const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+    if (!canvas || !ctx) throw new Error('2D canvas unavailable for scan decode');
+    ctx.drawImage(el, 0, 0);
+    return ctx.getImageData(0, 0, w, h);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * Warped-page encoder: worker warp ImageData → full-res `image/jpeg` at
+ * quality 0.9 (null when the platform cannot encode).
  *
  * Rationale: warped pages are NEW renders (never original bytes — originals
- * still pass through byte-identical), and JPEG q0.9 full-res cuts multi-MB
- * PNG bloat to a fraction with no readable-text loss (4-page 22MB class
- * problem). Committed warped files keep `scan-NNN.jpg` names with
- * `image/jpeg` type. Full-res means the extract canvas pixels as-is (no
- * downscale); only the container changes (PNG → JPEG).
+ * still pass through byte-identical when inside the import pixel budget),
+ * and JPEG q0.9 full-res cuts multi-MB PNG bloat to a fraction with no
+ * readable-text loss (4-page 22MB class problem). Committed warped files
+ * keep `scan-NNN.jpg` names with `image/jpeg` type. Full-res means the warp
+ * output pixels as-is (no downscale); only the container changes.
  */
-function canvasToJpeg(canvas: HTMLCanvasElement, quality = 0.9): Promise<Blob | null> {
+function imageDataToJpeg(image: ImageData, quality = 0.9): Promise<Blob | null> {
   return new Promise((resolve) => {
     try {
+      const canvas = makeCanvas(image.width, image.height);
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) {
+        resolve(null);
+        return;
+      }
+      ctx.putImageData(image, 0, 0);
       if (typeof canvas.toBlob !== 'function') {
         resolve(null);
         return;
@@ -672,7 +751,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const probeGenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
-  const imageElsRef = useRef(new Map<number, HTMLImageElement>());
+  /**
+   * Scan worker clients (one per mount, terminated on unmount). Detection and
+   * warps use SEPARATE clients so an Apply-time warp cancel (terminate on the
+   * warp client) can never nuke another entry's in-flight detection.
+   * Warp pixels are always decoded fresh from the original File — no decoded
+   * element/image cache is retained past any operation (the old `imageElsRef`
+   * is gone: nothing outlives detection+warp).
+   */
+  const scanClientRef = useRef<ScanicClient | null>(null);
+  const warpClientRef = useRef<ScanicClient | null>(null);
+  /**
+   * Per-entry warp generation: Apply spam bumps the seq and terminates the
+   * in-flight warp; stale continuations (wrong seq, or `cancelled`) drop
+   * silently so only the latest quad's warp can commit.
+   */
+  const warpSeqRef = useRef(new Map<number, number>());
+  /** Warp generations with a worker request outstanding (terminate guard). */
+  const warpInflightRef = useRef(new Set<number>());
   const warpedBlobsRef = useRef(new Map<number, Blob>());
   const objectUrlsRef = useRef(new Set<string>());
   /** Last shutter time (manual or auto) — the auto cooldown gates on this. */
@@ -684,7 +780,32 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       mountedRef.current = false;
       for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
       objectUrlsRef.current.clear();
+      // Owned workers die with the mount: in-flight requests reject and
+      // their continuations drop on the mountedRef check.
+      scanClientRef.current?.terminate();
+      scanClientRef.current = null;
+      warpClientRef.current?.terminate();
+      warpClientRef.current = null;
     };
+  }, []);
+
+  /**
+   * Lazily-created owned scan worker client for detection. Created on first
+   * capture (never at scanner open), reused for every entry, terminated on
+   * unmount above.
+   */
+  const getScanClient = useCallback((): ScanicClient => {
+    if (scanClientRef.current === null) scanClientRef.current = new ScanicClient();
+    return scanClientRef.current;
+  }, []);
+
+  /**
+   * Lazily-created owned scan worker client for warps. Separate from
+   * detection so Apply-time terminate-to-cancel only ever cancels warps.
+   */
+  const getWarpClient = useCallback((): ScanicClient => {
+    if (warpClientRef.current === null) warpClientRef.current = new ScanicClient();
+    return warpClientRef.current;
   }, []);
 
   // Full-screen takeover: lock body scroll while the scanner is mounted so
@@ -703,13 +824,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   useEffect(() => {
     entriesRef.current = entries;
   }, [entries]);
-
-  // Warm preload at scanner open: the ORT runtime + model bytes load while
-  // the user frames the first page, so the first capture never pays the
-  // load. Fire-and-forget; failure falls back silently per-entry.
-  useEffect(() => {
-    void warmMlDetector();
-  }, []);
 
   const trackUrl = useCallback((url: string): string => {
     objectUrlsRef.current.add(url);
@@ -732,82 +846,90 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   // fallback drawImage reads raw pixels, never the CSS transform).
   const previewMirrored = facing === 'user' && mirrored;
 
-  /* ---------------- detection (ML default, classical fallback) ---------------- */
+  /* ---------------- detection (ML default, classical fallback, worker) ---------------- */
 
-  const detectEntry = useCallback(async (id: number, photoUrl: string) => {
-    const { el, w, h } = await loadImage(photoUrl);
-    if (!mountedRef.current) return;
-    if (w === 0 || h === 0) {
-      imageElsRef.current.set(id, el);
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.id === id
-            ? {
-                ...e,
-                imageWidth: 0,
-                imageHeight: 0,
-                status: 'ready' as const,
-                note: 'Could not decode this image — the full frame will be used.',
-              }
-            : e,
-        ),
-      );
-      return;
-    }
-    imageElsRef.current.set(id, el);
-    setEntries((prev) =>
-      prev.map((e) =>
-        e.id === id
-          ? { ...e, imageWidth: w, imageHeight: h, note: 'Loading on-device ML detector…' }
-          : e,
-      ),
-    );
-    try {
-      // ML-first: DocCornerNet via vendored same-origin assets. Preview pixels
-      // are never the detection input — scanic downscales internally, so the
-      // high-res viewfinder only affects what the user sees.
-      // Null-means-missed (not just throws): when ML succeeds but finds no
-      // quad, classical gets one attempt — it sees different features and
-      // regularly catches what ML passes over (and vice versa). Only when
-      // BOTH find nothing does the page settle croppable full-frame.
-      const result = await scanDocument(el, {
-        detector: DEFAULT_DETECTOR,
-        ml: { assetBaseUrl: SCANIC_ML_ASSET_BASE_URL },
-      });
-      if (!mountedRef.current) return;
-      if (result.corners !== null) {
+  /**
+   * Worker detection for one queued entry. Decodes a full-resolution
+   * ImageData COPY of the original (the worker transfers/neuters it, so the
+   * copy is single-use) and sends it to the scan worker ML-first; the
+   * worker's one-shot classical fallback runs inside the worker on ANY ML
+   * miss/failure, and the result names the detector behind the corners.
+   * Entries, corners, notes, and statuses are byte-identical to the old
+   * inline runtime — only the execution thread changed.
+   */
+  const detectEntry = useCallback(
+    async (id: number) => {
+      const record = entriesRef.current.find((e) => e.id === id);
+      if (!record) return;
+      let image: ImageData;
+      try {
+        image = await decodeFileToImageData(record.original);
+      } catch {
+        if (!mountedRef.current) return;
         setEntries((prev) =>
           prev.map((e) =>
             e.id === id
-              ? { ...e, status: 'ready' as const, corners: result.corners, note: null }
+              ? {
+                  ...e,
+                  imageWidth: 0,
+                  imageHeight: 0,
+                  status: 'ready' as const,
+                  note: 'Could not decode this image — the full frame will be used.',
+                }
               : e,
           ),
         );
         return;
       }
-      const second = await scanDocument(el, { detector: 'classical' });
       if (!mountedRef.current) return;
+      const w = image.width;
+      const h = image.height;
       setEntries((prev) =>
         prev.map((e) =>
           e.id === id
-            ? {
-                ...e,
-                status: 'ready' as const,
-                corners: second.corners,
-                note:
-                  second.corners === null
-                    ? 'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.'
-                    : 'ML found no page — classical detection placed this outline; adjust freely.',
-              }
+            ? { ...e, imageWidth: w, imageHeight: h, note: 'Loading on-device ML detector…' }
             : e,
         ),
       );
-    } catch {
-      // ML can fail (model fetch, ORT runtime); fall back to classical once,
-      // honestly labelled. Classical failure degrades to full-frame.
-      if (!mountedRef.current) return;
       try {
-        const fallback = await scanDocument(el, { detector: 'classical' });
+        // ML-first with the worker's internal classical fallback: a null
+        // quad means BOTH missed (croppable full-frame); a classical-backed
+        // quad means ML saw nothing but classical placed an outline.
+        const result = await getScanClient().detect(image, DEFAULT_DETECTOR);
+        if (!mountedRef.current) return;
+        if (result.corners !== null) {
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === id
+                ? {
+                    ...e,
+                    status: 'ready' as const,
+                    corners: result.corners,
+                    note:
+                      result.detector === 'classical'
+                        ? 'ML found no page — classical detection placed this outline; adjust freely.'
+                        : null,
+                  }
+                : e,
+            ),
+          );
+          return;
+        }
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === id
+              ? {
+                  ...e,
+                  status: 'ready' as const,
+                  corners: null,
+                  note: 'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.',
+                }
+              : e,
+          ),
+        );
+      } catch {
+        // Worker crash/unavailable: degrade to full-frame, honestly labelled.
+        // Classical failure inside the worker lands here the same way.
         if (!mountedRef.current) return;
         setEntries((prev) =>
           prev.map((e) =>
@@ -815,30 +937,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               ? {
                   ...e,
                   status: 'ready' as const,
-                  corners: fallback.corners,
-                  note: 'ML detector unavailable — used on-device classical detection instead.',
+                  corners: null,
+                  note: 'Auto-detect failed on this image — the full frame will be used.',
                 }
               : e,
           ),
         );
-        return;
-      } catch {
-        if (!mountedRef.current) return;
       }
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.id === id
-            ? {
-                ...e,
-                status: 'ready' as const,
-                corners: null,
-                note: 'Auto-detect failed on this image — the full frame will be used.',
-              }
-            : e,
-        ),
-      );
-    }
-  }, []);
+    },
+    [getScanClient],
+  );
 
   /**
    * Enqueues an untouched original File for detection. Returns the queue
@@ -872,7 +980,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       ];
       entriesRef.current = next;
       setEntries(next);
-      void detectEntry(id, photoUrl);
+      void detectEntry(id);
       return position;
     },
     [detectEntry, trackUrl],
@@ -890,7 +998,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         ),
       );
       try {
-        await detectEntry(entry.id, entry.photoUrl);
+        await detectEntry(entry.id);
       } finally {
         if (mountedRef.current) setRedetecting(false);
       }
@@ -1470,33 +1578,70 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * `warpedUrl` re-renders the result preview reactively. The verdict stays
    * untouched (warped renders the fresh crop, original keeps the photo) —
    * no navigation, no decision change.
+   *
+   * Single warp per Apply: an Apply for a quad that already has a warp is a
+   * no-op, and an Apply that lands while another warp is in flight bumps the
+   * entry's generation and terminates the warp worker — the superseded warp
+   * rejects as `cancelled` (or fails the generation check) and its
+   * continuation drops silently, so only the latest quad's warp can commit.
+   * The detection client is never touched: other entries keep detecting.
    */
   const rewrapEntry = useCallback(
     async (id: number, corners: ScanicCorners) => {
       const entry = entriesRef.current.find((e) => e.id === id);
-      const img = imageElsRef.current.get(id);
-      if (!entry || !img) return;
+      if (!entry) return;
+      const quadKey = JSON.stringify(corners);
+      if (lastWarpedQuadRef.current.get(id) === quadKey) return;
+      const seq = (warpSeqRef.current.get(id) ?? 0) + 1;
+      warpSeqRef.current.set(id, seq);
+      // Cancel the ACTUAL in-flight warp, if any (eager or an earlier
+      // Apply): terminate is skipped when no warp request is outstanding, so
+      // a lone warp never pays a worker re-init. Detection is untouched.
+      if (warpInflightRef.current.size > 0) getWarpClient().terminate();
       setCardError(null);
+      let image: ImageData;
       try {
-        const result = await extractDocument(img, corners, { output: 'canvas' });
-        const canvas = result.output as HTMLCanvasElement | null;
-        if (!canvas) throw new Error('no canvas');
-        const blob = await canvasToJpeg(canvas, 0.9);
+        // Fresh full-res copy per warp: the worker transfers (neuters) the
+        // pixels, and nothing decoded is retained between warps.
+        image = await decodeFileToImageData(entry.original);
+      } catch {
+        if (mountedRef.current && warpSeqRef.current.get(id) === seq)
+          setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+        return;
+      }
+      if (!mountedRef.current) return;
+      if (warpSeqRef.current.get(id) !== seq) return;
+      if (!entriesRef.current.some((e) => e.id === id)) return;
+      warpInflightRef.current.add(seq);
+      try {
+        const warped = await getWarpClient().extract(image, corners);
+        if (!mountedRef.current) return;
+        if (warpSeqRef.current.get(id) !== seq) return;
+        if (!entriesRef.current.some((e) => e.id === id)) return;
+        const blob = await imageDataToJpeg(warped, 0.9);
         if (!blob) throw new Error('no jpeg');
         if (!mountedRef.current) return;
+        if (warpSeqRef.current.get(id) !== seq) return;
+        if (!entriesRef.current.some((e) => e.id === id)) return;
         warpedBlobsRef.current.set(id, blob);
         revokeUrl(entriesRef.current.find((e) => e.id === id)?.warpedUrl ?? null);
         const url = trackUrl(URL.createObjectURL(blob));
-        lastWarpedQuadRef.current.set(id, JSON.stringify(corners));
+        lastWarpedQuadRef.current.set(id, quadKey);
         setEntries((prev) =>
           prev.map((e) => (e.id === id ? { ...e, corners, warpedUrl: url } : e)),
         );
-      } catch {
-        if (mountedRef.current)
-          setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+      } catch (error) {
+        if (!mountedRef.current) return;
+        // Superseded (a newer Apply bumped the generation) or worker-side
+        // cancel: silent — the newer warp owns the outcome now.
+        if (warpSeqRef.current.get(id) !== seq) return;
+        if (error instanceof ScanicClientError && error.code === 'cancelled') return;
+        setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+      } finally {
+        warpInflightRef.current.delete(seq);
       }
     },
-    [revokeUrl, trackUrl],
+    [getWarpClient, revokeUrl, trackUrl],
   );
 
   const discardEntry = useCallback(
@@ -1506,7 +1651,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         revokeUrl(target.photoUrl);
         revokeUrl(target.warpedUrl);
         warpedBlobsRef.current.delete(id);
-        imageElsRef.current.delete(id);
+        warpSeqRef.current.delete(id);
         lastWarpedQuadRef.current.delete(id);
         eagerAttemptRef.current.delete(id);
         visitedIdsRef.current.delete(id);
@@ -1532,8 +1677,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       revokeUrl(entry.photoUrl);
       revokeUrl(entry.warpedUrl);
       warpedBlobsRef.current.delete(entry.id);
-      imageElsRef.current.delete(entry.id);
     }
+    warpSeqRef.current.clear();
     lastWarpedQuadRef.current.clear();
     eagerAttemptRef.current.clear();
     visitedIdsRef.current.clear();
@@ -1576,22 +1721,49 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     setVisitedTick((t) => t + 1);
   }, [phase, currentId, safeIndex]);
 
-  const buildPdf = useCallback(() => {
-    const pages: ScanicCommittedPage[] = accepted.map((entry, i) => {
+  /**
+   * Commits the queue in capture order through `prepareImportFile`
+   * normalization (the same import pixel budget gallery uploads run through,
+   * so a 48MP sensor photo can't bypass it): warped verdicts commit their
+   * warp JPEG, original verdicts (or warped verdicts with no warp yet)
+   * commit the byte-identical original — renamed to `scan-NNN.jpg`, never
+   * re-encoded in place. Normalization runs sequentially (one decode at a
+   * time, the import memory bound) and any per-file failure falls back to
+   * the candidate file, so the commit never loses a page. Warp blobs are
+   * dropped on commit: the committed Files own the bytes from here on.
+   */
+  const buildPdf = useCallback(async () => {
+    const pages: ScanicCommittedPage[] = [];
+    for (let i = 0; i < accepted.length; i += 1) {
+      const entry = accepted[i];
       const name = formatScanName(startIndex + i);
+      let candidate: File;
       if (entry.decision !== 'original') {
         const blob = warpedBlobsRef.current.get(entry.id);
-        if (blob) return { file: new File([blob], name, { type: 'image/jpeg' }), name };
-      }
-      // Verdict `original`, or warped verdict with no warp yet: the queued
-      // File, byte-identical — renamed, never re-encoded.
-      return {
-        file: new File([entry.original], name, {
+        if (blob) candidate = new File([blob], name, { type: 'image/jpeg' });
+        else
+          candidate = new File([entry.original], name, {
+            type: entry.original.type || 'image/jpeg',
+          });
+      } else {
+        // Verdict `original`: the queued File, byte-identical — renamed,
+        // never re-encoded (unless over the import pixel budget below).
+        candidate = new File([entry.original], name, {
           type: entry.original.type || 'image/jpeg',
-        }),
-        name,
-      };
-    });
+        });
+      }
+      try {
+        const prepared = await prepareImportFile(candidate);
+        const out =
+          prepared.file instanceof File
+            ? prepared.file
+            : new File([prepared.file], prepared.name, { type: 'image/jpeg' });
+        pages.push({ file: out, name: out.name });
+      } catch {
+        pages.push({ file: candidate, name });
+      }
+    }
+    warpedBlobsRef.current.clear();
     onCommit(pages);
     onExit();
   }, [accepted, onCommit, onExit, startIndex]);
@@ -2255,7 +2427,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             <button
               type="button"
               disabled={accepted.length === 0}
-              onClick={buildPdf}
+              onClick={() => void buildPdf()}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >
               Build PDF

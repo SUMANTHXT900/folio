@@ -23,8 +23,11 @@ const ROTATIONS: ImageRotation[] = [0, 90, 180, 270];
 /**
  * One page in the collection. `file` is a HANDLE (File/Blob reference),
  * never decoded bytes — bytes are read once at build time. `previewUrl`
- * is an object URL owned by the `useImagePages` hook (created on add,
- * revoked on remove/clear/unmount).
+ * is a full-size object URL owned by the `useImagePages` hook (created
+ * on add, revoked on remove/clear/unmount); `thumbUrl` is a downscaled
+ * (~256px JPEG) object URL minted at import/normalization time for the
+ * row list, with the same ownership. `width`/`height` are the
+ * normalized pixel dims (0 when unknown, e.g. raw `addFiles` handles).
  */
 export interface ImagePage {
   /** Stable UI key (hook counter). Never an engine job id. */
@@ -39,6 +42,12 @@ export interface ImagePage {
   size: number;
   /** Object-URL preview, owned by the hook. Empty until assigned. */
   previewUrl: string;
+  /** Downscaled row-list thumb URL, owned by the hook. Empty until assigned. */
+  thumbUrl: string;
+  /** Normalized pixel width (0 when unknown). */
+  width: number;
+  /** Normalized pixel height (0 when unknown). */
+  height: number;
   /** Build-time rotation. 0 takes the zero-copy direct path. */
   rotationDeg: ImageRotation;
 }
@@ -49,6 +58,9 @@ export interface NewPageInput {
   file: File | Blob;
   name: string;
   previewUrl?: string;
+  thumbUrl?: string;
+  width?: number;
+  height?: number;
 }
 
 /** Builds a page entry. Rotation always starts at 0. */
@@ -60,6 +72,9 @@ export function createPage(input: NewPageInput): ImagePage {
     name: input.name,
     size: input.file.size,
     previewUrl: input.previewUrl ?? '',
+    thumbUrl: input.thumbUrl ?? '',
+    width: input.width ?? 0,
+    height: input.height ?? 0,
     rotationDeg: 0,
   };
 }

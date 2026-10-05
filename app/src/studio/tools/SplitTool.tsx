@@ -94,7 +94,7 @@ function parseRanges(text: string): [number, number][] {
 }
 
 export default function SplitTool() {
-  const { files, setFiles, addFiles, error: filesError, busy, setBusy, setError } = usePdfFiles();
+  const { files, addFiles, remove, error: filesError, busy, setBusy, setError } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
   const [count, setCount] = useState(0);
@@ -201,10 +201,18 @@ export default function SplitTool() {
       } else {
         const parsed = parseRanges(ranges);
         if (parsed.length === 0) throw new Error('Enter at least one page or range');
+        const ranged = parsed
+          .map(([a, b]) => ({
+            range: [a, b] as [number, number],
+            pages: rangeToList(a, b, file.pageCount),
+          }))
+          .filter((r) => r.pages.length > 0);
+        if (ranged.length === 0)
+          throw new Error(`Those pages are outside this ${file.pageCount}-page document.`);
         const job = runStudioOperation(
           'pdf.split',
           [file.id],
-          { parts: parsed.map(([a, b]) => ({ pages: rangeToList(a, b) })) },
+          { parts: ranged.map((r) => ({ pages: r.pages })) },
           {
             onProgress: (p) => {
               setFraction(p.fraction);
@@ -222,7 +230,7 @@ export default function SplitTool() {
             : [];
         if (out.outputs.length === 1) {
           const first = out.outputs[0];
-          const [a, b] = parsed[0];
+          const [a, b] = ranged[0].range;
           setResult({
             name: smartSplitPartName(file.name, a, b),
             blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
@@ -234,7 +242,7 @@ export default function SplitTool() {
           ]);
         } else {
           const parts = out.outputs.map((o, i) => {
-            const [a, b] = parsed[Math.min(i, parsed.length - 1)];
+            const [a, b] = ranged[Math.min(i, ranged.length - 1)].range;
             return {
               key: String(i),
               blob: new Blob([o.bytes as unknown as BlobPart], { type: 'application/pdf' }),
@@ -296,7 +304,7 @@ export default function SplitTool() {
             name={file.name}
             size={file.sizeBytes}
             onRemove={() => {
-              setFiles([]);
+              remove(file.id);
               setResult(null);
             }}
           />
@@ -376,7 +384,11 @@ export default function SplitTool() {
                       >
                         <span className="text-lg">+{hiddenCount}</span>
                         <span className="text-xs">
-                          {thumbs.filter(Boolean).length < thumbs.length ? 'Load more' : 'Show all'}
+                          {progress && progress.done < progress.total
+                            ? `Load more (${progress.done}/${progress.total})`
+                            : thumbs.filter(Boolean).length < thumbs.length
+                              ? 'Load more'
+                              : 'Show all'}
                         </span>
                       </button>
                     )}
@@ -518,12 +530,19 @@ export default function SplitTool() {
   );
 }
 
-/** Expands an inclusive 1-based range into a page list (clamped later by the engine). */
-function rangeToList(a: number, b: number): number[] {
+/** Expands an inclusive 1-based range into a page list, validated against
+ * the open document: endpoints clamp to `1..pageCount`, empty/outside
+ * ranges yield `[]`, and length can never exceed `pageCount` (the engine
+ * clamp stays the final backstop, but the UI never sends it megabytes of
+ * redundant page numbers for a `1-999999` typo). */
+function rangeToList(a: number, b: number, pageCount: number): number[] {
+  if (!Number.isInteger(pageCount) || pageCount < 1) return [];
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return [];
+  const start = Math.min(Math.max(1, Math.min(a, b)), pageCount);
+  const end = Math.max(1, Math.min(Math.max(a, b), pageCount));
+  if (start > end) return [];
   const out: number[] = [];
-  const start = Math.max(1, Math.min(a, b));
-  const end = Math.max(a, b);
-  for (let i = start; i <= end; i += 1) out.push(i);
+  for (let i = start; i <= end && out.length < pageCount; i += 1) out.push(i);
   return out;
 }
 

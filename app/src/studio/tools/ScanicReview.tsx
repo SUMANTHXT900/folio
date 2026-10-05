@@ -36,9 +36,11 @@
  *
  * Runtime-dependency-free: no scanic worker/client import (type-only
  * `ScanicCorners` from `./scan/index`), pointer drag on the overlay
- * coordinate space with clamp + convex-guard, arrow-key stepping on all
- * handles (1px, Shift = 10px). The parent portals this card; no portals,
- * no `AnimatePresence` inside.
+ * coordinate space with clamp + convex-guard (pointermove coalesced to one
+ * update per animation frame, flushed synchronously on release), arrow-key
+ * stepping on all handles (1px, Shift = 10px). The loupe source-bitmap
+ * cache is LRU-capped (3, evicted bitmaps released). The parent portals
+ * this card; no portals, no `AnimatePresence` inside.
  *
  * DOM contract (E2E continuity):
  * - result `[data-crop-result]` + EXACTLY ONE `img [data-crop-result-img]`
@@ -286,6 +288,14 @@ export default function ScanicReview({
     startY: number;
     snapshot: ScanicCorners;
   } | null>(null);
+  /**
+   * rAF-throttled drag moves: pointermove can fire 100+/s; only the latest
+   * point per frame reaches `moveCorner`/`moveMid`. `pointerUp`/`pointerCancel`
+   * flush synchronously so the released position is never a frame behind.
+   */
+  const moveRafRef = useRef(0);
+  const pendingCornerRef = useRef<{ key: HandleKey; x: number; y: number } | null>(null);
+  const pendingMidRef = useRef<{ edge: MidEdge; x: number; y: number } | null>(null);
 
   // New page = fresh seed: leave no adjust state behind. The warped/original
   // verdict lives in the parent (`verdict` prop) — never mirrored locally.
@@ -475,6 +485,73 @@ export default function ScanicReview({
     });
   };
 
+  /**
+   * Applies the latest pending drag point (if any) and parks the rAF slot.
+   * Pointer-up/cancel call this synchronously; the rAF callback calls it on
+   * the next frame. Latest-point-wins: intermediate moves collapse.
+   */
+  const flushPendingMoves = () => {
+    if (moveRafRef.current !== 0) {
+      try {
+        cancelAnimationFrame(moveRafRef.current);
+      } catch {
+        // No rAF in this environment — the pending point still applies below.
+      }
+      moveRafRef.current = 0;
+    }
+    const corner = pendingCornerRef.current;
+    pendingCornerRef.current = null;
+    if (corner !== null) moveCorner(corner.key, corner.x, corner.y);
+    const mid = pendingMidRef.current;
+    pendingMidRef.current = null;
+    if (mid !== null) moveMid(mid.edge, mid.x, mid.y);
+  };
+
+  /** Queue a corner point: at most one state update per animation frame. */
+  const queueCornerMove = (key: HandleKey, x: number, y: number) => {
+    pendingCornerRef.current = { key, x, y };
+    if (moveRafRef.current !== 0) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      flushPendingMoves();
+      return;
+    }
+    moveRafRef.current = requestAnimationFrame(() => {
+      moveRafRef.current = 0;
+      flushPendingMoves();
+    });
+  };
+
+  /** Queue a midpoint point: same one-update-per-frame coalescing. */
+  const queueMidMove = (edge: MidEdge, x: number, y: number) => {
+    pendingMidRef.current = { edge, x, y };
+    if (moveRafRef.current !== 0) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      flushPendingMoves();
+      return;
+    }
+    moveRafRef.current = requestAnimationFrame(() => {
+      moveRafRef.current = 0;
+      flushPendingMoves();
+    });
+  };
+
+  // A drag never outlives the card: drop any queued point on unmount.
+  useEffect(
+    () => () => {
+      pendingCornerRef.current = null;
+      pendingMidRef.current = null;
+      if (moveRafRef.current !== 0) {
+        try {
+          cancelAnimationFrame(moveRafRef.current);
+        } catch {
+          // Best-effort only.
+        }
+        moveRafRef.current = 0;
+      }
+    },
+    [],
+  );
+
   const clientToImage = (clientX: number, clientY: number): { x: number; y: number } => {
     const host = heroRef.current;
     if (host === null) return { x: 0, y: 0 };
@@ -523,6 +600,32 @@ export default function ScanicReview({
     };
   };
 
+  /**
+   * Loupe source-bitmap cache cap: one live page is all the lens ever needs;
+   * 3 covers remount slack (StrictMode, page trips) without retaining a
+   * gallery of decoded bitmaps. Eviction releases the bitmap (`src = ''`)
+   * so the bytes are collectable immediately, not on image GC.
+   */
+  const SOURCE_CACHE_CAP = 3;
+
+  function releaseSourceImage(img: HTMLImageElement): void {
+    try {
+      img.src = '';
+    } catch {
+      // Release is best-effort; the map entry is dropped regardless.
+    }
+  }
+
+  function pruneSourceCache(cache: Map<string, HTMLImageElement>): void {
+    while (cache.size > SOURCE_CACHE_CAP) {
+      const oldest = cache.keys().next();
+      if (oldest.done) return;
+      const evicted = cache.get(oldest.value);
+      cache.delete(oldest.value);
+      if (evicted !== undefined) releaseSourceImage(evicted);
+    }
+  }
+
   const overlaySvgStyle: CSSProperties | undefined =
     contentRect !== null
       ? {
@@ -570,7 +673,8 @@ export default function ScanicReview({
         : { left: 8, top: 8 }
       : null;
 
-  // Cache the source bitmap per photoUrl; jsdom-safe (never throws).
+  // Cache the source bitmap per photoUrl (LRU-capped, evicted bitmaps
+  // released); jsdom-safe (never throws).
   useEffect(() => {
     try {
       if (sourceCacheRef.current.has(photoUrl)) return;
@@ -578,15 +682,33 @@ export default function ScanicReview({
       const img = new Image();
       img.src = photoUrl;
       sourceCacheRef.current.set(photoUrl, img);
+      pruneSourceCache(sourceCacheRef.current);
     } catch {
       // No-cache fallback: draw directly from the rendered photo element.
     }
   }, [photoUrl]);
 
+  // The card remounts per page (`key` on the parent): release every cached
+  // bitmap on unmount so no decoded page outlives its review.
+  useEffect(
+    () => () => {
+      for (const img of sourceCacheRef.current.values()) releaseSourceImage(img);
+      sourceCacheRef.current.clear();
+    },
+    [],
+  );
+
+  // Loupe lens inputs as primitives so the paint effect below can scope its
+  // dependency list exactly (no whole-object deps, no every-render paints).
+  const loupePX = loupeImagePoint?.x ?? null;
+  const loupePY = loupeImagePoint?.y ?? null;
+
   // Paint the 0.6x zoom centered EXACTLY on the active corner. Guards make
   // jsdom / no-canvas environments degrade to lens-frame-with-crosshair.
+  // Scoped deps: repaints only when the photo, the lens target, or the image
+  // size actually change — not on every parent render.
   useEffect(() => {
-    if (loupeImagePoint === null || loupeHandle === null) return;
+    if (loupeHandle === null || loupePX === null || loupePY === null) return;
     try {
       // Resolve pixels first so jsdom (naturalWidth 0) returns before
       // touching canvas at all — no getContext noise, no crash.
@@ -612,7 +734,12 @@ export default function ScanicReview({
       // size); scale to the bitmap's actual natural size for exact centering.
       const scaleX = natW / safeW;
       const scaleY = natH / safeH;
-      const r = loupeSourceRect(loupeImagePoint.x * scaleX, loupeImagePoint.y * scaleY, natW, natH);
+      const r = loupeSourceRect(
+        (loupePX as number) * scaleX,
+        (loupePY as number) * scaleY,
+        natW,
+        natH,
+      );
       try {
         ctx.clearRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
         ctx.drawImage(source, r.sx, r.sy, r.sw, r.sh, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
@@ -622,7 +749,7 @@ export default function ScanicReview({
     } catch {
       // Never crash the review card for a magnifier failure.
     }
-  });
+  }, [photoUrl, loupeHandle, loupePX, loupePY, safeW, safeH]);
 
   return (
     <div className="max-h-[100dvh] space-y-3 overflow-y-auto p-4 sm:p-5">
@@ -725,16 +852,18 @@ export default function ScanicReview({
                     if (dragKeyRef.current !== key) return;
                     if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
                     const p = clientToImage(e.clientX, e.clientY);
-                    moveCorner(key, p.x, p.y);
+                    queueCornerMove(key, p.x, p.y);
                   }}
                   onPointerUp={() => {
                     dragKeyRef.current = null;
+                    flushPendingMoves();
                     setGrabbed((prev) =>
                       prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
                     );
                   }}
                   onPointerCancel={() => {
                     dragKeyRef.current = null;
+                    flushPendingMoves();
                     setGrabbed((prev) =>
                       prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
                     );
@@ -818,15 +947,19 @@ export default function ScanicReview({
                     if (midDragRef.current?.edge !== edge) return;
                     if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
                     const p = clientToImage(e.clientX, e.clientY);
-                    moveMid(edge, p.x, p.y);
+                    queueMidMove(edge, p.x, p.y);
                   }}
                   onPointerUp={() => {
+                    // Flush BEFORE dropping the drag snapshot: moveMid reads
+                    // the drag-start snapshot at apply time.
+                    flushPendingMoves();
                     if (midDragRef.current?.edge === edge) midDragRef.current = null;
                     setGrabbed((prev) =>
                       prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
                     );
                   }}
                   onPointerCancel={() => {
+                    flushPendingMoves();
                     if (midDragRef.current?.edge === edge) midDragRef.current = null;
                     setGrabbed((prev) =>
                       prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,

@@ -64,6 +64,10 @@ pub struct PdfDocument {
     /// Lazily resolved page map. Interior mutability keeps every reader on
     /// `&self`; `OnceLock` (rather than `RefCell`) keeps the type `Sync`.
     page_map: OnceLock<BTreeMap<u32, ObjectId>>,
+    /// Byte length of the source this document was parsed from, when known
+    /// (set by the loader; documents built by transformation primitives
+    /// carry `None`). Bounds combined merge input without re-serializing.
+    source_byte_len: Option<usize>,
 }
 
 impl PdfDocument {
@@ -73,6 +77,7 @@ impl PdfDocument {
         Self {
             inner,
             page_map: OnceLock::new(),
+            source_byte_len: None,
         }
     }
 
@@ -81,6 +86,18 @@ impl PdfDocument {
     /// [`PdfDocument`] methods and never this accessor.
     pub(crate) fn raw_document(&self) -> &lopdf::Document {
         &self.inner
+    }
+
+    /// Records the byte length of the source this document was parsed from.
+    /// Crate-internal: set by the loader only.
+    pub(crate) fn set_source_byte_len(&mut self, len: usize) {
+        self.source_byte_len = Some(len);
+    }
+
+    /// Returns the source byte length recorded at parse time, if known.
+    /// Crate-internal: feeds the combined-input gate in `pdf.merge`.
+    pub(crate) fn source_byte_len(&self) -> Option<usize> {
+        self.source_byte_len
     }
 
     /// Returns the resolved page map (1-based page number → page object id),
@@ -453,7 +470,11 @@ impl PdfDocument {
         // Walk the page -> ancestors chain: MediaBox and Rotate are each
         // taken from the nearest holder (PDF spec inheritance). A page's
         // own /Rotate shadows any ancestor's, so rotate's materialization
-        // (explicit /Rotate on the page) is stable under re-reads.
+        // (explicit /Rotate on the page) is stable under re-reads. Once
+        // both attributes resolved, nearer holders already won: climbing
+        // further cannot change the result, so stop (deep trees stay
+        // shallow work; a broken ancestor above a complete page no longer
+        // fails a resolvable geometry).
         loop {
             if media_box.is_none() {
                 if let Ok(obj) = current.get(b"MediaBox") {
@@ -464,6 +485,9 @@ impl PdfDocument {
                 if let Ok(obj) = current.get(b"Rotate") {
                     rotation = Some(self.as_number(page_number, obj, "Rotate")? as i64);
                 }
+            }
+            if media_box.is_some() && rotation.is_some() {
+                break;
             }
             let parent = match current.get(b"Parent") {
                 Ok(obj) => obj
@@ -706,6 +730,30 @@ mod tests {
             inherited.rotation_deg,
             doc.effective_rotation(2).expect("page 2")
         );
+    }
+
+    #[test]
+    fn geometry_with_complete_page_ignores_broken_ancestor() {
+        // The ancestor walk stops once MediaBox+Rotate both resolved: a
+        // page carrying both explicitly resolves even when its `Parent`
+        // link dangles. Well-formed documents are unaffected (covered by
+        // every other geometry test); only corrupt ancestors above an
+        // already-complete page change from error to success.
+        let mut raw = fixtures::parsed_fixture(&fixtures::pdf_spec(
+            "1.4",
+            vec![(612.0, 792.0, Some(90))],
+            None,
+        ));
+        let page_id = raw.get_pages()[&1];
+        let dangling = raw.new_object_id();
+        raw.get_dictionary_mut(page_id)
+            .expect("page dict")
+            .set("Parent", Object::Reference(dangling));
+        let doc = PdfDocument::from_lopdf(raw);
+        let geometry = doc.page_geometry(1).expect("complete page resolves");
+        assert!((geometry.width_pt - 612.0).abs() < f64::EPSILON);
+        assert!((geometry.height_pt - 792.0).abs() < f64::EPSILON);
+        assert_eq!(geometry.rotation_deg, 90);
     }
 
     #[test]

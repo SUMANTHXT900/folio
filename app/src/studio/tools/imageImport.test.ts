@@ -16,6 +16,8 @@ import {
   prepareImportFile,
   planNormalization,
   runImportQueue,
+  THUMB_LONG_EDGE,
+  thumbTargetFor,
   type ImportRenderer,
 } from './imageImport';
 
@@ -51,6 +53,20 @@ describe('planNormalization', () => {
       width: 1000,
       height: 500,
     });
+  });
+});
+
+describe('thumbTargetFor', () => {
+  it('clamps the long edge to 256px preserving aspect, never upscales', () => {
+    expect(thumbTargetFor({ width: 4000, height: 3000 })).toEqual({ width: 256, height: 192 });
+    expect(thumbTargetFor({ width: 1080, height: 1920 })).toEqual({ width: 144, height: 256 });
+    expect(THUMB_LONG_EDGE).toBe(256);
+  });
+
+  it('returns null for already-tiny sources (rows fall back to the full preview)', () => {
+    expect(thumbTargetFor({ width: 256, height: 100 })).toBeNull();
+    expect(thumbTargetFor({ width: 100, height: 100 })).toBeNull();
+    expect(thumbTargetFor({ width: 0, height: 960 })).toBeNull();
   });
 });
 
@@ -160,6 +176,7 @@ describe('runImportQueue', () => {
     retainedOriginal: true,
     width: dims.width,
     height: dims.height,
+    thumb: null,
   });
 
   it('processes strictly sequentially with progress in order', async () => {

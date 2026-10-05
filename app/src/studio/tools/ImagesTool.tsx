@@ -74,18 +74,28 @@ export async function stageImagePages(
  * Pre-stage sharding policy (M5): evaluates `resolveShardCount` on
  * pre-stage sums — Σ `file.size` bytes plus Σ known w×h pixels — BEFORE
  * the prepare loop materializes staged
- * bytes. Image pages retain no decoded dims (handles only), so known
- * pixels are 0 here and the byte gate still bounds exactly as before;
- * the page-count gate runs first, so small batches keep the single-worker
- * path byte-for-byte. Exported for unit tests.
+ * bytes. Pages with known normalized dims (import path) feed the pixel
+ * gate with real decode cost; raw handles (dims 0) count as zero and the
+ * byte gate still bounds exactly as before; the page-count gate runs
+ * first, so small batches keep the single-worker path byte-for-byte.
+ * Exported for unit tests.
  */
-export function preStageShardEstimate(pages: readonly { file: File | Blob; size: number }[]): {
+export function preStageShardEstimate(
+  pages: readonly { file: File | Blob; size: number; width?: number; height?: number }[],
+): {
   totalBytes: number;
   totalPixels: number;
   shards: number;
 } {
   const totalBytes = pages.reduce((sum, p) => sum + Math.max(0, p.file?.size ?? p.size ?? 0), 0);
-  const totalPixels = 0;
+  const totalPixels = pages.reduce(
+    (sum, p) =>
+      sum +
+      (p.width !== undefined && p.height !== undefined && p.width > 0 && p.height > 0
+        ? p.width * p.height
+        : 0),
+    0,
+  );
   return {
     totalBytes,
     totalPixels,
@@ -112,11 +122,17 @@ export default function ImagesTool() {
   const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
   const [meta, setMeta] = useState<string[]>([]);
   const [error, setError] = useState<unknown>(null);
-  const [fraction, setFraction] = useState<number | null>(null);
-  const [stage, setStage] = useState<string | null>(null);
+  // Single progress object (staging + engine share it): one state update
+  // per progress tick instead of two staggered setter passes. Fraction is
+  // null while the engine reports indeterminate progress (same as before).
+  const [progress, setProgress] = useState<{ fraction: number | null; label: string } | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
   const moreInputRef = useRef<HTMLInputElement>(null);
+  // True only while a completed build's card is displayed: collection or
+  // page-size changes invalidate the card ONLY then (order-affecting change
+  // postdating the build). Stale-build teardown can never wipe a fresh run.
+  const completedBuildRef = useRef(false);
 
   // Scanic camera reintegration: committed pages are pre-named `scan-NNN.jpg`
   // in capture order. `addFiles` appends handles in array order with no
@@ -162,24 +178,34 @@ export default function ImagesTool() {
     }
   };
 
+  // Rejection-safe upload entry: `addUploads` runs async decode work that
+  // can reject; every call site funnels through here so a dropped promise
+  // never surfaces as an unhandled rejection.
+  const handleFiles = (files: File[]) => {
+    void addUploads(files).catch(setError);
+  };
+
   // A completed PDF is stale the moment the collection or page-size
-  // policy changes (import/remove/reorder/rotate/clear). Clearing the
-  // completion card brings Build PDF back AND releases the previous
-  // output Blob (P2). (On mount the state is already empty; these setters
-  // are no-ops.)
+  // policy changes (import/remove/reorder/rotate/clear) — but ONLY when a
+  // completed build exists. Guarded by `completedBuildRef` so the effect
+  // is a no-op during assembly and can never clear a fresh run: clearing
+  // the completion card brings Build PDF back AND releases the previous
+  // output Blob (P2).
   useEffect(() => {
+    if (!completedBuildRef.current) return;
+    completedBuildRef.current = false;
     setDone(null);
     setMeta([]);
   }, [pages, pageSize]);
 
   const onBuild = async () => {
     if (pages.length === 0) return;
+    completedBuildRef.current = false;
     setWorking(true);
     setError(null);
     setDone(null);
     setMeta([]);
-    setFraction(null);
-    setStage(null);
+    setProgress(null);
     const staged: string[] = [];
     const stagedSizes: number[] = [];
     try {
@@ -193,8 +219,10 @@ export default function ImagesTool() {
         );
       }
       const prepared = await stageImagePages(pages, browserImageRenderer, (completed, total) => {
-        setStage(`Preparing images… ${completed} of ${total}`);
-        setFraction(completed / total);
+        setProgress({
+          fraction: completed / total,
+          label: `Preparing images… ${completed} of ${total}`,
+        });
       });
       for (const item of prepared) {
         stagedSizes.push(item.bytes.length);
@@ -203,13 +231,16 @@ export default function ImagesTool() {
       // P3 item 13: large batches shard across parallel shard jobs +
       // ordered merge (imageSharding); small batches keep the historical
       // single-worker engine call byte-for-byte inside that module.
+      // Known normalized dims ride along as the pixel gate's decode-cost
+      // input (raw handles carry 0 and keep the byte-only behavior).
+      const stagedPixels = pages.map((p) => (p.width > 0 && p.height > 0 ? p.width * p.height : 0));
       const job = buildImagesPdf({
         stagedIds: staged,
         stagedSizes,
+        stagedPixels,
         pageSize,
         onProgress: (p) => {
-          setFraction(p.fraction);
-          setStage(p.label);
+          setProgress({ fraction: p.fraction, label: p.label });
         },
       });
       jobRef.current = job;
@@ -229,6 +260,7 @@ export default function ImagesTool() {
       // rebuild, clear, unmount.
       const blob = new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' });
       setDone({ name, blob });
+      completedBuildRef.current = true;
       const summary = out.summary;
       const imageCount =
         summary !== undefined && 'imageCount' in summary && typeof summary.imageCount === 'number'
@@ -251,8 +283,7 @@ export default function ImagesTool() {
       }
     } finally {
       setWorking(false);
-      setFraction(null);
-      setStage(null);
+      setProgress(null);
       for (const id of staged) releaseStagedBytes(id);
     }
   };
@@ -275,7 +306,7 @@ export default function ImagesTool() {
 
       {pages.length === 0 ? (
         <div className="space-y-4">
-          <EntryCard onFiles={addUploads} onScan={() => setScannerOpen(true)} />
+          <EntryCard onFiles={handleFiles} onScan={() => setScannerOpen(true)} />
           {error !== null && <ErrorBlock error={error} />}
         </div>
       ) : (
@@ -307,7 +338,7 @@ export default function ImagesTool() {
                 multiple
                 className="hidden"
                 onChange={(e) => {
-                  void addUploads(Array.from(e.target.files ?? []));
+                  handleFiles(Array.from(e.target.files ?? []));
                   e.target.value = '';
                 }}
               />
@@ -367,9 +398,9 @@ export default function ImagesTool() {
               )}
             </div>
           )}
-          {working && fraction !== null && (
+          {working && progress !== null && progress.fraction !== null && (
             <div className="w-full max-w-xs">
-              <Progress value={fraction * 100} label={stage ?? 'Working…'} />
+              <Progress value={progress.fraction * 100} label={progress.label} />
             </div>
           )}
 

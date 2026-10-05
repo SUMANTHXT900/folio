@@ -157,6 +157,9 @@ describe('browserImageRenderer JPEG-out (5-2)', () => {
     expect(fillAt).toBeGreaterThanOrEqual(0);
     expect(drawAt).toBeGreaterThan(fillAt);
     expect(calls).toContain('toBlob:image/jpeg:0.95');
-    expect(close).toHaveBeenCalledTimes(1);
+    // Source bitmap + worker snapshot each released exactly once (the
+    // worker transfer neuters the sender's copy, so its close is a no-op;
+    // without a worker the main-thread fallback encodes from the snapshot).
+    expect(close).toHaveBeenCalledTimes(2);
   });
 });

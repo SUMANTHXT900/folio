@@ -21,6 +21,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::copy::copy_pages_with_map;
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
@@ -191,6 +192,7 @@ impl Operation for SplitOperation {
         // reuses instead of re-resolving the page tree.
         let total_pages: usize = options.parts.iter().map(|part| part.pages.len()).sum();
         let mut done_pages: usize = 0;
+        let mut throttle = ProgressThrottle::new();
         let mut outputs = Vec::with_capacity(options.parts.len());
 
         for (part_index, part) in options.parts.iter().enumerate() {
@@ -202,16 +204,20 @@ impl Operation for SplitOperation {
                 ctx.check_cancellation()?;
                 done_pages += 1;
                 done_in_part += 1;
-                let completed = 10 + (done_pages as u64 * 85) / total_pages.max(1) as u64;
-                ctx.report_progress(
-                    Some("splitting"),
-                    completed.min(95),
-                    100,
-                    Some(&format!(
-                        "part {part_number} of {}, page {done_in_part} of {part_len}",
-                        options.parts.len(),
-                    )),
-                );
+                let completed = (10 + (done_pages as u64 * 85) / total_pages.max(1) as u64).min(95);
+                // Source-side throttle mirroring the glue sink rule: fewer
+                // messages, same shape; cancellation stays per page above.
+                if throttle.should_report(completed, done_pages as u64) {
+                    ctx.report_progress(
+                        Some("splitting"),
+                        completed,
+                        100,
+                        Some(&format!(
+                            "part {part_number} of {}, page {done_in_part} of {part_len}",
+                            options.parts.len(),
+                        )),
+                    );
+                }
                 Ok(())
             })?;
             outputs.push(SplitPartOutput {

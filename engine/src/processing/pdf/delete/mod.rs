@@ -19,7 +19,7 @@
 //! Never mutates the input. No range-string parsing in the core, no
 //! rendering, no compression, no encryption — those are later lessons.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
@@ -203,13 +203,12 @@ fn remaining_pages<C: OperationContext>(
         )));
     }
     let mut seen = HashSet::with_capacity(pages.len());
+    // First-seen positions: reporting the original position of the first
+    // occurrence is O(1) per duplicate instead of re-scanning the list.
+    let mut first_seen: HashMap<PageNumber, usize> = HashMap::with_capacity(pages.len());
     for (entry_index, page_number) in pages.iter().enumerate() {
         if !seen.insert(page_number) {
-            let first = pages
-                .iter()
-                .position(|entry| entry == page_number)
-                .map(|position| position + 1)
-                .unwrap_or(1);
+            let first = first_seen.get(page_number).copied().unwrap_or(0) + 1;
             let duplicate_number = entry_index + 1;
             return Err(EngineError::new(
                 ErrorCode::DuplicatePage,
@@ -220,6 +219,7 @@ fn remaining_pages<C: OperationContext>(
                  duplicate_position={duplicate_number} page_count={page_count}"
             )));
         }
+        first_seen.entry(*page_number).or_insert(entry_index);
     }
 
     // Single ordered scan: every non-deleted page survives, in place.

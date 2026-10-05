@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-05 — Interaction-performance pass, all phases (v1.10.0)
+
+- **Objective.** User-reported image-click lag + capture-button freeze; user authorized the full audit fix list with scoped-only testing.
+- **Method.** 3 parallel audit analysts (image path, PDF path, backend+shell) → ranked plan → 4 parallel implementers split by file ownership → central integration.
+- **Integration fixes by orchestrator.** `ScanicCapture.test.tsx` re-pointed from the `scanic` module mock to a `ScanicClient` double (shared per-constructed-client, real error class); fake 2D canvas for jsdom; 3 tests rewritten to the single-call worker fallback contract; 4 Build-PDF assertions made async (`buildPdf` awaits normalization). Prettier pass over 5 files.
+- **Verification.** Rust 395 pass + fmt + clippy (implementer-run). Frontend scoped suites green per area (incl. 66/66 scan capture, 71 images-area); tsc/eslint/prettier clean. Full vitest + E2E skipped per instruction — flagged as laptop-side before any prod decision.
+- **Deploy.** GitHub `dev` + Cloudflare Pages branch `dev` via direct-upload (no Git integration); prod untouched.
+
 ## 2026-10-05 — Update feature repair: prompt semantics end-to-end (v1.9.7)
 
 - **Objective.** User-reported buggy About "App updates" feature; two-analyst deep dive (code bug-hunt + industry best-practice research) before the fix.
