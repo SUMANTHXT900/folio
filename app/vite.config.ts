@@ -114,6 +114,13 @@ export default defineConfig({
     // Stamped when the dev server / build config loads (D36 dev-channel card).
     __FOLIO_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
   },
+  worker: {
+    // The scan client (`scan/scanicClient.ts`) is imported by app code AND
+    // spawns `scanic.worker.ts`, so worker and main bundles share modules
+    // (protocol/policy). Shared chunks require ES worker output — the
+    // default iife build fails with "not supported for code-splitting".
+    format: 'es',
+  },
   server: {
     port: 5173,
     fs: {
