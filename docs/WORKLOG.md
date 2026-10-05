@@ -9,6 +9,7 @@ Chronological record of meaningful development events. Each entry records object
 - **Integration fixes by orchestrator.** `ScanicCapture.test.tsx` re-pointed from the `scanic` module mock to a `ScanicClient` double (shared per-constructed-client, real error class); fake 2D canvas for jsdom; 3 tests rewritten to the single-call worker fallback contract; 4 Build-PDF assertions made async (`buildPdf` awaits normalization). Prettier pass over 5 files.
 - **Verification.** Rust 395 pass + fmt + clippy (implementer-run). Frontend scoped suites green per area (incl. 66/66 scan capture, 71 images-area); tsc/eslint/prettier clean. Full vitest + E2E skipped per instruction — flagged as laptop-side before any prod decision.
 - **Deploy.** GitHub `dev` + Cloudflare Pages branch `dev` via direct-upload (no Git integration); prod untouched.
+- **Build break fixed post-commit.** Wiring capture onto `ScanicClient` made Vite build `scanic.worker.ts` for the first time (previously dead code, tree-shaken); shared worker/main modules need `worker.format: 'es'` (`app/vite.config.ts`, commit `2dfea3e`). Production build green (precache 43 entries / 5854.37 KiB — down from 7718 with ML assets lazy); deploy `f41b425e`, bundle `index-BeABkBPV.js` live and 200.
 
 ## 2026-10-05 — Update feature repair: prompt semantics end-to-end (v1.9.7)
 
