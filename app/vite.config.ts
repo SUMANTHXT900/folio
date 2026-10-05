@@ -55,7 +55,13 @@ export default defineConfig({
     tailwindcss(),
     scanicMlDevLoader(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Prompt semantics (not autoUpdate): the new worker downloads in the
+      // background and waits; the app surfaces it (banner + About card) and
+      // activates only on explicit user tap. autoUpdate bypasses
+      // onNeedRefresh entirely (background activate + forced reload, and
+      // updateSW(true) becomes a no-op) — that single mismatch froze the
+      // About update UI. See pwa/updateManager.ts.
+      registerType: 'prompt',
       includeAssets: ['favicon.svg'],
       manifest: {
         name: 'Folio - PDF tools that stay on your device',
