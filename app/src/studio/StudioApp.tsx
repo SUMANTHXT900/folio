@@ -3,7 +3,6 @@ import React from 'react';
 import { motion, AnimatePresence, useScroll, useSpring, MotionConfig } from 'framer-motion';
 import Home from './Home';
 import About from './About';
-import UpdateBanner from '../pwa/UpdateBanner';
 import { updateManager } from '../pwa/usePwaUpdate';
 
 // lazy tools — keep hash routing snappy by code-splitting per tool
@@ -311,7 +310,6 @@ export default function StudioApp() {
 
         <Footer />
         {showMobileNav && <MobileNav route={route} />}
-        <UpdateBanner />
       </div>
     </MotionConfig>
   );

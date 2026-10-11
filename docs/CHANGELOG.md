@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.10.2 — One-button updates (`dev`, 2026-10-11)
+
+The confirm-then-apply update flow (D49) is replaced with the simplest thing that works: one Update button in About plus an automatic check on every launch. Check → a found build activates and hard-reloads straight into it. No popups, no banners, no confirm step. The About card shows version plus build time on every host, and the release notes ride along, so "is this the latest?" is answerable from the page. Scoped verification only (full suite + E2E laptop-side).
+
 ## v1.10.1 — ML-only detection + full ML precache (D46, `dev`, 2026-10-05)
 
 User direction (phone feedback): classical quads were random auto-crops, and lazy ML violated offline-first. `runScanicDetection` is ML-only (miss = full frame, never a guess); ML assets back in the PWA precache; policy helpers resolve ML unconditionally. `'classical'` stays accepted on the wire/type but never runs. Scoped verification only (full suite + E2E laptop-side).

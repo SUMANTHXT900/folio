@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — Update simplification + v1.10.2 dev deploy (D50, bundle index-sFE0MxAh.js)
+
+- **Direction.** User: remove all update popups/confirms — one Update button in About, auto check + hard refresh on every open. D49 confirm flow deleted (`UpdateBanner.tsx` + test removed, banner unmounted from StudioApp, manager log/update-available phase gone); activation gate, proof, one-shot still-old note, and `_headers` kept invisibly.
+- **Freshness rule.** New `AGENTS.md` deploy rule: every Cloudflare push ships version bump (→1.10.2) + dated `devNotes`/`releaseNotes` entries + `CHANGELOG.md` entry; About proves version + build time on every host.
+- **Verification (observed).** tsc/eslint/prettier clean; 31/31 pwa+card suites; 404/404 studio smoke; build green (44 entries / 7830.28 KiB). E2E About label updated to Update (suite itself deferred).
+- **Deploy.** `dev` alias with live bundle + `sw.js` `no-store` re-verified after deploy (below). Production (`main`) untouched.
+- **Remaining.** Real-profile probe of launch auto-apply on the next deploy; canonical E2E laptop-side.
+
 ## 2026-10-11 — Update rebuild integration + dev deploy (b24f6dc, bundle index-BV4cXAU0.js)
 
 - **Integration.** Zero reconciliations — working tree byte-identical on entry (single timed reload path confirmed: `fireReloadOnce` latch + `applyLatched` + guard comment; proof copy agrees bare-log vs v-prefixed-card via leading-v strip; banner anchors `#app-updates` + `#build-channel` exist; no second reload listener, no auto-apply, D23-literal test green). Prettier already clean, no `--write` needed.

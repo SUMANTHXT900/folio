@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.10.2 update simplification',
+    date: '2026-10-11',
+    notes: [
+      'Update flow is one button: tap Update to check, a found build applies with a hard reload — no popups, no confirm step.',
+      'Every app launch checks silently and applies the same way; the About card shows version plus build time on every host.',
+    ],
+  },
+  {
     build: 'D48 continue-flow handoff',
     date: '2026-10-11',
     notes: [

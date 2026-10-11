@@ -598,9 +598,7 @@ async function main() {
       timeout: 30000,
     });
     await page.evaluate(() => {
-      [...document.querySelectorAll('button')]
-        .find((b) => b.textContent === 'Check for updates')
-        ?.click();
+      [...document.querySelectorAll('button')].find((b) => b.textContent === 'Update')?.click();
     });
     await page.waitForFunction(() => document.body.innerText.includes('Preview build'), {
       timeout: 30000,

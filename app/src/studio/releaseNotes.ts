@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.10.2 release',
+    date: '2026-10-11',
+    notes: [
+      'App updates are now one button in About — tap it to get the latest version, and the app updates itself on every open.',
+    ],
+  },
+  {
     build: 'v1.10.1 release',
     date: '2026-10-05',
     notes: [

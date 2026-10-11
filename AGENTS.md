@@ -117,3 +117,12 @@ Rules that keep the memory accurate:
 - **No contradictions.** After editing, cross-check: `STATUS.md`, `ROADMAP.md`, `README.md`, and `About.tsx` must agree on what exists, what is disabled, and what is planned.
 - **No invented history.** Record only what is verified in code, tests, git history, or observed behavior. If rationale is unknown, write "rationale not recorded" — never fabricate reasoning, dates, or events.
 - **History stays accurate.** The repository was previously named `pdf-studio`; historical documents (`ARCHITECTURE.md`, git history) legitimately use that name. Update current-identity references to Folio; preserve historical references as history.
+
+## Deploy freshness rule (every Cloudflare push)
+
+Every push to Cloudflare Pages is a user-visible update, so every one ships freshness evidence — no silent deploys:
+
+1. **Version bump.** `app/package.json` patch version +1 (the About `v…` chip, footer badge, and `__FOLIO_VERSION__` define all follow automatically).
+2. **Update note + date.** Newest-first entry in `app/src/studio/devNotes.ts` (dev waves) and, when anything user-visible changed, in `app/src/studio/releaseNotes.ts` (user-facing one-liners) — dated with the push date. Never invent copy: derive notes from `CHANGELOG.md` / `WORKLOG.md`.
+3. **Changelog.** New `docs/CHANGELOG.md` entry per the file's per-released-version convention.
+4. **About proof.** The About updates card already shows version + build time (`__FOLIO_BUILD_TIME__` is stamped at build) on every host — verify it renders after the bump; never ship a deploy whose About page cannot answer "is this the latest?".

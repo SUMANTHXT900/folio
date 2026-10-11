@@ -1,29 +1,17 @@
 /**
- * PWA update manager — one-tap app updates for a hard-cached PWA.
+ * PWA update manager — deliberately simple app updates.
  *
- * Pattern borrowed from the SYNAPSE repo (vanilla `registerSW` + manual
- * `registration.update()` + timed wait, localhost/LAN environment guard,
- * diagnostic log), adapted to Folio: framework-free external store so the
- * global banner and the About card share one state without prop drilling.
- *
- * Why this exists (BUGS F-13): with no update UI, users sat on the stale
- * precache after every deploy. The manager surfaces the pending update
- * (banner + About card) and applies it with one tap. Stale-chunk recovery
- * (`ErrorBlock`, F-12) stays as the backstop for pages that miss the banner.
+ * One Update button (About) plus an automatic check on every launch:
+ * check → if a waiting worker is found, activate it and hard-reload
+ * straight into it. No popups, no banners, no confirm step, no review
+ * queue. The reload is gated on activation (`controllerchange`, bounded)
+ * so the navigation lands on the new worker, never the old one.
  *
  * Hard requirement, verified against the installed `vite-plugin-pwa`
  * client: this manager assumes `registerType: 'prompt'` semantics. Under
  * `'autoUpdate'` the client never calls `onNeedRefresh` (it activates in
  * the background and force-reloads, and `updateSW(true)` is a skip-waiting
- * no-op) — the whole UI below would go dead. See `vite.config.ts`.
- *
- * Apply gates the reload on activation: after skip-waiting it waits for the
- * new worker to control the page (`controllerchange`, bounded by
- * `applyTimeoutMs`) before reloading. Reloading earlier is served by the
- * still-active OLD worker — no `clientsClaim` in the built `sw.js`, and old
- * chunks stay alive via `cleanupOutdatedCaches: false` — the "reloaded but
- * old" defect. Post-reload, the pre-apply version persisted beside
- * `APPLIED_FLAG` proves whether the new build actually landed.
+ * no-op) — the check below would go dead. See `vite.config.ts`.
  */
 
 export type UpdatePhase =
@@ -33,19 +21,14 @@ export type UpdatePhase =
   | 'idle'
   | 'checking'
   | 'applying'
-  | 'update-available'
   | 'up-to-date'
   | 'offline'
   | 'error';
 
 export interface UpdateSnapshot {
   phase: UpdatePhase;
-  /** True once the worker signals a waiting update — drives the banner. */
-  updateAvailable: boolean;
   checking: boolean;
   statusText: string;
-  /** Newest-last diagnostic lines (capped), rendered in About. */
-  log: string[];
   canCheck: boolean;
   /**
    * Pre-apply running version persisted at apply, consumed on next init.
@@ -65,9 +48,9 @@ export interface UpdateEnv {
 export type EnvClass = 'local' | 'unsupported' | 'ok';
 
 /**
- * Classifies the runtime for OTA updates (SYNAPSE logic, trimmed):
- * localhost and insecure LAN origins can never receive a worker update,
- * and some browsers/contexts have no Service Worker at all.
+ * Classifies the runtime for OTA updates: localhost and insecure LAN
+ * origins can never receive a worker update, and some
+ * browsers/contexts have no Service Worker at all.
  *
  * Note: `location.hostname` strips IPv6 brackets, so the loopback check
  * is `'::1'`, never `'[::1]'`. Empty hostname covers `file://`.
@@ -171,10 +154,8 @@ export interface UpdateManagerOptions {
   applyTimeoutMs?: number;
   /** Re-check at most this often when the app returns to the foreground. */
   resurfaceIntervalMs?: number;
-  maxLogLines?: number;
 }
 
-const MAX_LOG_DEFAULT = 30;
 const UPDATE_TIMEOUT_DEFAULT_MS = 15000;
 const APPLY_TIMEOUT_DEFAULT_MS = 8000;
 const RESURFACE_DEFAULT_MS = 60 * 60 * 1000;
@@ -194,19 +175,17 @@ export function statusTextFor(phase: UpdatePhase): string {
     case 'unsupported':
       return 'This browser cannot check for updates.';
     case 'idle':
-      return 'Tap Check for updates to verify.';
+      return 'Tap Update to check for the latest version.';
     case 'checking':
       return 'Checking for updates…';
     case 'applying':
-      return 'Installing update… Reloading.';
-    case 'update-available':
-      return 'A new version is ready.';
+      return 'Updating… reloading now.';
     case 'up-to-date':
       return 'Folio is up to date.';
     case 'offline':
-      return 'You are offline — connect to check.';
+      return 'You are offline — reconnect and tap Update.';
     case 'error':
-      return 'Update check failed — try again.';
+      return 'Update check failed — tap Update to retry.';
   }
 }
 
@@ -263,10 +242,6 @@ function defaultWaitForActivation(): Promise<void> {
     return Promise.resolve();
   }
   const container = navigator.serviceWorker;
-  const previous = container.controller;
-  if (container.controller !== null && container.controller !== previous) {
-    return Promise.resolve();
-  }
   return new Promise<void>((resolve) => {
     container.addEventListener('controllerchange', () => resolve(), { once: true });
   });
@@ -299,15 +274,14 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   const updateTimeoutMs = options.updateTimeoutMs ?? UPDATE_TIMEOUT_DEFAULT_MS;
   const applyTimeoutMs = options.applyTimeoutMs ?? APPLY_TIMEOUT_DEFAULT_MS;
   const resurfaceIntervalMs = options.resurfaceIntervalMs ?? RESURFACE_DEFAULT_MS;
-  const maxLog = options.maxLogLines ?? MAX_LOG_DEFAULT;
   const waitForActivation = options.waitForActivation ?? defaultWaitForActivation;
   const readVersion = options.readVersion ?? readVersionDefine;
   const readBuildTime = options.readBuildTime ?? readBuildTimeDefine;
 
   let phase: UpdatePhase = 'unknown';
-  let updateAvailable = false;
   let checking = false;
-  let log: string[] = [];
+  /** One-shot status override (e.g. the still-old note) — cleared on the next check. */
+  let attention: string | null = null;
   let registrar: Registrar | null = null;
   let initialized = false;
   let listenersAttached = false;
@@ -316,7 +290,9 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   let applyLatched = false;
   /** True when this launch follows our own apply-reload but the version proof did not verify the new build. */
   let justReloadedForUpdate = false;
-  /** Pre-apply running version consumed at init; informational for the page load. */
+  /** The version this launch reloaded from (arms the no-loop guard above). */
+  let justReloadedFrom: string | null = null;
+  /** Pre-apply running version consumed at init; drives the Updated vX → vY proof. */
   let updatedFrom: string | null = null;
   /** Exactly-once reload per page load: the manager's timed path contributes one navigation. */
   let reloadFired = false;
@@ -326,16 +302,6 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   const emit = () => {
     cached = null;
     for (const fn of listeners) fn();
-  };
-
-  const pushLog = (line: string) => {
-    // Every line carries the local wall-clock time it was pushed, so the
-    // About details read as a real event log — because they are one.
-    const now = new Date();
-    const ts = [now.getHours(), now.getMinutes(), now.getSeconds()]
-      .map((n) => String(n).padStart(2, '0'))
-      .join(':');
-    log = [...log.slice(-(maxLog - 1)), `${ts} ${line}`];
   };
 
   const setPhase = (next: UpdatePhase) => {
@@ -356,42 +322,38 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     if (cached === null) {
       cached = {
         phase,
-        updateAvailable,
         checking,
-        statusText: statusTextFor(phase),
-        log,
-        updatedFrom,
-        // 'offline' stays checkable: it is the retry button once back online.
+        statusText: attention ?? statusTextFor(phase),
         // 'applying' stays locked (the apply path is latched, exactly-once).
         canCheck:
           !checking &&
           (phase === 'idle' || phase === 'up-to-date' || phase === 'error' || phase === 'offline'),
+        updatedFrom,
       };
     }
     return cached;
   };
 
+  /**
+   * A waiting worker was signalled — apply it straight away, no confirm.
+   * The single exception is the post-reload still-old case: the apply just
+   * ran yet the old worker is still in charge, so reloading again would
+   * loop forever. Say so once instead, with the platform-correct remedy.
+   */
   const onNeedRefresh = () => {
-    updateAvailable = true;
-    pushLog('Service worker reported a waiting update.');
     if (justReloadedForUpdate) {
-      // The apply-reload happened but the old worker is still in charge.
-      // Where to point the user depends on the platform: installed/iOS
-      // updates only stick after a full close, while on desktop the old
-      // worker is usually held by another open Folio tab. Never reloads
-      // here — that would loop.
-      if (platformNeedsFullClose()) {
-        pushLog(
-          'Still on the old version after reload — fully close and reopen the app to finish.',
-        );
-      } else {
-        pushLog(
-          'Still on the old version after reload — close other Folio tabs, then tap Apply again.',
-        );
-      }
       justReloadedForUpdate = false;
+      const nowVersion = readVersion();
+      if (justReloadedFrom === null || nowVersion === null || nowVersion === justReloadedFrom) {
+        attention = platformNeedsFullClose()
+          ? 'Still on the old version after reload — fully close and reopen the app to finish.'
+          : 'Still on the old version after reload — close other Folio tabs, then tap Update.';
+        setPhase('up-to-date');
+        return;
+      }
+      justReloadedFrom = null;
     }
-    setPhase('update-available');
+    void applyUpdate();
   };
 
   const ensureRegistrar = async (): Promise<Registrar | null> => {
@@ -400,56 +362,41 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       registrar = await register({
         onNeedRefresh,
         onOfflineReady: () => {
-          pushLog('Assets cached for offline use.');
           emit();
         },
-        onRegisterError: (error) => {
-          pushLog(
-            `Worker registration error: ${error instanceof Error ? error.message : 'unknown error'}`,
-          );
+        onRegisterError: () => {
           emit();
         },
       });
       return registrar;
-    } catch (error) {
-      pushLog(`Registration failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+    } catch {
       emit();
       return null;
     }
   };
 
   /** Retire an in-flight check (offline mid-check): unblocks the UI without lying about the result. */
-  const retireCheck = (gen: number, reason: string) => {
+  const retireCheck = (gen: number) => {
     if (checkGen !== gen) return;
     checkGen += 1;
     checking = false;
-    pushLog(reason);
     setPhase('offline');
   };
 
-  /** Silent or manual check. Manual runs always log; silent runs stay quiet unless an update is found. */
+  /** Check for an update; when one answers, it is applied immediately (no confirm step). */
   const checkForUpdates = async (manual = false): Promise<void> => {
     if (checking) return;
     const env = readEnv();
     if (!env.online) {
-      if (manual) {
-        pushLog('No network connection detected.');
-        setPhase('offline');
-      }
+      if (manual) setPhase('offline');
       return;
     }
     if (classifyEnv(env) === 'local') {
-      if (manual) {
-        pushLog('Local origin detected — OTA updates disabled here.');
-        setPhase('local');
-      }
+      if (manual) setPhase('local');
       return;
     }
     if (classifyEnv(env) === 'unsupported') {
-      if (manual) {
-        pushLog('Service Workers are not supported or are blocked.');
-        setPhase('unsupported');
-      }
+      if (manual) setPhase('unsupported');
       return;
     }
     const reg = await ensureRegistrar();
@@ -458,25 +405,18 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       return;
     }
     checking = true;
+    attention = null;
     lastCheckAt = Date.now();
     const gen = (checkGen += 1);
-    // Literal truth for the settle window label (e.g. 5000ms → "5s").
-    const secsValue = settleWaitMs / 1000;
-    const secsLabel = Number.isInteger(secsValue) ? `${secsValue}s` : `${secsValue.toFixed(1)}s`;
-    if (manual) {
-      pushLog('Re-fetching sw.js from this host to check for a new version…');
-      setPhase('checking');
-    } else {
-      emit();
-    }
+    if (manual) setPhase('checking');
+    else emit();
     try {
       // Bounded: a stalled update() must fail loudly, never hang the UI in
-      // 'checking' with a dead button (previous behavior had no timeout —
-      // the settle window only started after update() resolved).
+      // 'checking' with a dead button.
       await withTimeout(reg.update(), updateTimeoutMs, 'Re-fetching sw.js');
-      if (manual) pushLog(`Waiting ${secsLabel} for the worker to answer…`);
-      // The worker signals via onNeedRefresh; if nothing arrives within
-      // the settle window the running version is current (SYNAPSE wait).
+      // The worker signals via onNeedRefresh (which auto-applies); if
+      // nothing arrives within the settle window the running build is
+      // current.
       const settled = await new Promise<boolean>((resolve) => {
         const started = Date.now();
         const tick = () => {
@@ -484,7 +424,7 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
             resolve(false);
             return;
           }
-          if (updateAvailable) {
+          if (applyLatched || phase === 'applying') {
             resolve(true);
             return;
           }
@@ -497,16 +437,10 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         tick();
       });
       if (checkGen !== gen) return;
-      if (!settled && !updateAvailable && manual) {
-        pushLog(`No new version answered within ${secsLabel} — still on the current version.`);
-        setPhase('up-to-date');
-      }
-    } catch (error) {
+      if (!settled && manual) setPhase('up-to-date');
+    } catch {
       if (checkGen !== gen) return;
-      if (manual) {
-        pushLog(`Connection failed: ${error instanceof Error ? error.message : 'unknown error'}`);
-        setPhase('error');
-      }
+      if (manual) setPhase('error');
     } finally {
       if (checkGen === gen) {
         checking = false;
@@ -516,20 +450,17 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   };
 
   /**
-   * One-tap apply: activates the waiting worker, waits until it controls
-   * this page, then reloads into it exactly once. Latched exactly-once per
-   * page load; a failed activation unfreezes the UI back to the waiting
-   * version with a retry instead of sticking on 'applying' forever (the
-   * previous `void applyUpdate()` had no error path at all — and under
-   * autoUpdate it was a silent no-op).
+   * Activate the waiting worker, wait until it controls this page, then
+   * reload into it exactly once. Latched exactly-once per page load; a
+   * failed activation unfreezes the UI with a retry instead of sticking
+   * on 'applying' forever.
    */
   const applyUpdate = async (): Promise<void> => {
     const active = registrar;
     if (active === null || applyLatched || phase === 'applying') return;
     applyLatched = true;
     // Visible phase first: the reload lands a moment later, so this status
-    // shows only briefly — but the tap must acknowledge before the reload.
-    pushLog('Activating the waiting worker and reloading…');
+    // shows only briefly — but the run must acknowledge before the reload.
     setPhase('applying');
     try {
       // Invoked synchronously (not deferred): a throwing registrar fails
@@ -564,15 +495,10 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         // the update itself still proceeds.
       }
       fireReloadOnce();
-    } catch (error) {
+    } catch {
       applyLatched = false;
-      pushLog(
-        `Activation failed (${error instanceof Error ? error.message : 'unknown error'}) — still on the waiting version. Retry, or reload manually.`,
-      );
-      // Back to the waiting version when one is known; plain error when the
-      // apply was somehow tapped with no signalled update (banner keys on
-      // the flag, so only the matching phase can unfreeze its UI).
-      setPhase(updateAvailable ? 'update-available' : 'error');
+      // Back to a re-checkable phase; the status copy says to retry.
+      setPhase('error');
     }
   };
 
@@ -583,17 +509,16 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     listenersAttached = true;
     window.addEventListener('online', () => {
       if (phase === 'offline') {
-        pushLog('Back online — re-checking for updates.');
         setPhase('idle');
         void checkForUpdates(false);
       }
     });
     window.addEventListener('offline', () => {
-      if (checking) retireCheck(checkGen, 'Connection lost mid-check — tap Check to retry.');
+      if (checking) retireCheck(checkGen);
     });
     const resurface = () => {
       if (document.visibilityState !== 'visible') return;
-      if (checking || updateAvailable) return;
+      if (checking || phase === 'applying') return;
       if (Date.now() - lastCheckAt < resurfaceIntervalMs) return;
       if (phase !== 'idle' && phase !== 'up-to-date') return;
       void checkForUpdates(false);
@@ -603,10 +528,16 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     window.addEventListener('pageshow', resurface);
   };
 
-  /** Idempotent launch wiring: registers the worker, then a silent check. */
+  /** Idempotent launch wiring: registers the worker, then a silent check that auto-applies. */
   const init = () => {
     if (initialized) return;
     initialized = true;
+    // Post-reload proof: did the reload actually land the new build? A
+    // version (or build-time) change verifies the update and resolves the
+    // launch as up-to-date below. Anything else stays armed: a later
+    // worker signal means the old worker is still in charge (the
+    // still-old note, shown once, never a loop).
+    let proofVerified = false;
     try {
       if (sessionStorage.getItem(APPLIED_FLAG) !== null) {
         sessionStorage.removeItem(APPLIED_FLAG);
@@ -615,20 +546,18 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         const fromBuild = sessionStorage.getItem(APPLIED_BUILD_FLAG);
         sessionStorage.removeItem(APPLIED_BUILD_FLAG);
         updatedFrom = fromVersion;
-        // Post-reload proof: did the reload actually land the new build?
-        // A version (or build-time) change verifies the update — log it and
-        // stand down. Anything else stays armed: a later worker signal means
-        // the old worker is still in charge (the still-old hint).
         const nowVersion = readVersion();
         const nowBuild = readBuildTime();
-        if (fromVersion !== null && nowVersion !== null && fromVersion !== nowVersion) {
-          pushLog(`Updated ${fromVersion} → ${nowVersion}.`);
+        if (
+          (fromVersion !== null && nowVersion !== null && fromVersion !== nowVersion) ||
+          (fromBuild !== null && nowBuild !== null && fromBuild !== nowBuild)
+        ) {
           justReloadedForUpdate = false;
-        } else if (fromBuild !== null && nowBuild !== null && fromBuild !== nowBuild) {
-          pushLog('Updated to the latest build (same version).');
-          justReloadedForUpdate = false;
+          justReloadedFrom = null;
+          proofVerified = true;
         } else {
           justReloadedForUpdate = true;
+          justReloadedFrom = fromVersion;
         }
       }
     } catch {
@@ -649,11 +578,10 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
       setPhase('offline');
       return;
     }
-    setPhase('idle');
+    setPhase(proofVerified ? 'up-to-date' : 'idle');
     void ensureRegistrar().then((reg) => {
       if (reg === null) return;
-      // Zero/negative disables the silent launch check (matches the option
-      // comment; the old `>= 0` scheduled a 0ms check for zero).
+      // Zero/negative disables the silent launch check.
       if (autoCheckDelayMs > 0 && typeof globalThis.setTimeout !== 'undefined') {
         globalThis.setTimeout(() => {
           void checkForUpdates(false);
@@ -682,5 +610,5 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
 
 export type UpdateManager = ReturnType<typeof createUpdateManager>;
 
-/** App singleton — shared by the banner and the About card. */
+/** App singleton — the About card reads it; every launch auto-checks through it. */
 export const updateManager = createUpdateManager();

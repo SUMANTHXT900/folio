@@ -1,5 +1,4 @@
 import { motion } from 'framer-motion';
-import { useEffect, useRef, useState } from 'react';
 import { updateManager, usePwaUpdate } from '../pwa/usePwaUpdate';
 import { formatIso } from '../utils/format';
 import { ToolHeading } from './components/ui';
@@ -340,81 +339,26 @@ function UpdateNotes({ channel }: { channel: FolioChannel }) {
   );
 }
 
+/**
+ * App updates — one Update button plus the running build stamp.
+ *
+ * Tap Update: the manager checks, and when a newer build answers it
+ * activates the waiting worker and reloads straight into it — no popups,
+ * no confirm step. Every app launch runs the same check silently and
+ * applies the same way. Version proof (`Updated vX → vY`) renders after
+ * an applied update lands; the About version stamp below always shows
+ * the running version and build time, so "is this the latest?" is
+ * answerable from the page itself.
+ */
 function UpdateCard() {
   const state = usePwaUpdate();
-  const [showLog, setShowLog] = useState(false);
-  // Auto-expand when an update arrives (the banner links here), but the
-  // toggle stays authoritative: it owns the state, so Hide always hides.
-  useEffect(() => {
-    if (state.updateAvailable) setShowLog(true);
-  }, [state.updateAvailable]);
-  const expanded = showLog;
-
-  // Confirm is LOCAL UI state (no manager phase): arming it only stages the
-  // brass confirm panel below the buttons — nothing applies or reloads
-  // until "Update now" is tapped inside it.
-  const [confirmArmed, setConfirmArmed] = useState(false);
-  // A resolved update (applied, superseded, gone) disarms the confirm.
-  useEffect(() => {
-    if (!state.updateAvailable) setConfirmArmed(false);
-  }, [state.updateAvailable]);
-
-  const sectionRef = useRef<HTMLElement | null>(null);
-  const headingRef = useRef<HTMLHeadingElement | null>(null);
-  const reviewBtnRef = useRef<HTMLButtonElement | null>(null);
-  // User-initiated disarm (Esc / Not now) unmounts the pressed control, so
-  // focus is parked here and restored to the arming trigger after collapse
-  // (when the trigger remounts — the handler runs while its ref is null).
-  const focusReviewAfterDisarm = useRef(false);
-
-  // Banner-arrival (mount with an update already waiting): the banner links
-  // to #/about, so bring the card into view and move focus to its heading.
-  // Mount-only — later arrivals are announced by the banner + status line.
-  useEffect(() => {
-    if (state.updateAvailable) {
-      sectionRef.current?.scrollIntoView?.({ block: 'start' });
-      headingRef.current?.focus({ preventScroll: true });
-    }
-  }, []);
-
-  // Arming the confirm moves focus to the card heading so screen readers
-  // announce the confirm panel that just appeared below the buttons.
-  useEffect(() => {
-    if (confirmArmed) headingRef.current?.focus({ preventScroll: true });
-  }, [confirmArmed]);
-
-  // Esc disarms the confirm; focus restoration happens in the collapse
-  // effect below (the trigger remounts only after this handler returns).
-  useEffect(() => {
-    if (!confirmArmed) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      focusReviewAfterDisarm.current = true;
-      setConfirmArmed(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [confirmArmed]);
-
-  // After a user-initiated disarm, return focus to the trigger that armed
-  // the confirm. Manager-driven disarms (update resolved) leave focus
-  // alone — only an explicit flag set by Esc / Not now restores it.
-  useEffect(() => {
-    if (!confirmArmed && focusReviewAfterDisarm.current) {
-      focusReviewAfterDisarm.current = false;
-      reviewBtnRef.current?.focus();
-    }
-  }, [confirmArmed]);
-
-  const applying = state.phase === 'applying';
+  const busy = state.phase === 'checking' || state.phase === 'applying';
   const version = typeof __FOLIO_VERSION__ !== 'undefined' ? __FOLIO_VERSION__ : '1.1.0';
-  const channel = folioChannel(typeof window !== 'undefined' ? window.location.hostname : '');
+  const buildTime = typeof __FOLIO_BUILD_TIME__ !== 'undefined' ? __FOLIO_BUILD_TIME__ : '';
 
-  // Version proof (R1's additive `updatedFrom`: the pre-apply running
-  // version, bare like "1.9.5" — the leading-v strip keeps the render
-  // correct even if a producer ever stores it prefixed). After an applied
-  // update the check settles on up-to-date carrying where it came from; a
+  // Version proof (the manager's additive `updatedFrom`: the pre-apply
+  // running version, bare like "1.9.5" — the leading-v strip keeps the
+  // render correct even if a producer ever stores it prefixed). A
   // same-version compare, an empty value, or a missing field (older
   // snapshot shape) proves nothing, so all three render nothing.
   const rawFrom: unknown = state.updatedFrom;
@@ -430,7 +374,6 @@ function UpdateCard() {
   return (
     <motion.section
       id="app-updates"
-      ref={sectionRef}
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, ease }}
@@ -439,11 +382,7 @@ function UpdateCard() {
     >
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
-          <h2
-            ref={headingRef}
-            tabIndex={-1}
-            className="font-display text-base font-semibold tracking-tight text-ink-900 focus:outline-none dark:text-paper-100"
-          >
+          <h2 className="font-display text-base font-semibold tracking-tight text-ink-900 dark:text-paper-100">
             App updates
           </h2>
           <p className="mt-0.5 text-sm text-ink-500 dark:text-ink-300" role="status">
@@ -456,78 +395,30 @@ function UpdateCard() {
         <span className="inline-flex items-center rounded-full border border-brass-500/25 bg-brass-400/[0.08] px-3 py-1 font-mono text-xs text-brass-600 dark:text-brass-300">
           v{version}
         </span>
+        <time
+          dateTime={buildTime || undefined}
+          className="inline-flex items-center rounded-full border border-paper-300 dark:border-ink-700 bg-paper-50/70 dark:bg-ink-800/60 px-3 py-1 font-mono text-xs text-ink-500 dark:text-ink-300"
+        >
+          Built {buildTime ? formatIso(buildTime) : '— time unavailable'}
+        </time>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={() => void updateManager.checkForUpdates(true)}
-          disabled={!state.canCheck || applying}
-          className="rounded-xl border border-paper-300 dark:border-ink-700 px-4 py-2 min-h-[44px] text-sm font-medium text-ink-700 dark:text-paper-100 transition-colors hover:bg-paper-200 dark:hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!state.canCheck || busy}
+          className="rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-4 py-2 min-h-[44px] text-sm font-medium shadow-sm hover:opacity-90 transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {state.checking ? 'Checking…' : 'Check for updates'}
+          {state.phase === 'checking'
+            ? 'Checking…'
+            : state.phase === 'applying'
+              ? 'Updating…'
+              : 'Update'}
         </button>
-        {state.updateAvailable && !confirmArmed && (
-          <button
-            ref={reviewBtnRef}
-            type="button"
-            onClick={() => setConfirmArmed(true)}
-            disabled={applying}
-            className="rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-4 py-2 min-h-[44px] text-sm font-medium shadow-sm hover:opacity-90 transition-opacity disabled:cursor-wait disabled:opacity-70"
-          >
-            Review & update
-          </button>
-        )}
-        {state.log.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowLog((v) => !v)}
-            aria-expanded={expanded}
-            className="text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 dark:hover:text-paper-100 transition-colors px-2 py-2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center"
-          >
-            {expanded ? 'Hide details' : 'Details'}
-          </button>
-        )}
       </div>
-      {state.updateAvailable && confirmArmed && (
-        <div
-          role="group"
-          aria-label="Confirm update"
-          className="mt-3 rounded-xl border border-brass-400/40 bg-brass-400/[0.07] p-4"
-        >
-          <p className="text-sm leading-relaxed text-ink-700 dark:text-paper-100">
-            A new version is ready. Update now? Your open work stays in this tab until the reload.
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => updateManager.applyUpdate()}
-              disabled={applying}
-              className="rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-4 py-2 min-h-[44px] text-sm font-medium shadow-sm hover:opacity-90 transition-opacity disabled:cursor-wait disabled:opacity-70"
-            >
-              {applying ? 'Installing…' : 'Update now'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                focusReviewAfterDisarm.current = true;
-                setConfirmArmed(false);
-              }}
-              disabled={applying}
-              className="rounded-xl border border-paper-300 dark:border-ink-700 px-4 py-2 min-h-[44px] text-sm font-medium text-ink-700 dark:text-paper-100 transition-colors hover:bg-paper-200 dark:hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Not now
-            </button>
-          </div>
-        </div>
-      )}
-      <UpdateNotes channel={channel} />
-      {expanded && state.log.length > 0 && (
-        <ol className="mt-3 space-y-1 rounded-xl bg-ink-900/[0.04] dark:bg-ink-950/60 p-3 font-mono text-[11px] leading-relaxed text-ink-500 dark:text-ink-300">
-          {state.log.map((line, i) => (
-            <li key={i}>› {line}</li>
-          ))}
-        </ol>
-      )}
+      <UpdateNotes
+        channel={folioChannel(typeof window !== 'undefined' ? window.location.hostname : '')}
+      />
     </motion.section>
   );
 }
@@ -555,10 +446,9 @@ export default function About() {
         desc="Private PDF tools — built so your documents never have to leave your hands."
       />
 
-      {/* App updates — one-tap escape from a hard-cached PWA (F-13).
-          The worker downloads in the background and waits; this card
-          surfaces the waiting version and applies it on tap, with
-          diagnostics for debugging stale installs on phones. */}
+      {/* App updates — one Update button (F-13). The worker check runs on
+          every launch and auto-applies; the button runs the same check on
+          demand. Version + build stamp prove which build actually landed. */}
       <UpdateCard />
 
       {/* Dev channel — visible on every host except production (D36). The

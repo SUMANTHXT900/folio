@@ -1,12 +1,12 @@
 /**
- * About UpdateCard tests (R2 confirm-then-apply rebuild).
+ * About UpdateCard tests (simple auto-apply update flow).
  *
  * The PWA store (`usePwaUpdate` / `updateManager`) is mocked at the module
- * boundary with one mutable snapshot, so every manager phase is driven by
- * direct mutation + rerender — no worker, no navigation. `releaseNotes` is
- * wrapped with an override switch so the empty-list fallback is asserted
- * without touching the real notes. `window.location.hostname` is stubbed
- * per test to drive the production / non-production notes branches.
+ * boundary with one mutable snapshot — no worker, no navigation.
+ * `releaseNotes` is wrapped with an override switch so the empty-list
+ * fallback is asserted without touching the real notes.
+ * `window.location.hostname` is stubbed per test to drive the production /
+ * non-production notes branches.
  */
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,10 +17,8 @@ import type { ReleaseNote } from './releaseNotes';
 const { snapshotState, managerMock, notesOverride } = vi.hoisted(() => ({
   snapshotState: {
     phase: 'idle',
-    updateAvailable: false,
     checking: false,
-    statusText: 'Tap Check for updates to verify.',
-    log: [],
+    statusText: 'Tap Update to check for the latest version.',
     canCheck: true,
     updatedFrom: null,
   } as UpdateSnapshot,
@@ -66,45 +64,17 @@ function card(): HTMLElement {
   return el;
 }
 
-function heading(): HTMLElement {
-  return screen.getByRole('heading', { name: 'App updates' });
-}
-
-function showAvailable() {
-  setSnapshot({
-    phase: 'update-available',
-    updateAvailable: true,
-    checking: false,
-    statusText: 'A new version is ready.',
-    log: [],
-    canCheck: false,
-  });
-}
-
 beforeEach(() => {
   setSnapshot({
     phase: 'idle',
-    updateAvailable: false,
     checking: false,
-    statusText: 'Tap Check for updates to verify.',
-    log: [],
+    statusText: 'Tap Update to check for the latest version.',
     canCheck: true,
   });
   notesOverride.value = null;
   managerMock.checkForUpdates.mockClear();
   managerMock.applyUpdate.mockClear();
   stubHostname('localhost');
-  // jsdom may lack scrollIntoView (or log not-implemented noise) — the card
-  // guards every call, but a quiet stub keeps arrival-scroll assertions exact.
-  if (typeof Element.prototype.scrollIntoView === 'function') {
-    vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {});
-  } else {
-    Object.defineProperty(Element.prototype, 'scrollIntoView', {
-      value: vi.fn(),
-      configurable: true,
-      writable: true,
-    });
-  }
 });
 
 afterEach(() => {
@@ -124,22 +94,21 @@ describe('UpdateCard structure', () => {
     expect(el.classList.contains('scroll-mt-24')).toBe(true);
   });
 
-  it('offers an idle check with the exact E2E label and calls check on tap', () => {
+  it('offers one Update button that runs the check on tap (no confirm step)', () => {
     render(<About />);
-    const check = screen.getByRole('button', { name: 'Check for updates' });
-    expect(check.hasAttribute('disabled')).toBe(false);
-    fireEvent.click(check);
+    const update = screen.getByRole('button', { name: 'Update' });
+    expect(update.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(update);
     expect(managerMock.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(managerMock.checkForUpdates).toHaveBeenCalledWith(true);
+    expect(managerMock.applyUpdate).not.toHaveBeenCalled();
   });
 
   it('names the checking state with a disabled button (no dead tap)', () => {
     setSnapshot({
       phase: 'checking',
-      updateAvailable: false,
       checking: true,
       statusText: 'Checking for updates…',
-      log: [],
       canCheck: false,
     });
     render(<About />);
@@ -147,121 +116,36 @@ describe('UpdateCard structure', () => {
     expect(checking.hasAttribute('disabled')).toBe(true);
   });
 
-  it('keeps the local/offline copy verbatim (E2E asserts Preview build)', () => {
+  it('names the applying state with a disabled Updating button', () => {
     setSnapshot({
-      phase: 'local',
-      updateAvailable: false,
+      phase: 'applying',
       checking: false,
-      statusText: 'Preview build — update checks run on the deployed site.',
-      log: [],
+      statusText: 'Updating… reloading now.',
       canCheck: false,
     });
     render(<About />);
-    // Scoped to the update card: the dev-channel card mirrors the same
-    // manager status line in its service-worker box.
+    const updating = screen.getByRole('button', { name: 'Updating…' });
+    expect(updating.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('keeps the local copy verbatim (E2E asserts Preview build)', () => {
+    setSnapshot({
+      phase: 'local',
+      checking: false,
+      statusText: 'Preview build — update checks run on the deployed site.',
+      canCheck: false,
+    });
+    render(<About />);
     expect(
       within(card()).getByText('Preview build — update checks run on the deployed site.'),
     ).not.toBeNull();
   });
 
-  it('auto-expands literal log lines while an update waits, toggle stays authoritative', () => {
-    showAvailable();
-    setSnapshot({ log: ['12:00:00 Service worker reported a waiting update.'] });
+  it('always shows the running version and build stamp (freshness proof on every host)', () => {
     render(<About />);
-    expect(screen.getByText('› 12:00:00 Service worker reported a waiting update.')).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Hide details' }));
-    expect(screen.queryByText('› 12:00:00 Service worker reported a waiting update.')).toBeNull();
-  });
-});
-
-describe('UpdateCard confirm-then-apply', () => {
-  it('arms the brass confirm on Review & update (banner-arrival focuses the heading)', () => {
-    showAvailable();
-    render(<About />);
-    // Mount with an update waiting: heading owns focus for screen readers.
-    expect(document.activeElement).toBe(heading());
-    // Available but unconfirmed: Review & update only, no direct apply.
-    expect(screen.queryByRole('group', { name: 'Confirm update' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    const panel = screen.getByRole('group', { name: 'Confirm update' });
-    expect(panel).not.toBeNull();
-    expect(panel.textContent).toContain(
-      'A new version is ready. Update now? Your open work stays in this tab until the reload.',
-    );
-    expect(document.activeElement).toBe(heading());
-    // Confirming shows Update now + Not now (never a second Review button).
-    expect(screen.getByRole('button', { name: 'Update now' })).not.toBeNull();
-    expect(screen.getByRole('button', { name: 'Not now' })).not.toBeNull();
-  });
-
-  it('applies only from the confirm panel (banner-style direct apply is gone)', () => {
-    showAvailable();
-    render(<About />);
-    expect(managerMock.applyUpdate).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Update now' }));
-    expect(managerMock.applyUpdate).toHaveBeenCalledTimes(1);
-  });
-
-  it('disables every control while applying, then re-arms the retry on failure', () => {
-    showAvailable();
-    const { rerender } = render(<About />);
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    setSnapshot({ phase: 'applying', statusText: 'Installing update… Reloading.' });
-    rerender(<About />);
-    expect(screen.getByRole('button', { name: 'Check for updates' }).hasAttribute('disabled')).toBe(
-      true,
-    );
-    expect(screen.getByRole('button', { name: 'Installing…' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByRole('button', { name: 'Not now' }).hasAttribute('disabled')).toBe(true);
-    // Failed activation lands back on the waiting version — confirm is still
-    // armed, so the retry is one tap, not two.
-    setSnapshot({ phase: 'update-available', statusText: 'A new version is ready.' });
-    rerender(<About />);
-    const retry = screen.getByRole('button', { name: 'Update now' });
-    expect(retry.hasAttribute('disabled')).toBe(false);
-    fireEvent.click(retry);
-    expect(managerMock.applyUpdate).toHaveBeenCalledTimes(1);
-  });
-
-  it('Not now disarms back to Review & update', () => {
-    showAvailable();
-    render(<About />);
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    expect(screen.getByRole('group', { name: 'Confirm update' })).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
-    expect(screen.queryByRole('group', { name: 'Confirm update' })).toBeNull();
-    const trigger = screen.getByRole('button', { name: 'Review & update' });
-    expect(trigger).not.toBeNull();
-    // Focus dropped with the unmounted panel returns to the arming trigger.
-    expect(document.activeElement).toBe(trigger);
-    expect(managerMock.applyUpdate).not.toHaveBeenCalled();
-  });
-
-  it('Esc disarms and returns focus to the arming trigger', () => {
-    showAvailable();
-    render(<About />);
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    expect(screen.getByRole('group', { name: 'Confirm update' })).not.toBeNull();
-    fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.queryByRole('group', { name: 'Confirm update' })).toBeNull();
-    const trigger = screen.getByRole('button', { name: 'Review & update' });
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it('a resolved update disarms the confirm', () => {
-    showAvailable();
-    const { rerender } = render(<About />);
-    fireEvent.click(screen.getByRole('button', { name: 'Review & update' }));
-    expect(screen.getByRole('group', { name: 'Confirm update' })).not.toBeNull();
-    setSnapshot({
-      phase: 'up-to-date',
-      updateAvailable: false,
-      statusText: 'Folio is up to date.',
-      canCheck: true,
-    });
-    rerender(<About />);
-    expect(screen.queryByRole('group', { name: 'Confirm update' })).toBeNull();
+    const text = card().textContent ?? '';
+    expect(text).toMatch(/v\d+\.\d+/);
+    expect(text).toContain('Built');
   });
 });
 
@@ -269,10 +153,8 @@ describe('UpdateCard version proof', () => {
   it('renders Updated v{from} → v{now} after an applied update', () => {
     setSnapshot({
       phase: 'up-to-date',
-      updateAvailable: false,
       checking: false,
       statusText: 'Folio is up to date.',
-      log: [],
       canCheck: true,
       updatedFrom: '0.0.0-proof',
     });
@@ -289,10 +171,8 @@ describe('UpdateCard version proof', () => {
     cleanup();
     setSnapshot({
       phase: 'up-to-date',
-      updateAvailable: false,
       checking: false,
       statusText: 'Folio is up to date.',
-      log: [],
       canCheck: true,
       updatedFrom: now,
     });
@@ -301,13 +181,11 @@ describe('UpdateCard version proof', () => {
     expect(screen.queryByText(/^Updated v/)).toBeNull();
   });
 
-  it('renders no proof line without the manager field (pre-R1 snapshot)', () => {
+  it('renders no proof line without the manager field', () => {
     setSnapshot({
       phase: 'up-to-date',
-      updateAvailable: false,
       checking: false,
       statusText: 'Folio is up to date.',
-      log: [],
       canCheck: true,
     });
     render(<About />);
@@ -343,7 +221,7 @@ describe('UpdateCard what-changed notes', () => {
     render(<About />);
     const block = screen.getByLabelText('What changed');
     expect(card().contains(block)).toBe(true);
-    // Latest production entry (R4 notes) renders in full…
+    // Latest production entry renders in full…
     expect(block.textContent).toContain('v1.10.1 release');
     expect(block.textContent).toContain(
       'Scanner detection is now ML-only — a miss keeps your full photo instead of a guessed crop.',
