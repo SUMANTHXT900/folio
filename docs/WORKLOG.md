@@ -7,7 +7,7 @@ Chronological record of meaningful development events. Each entry records object
 - **Direction.** User: remove all update popups/confirms — one Update button in About, auto check + hard refresh on every open. D49 confirm flow deleted (`UpdateBanner.tsx` + test removed, banner unmounted from StudioApp, manager log/update-available phase gone); activation gate, proof, one-shot still-old note, and `_headers` kept invisibly.
 - **Freshness rule.** New `AGENTS.md` deploy rule: every Cloudflare push ships version bump (→1.10.2) + dated `devNotes`/`releaseNotes` entries + `CHANGELOG.md` entry; About proves version + build time on every host.
 - **Verification (observed).** tsc/eslint/prettier clean; 31/31 pwa+card suites; 404/404 studio smoke; build green (44 entries / 7830.28 KiB). E2E About label updated to Update (suite itself deferred).
-- **Deploy.** `dev` alias with live bundle + `sw.js` `no-store` re-verified after deploy (below). Production (`main`) untouched.
+- **Deploy.** `91173b9` → `wrangler pages deploy dist --branch dev` → `https://fc30521f.folio-pdf.pages.dev` (alias `dev.folio-pdf.pages.dev`). Live verified: alias serves `/assets/index-sFE0MxAh.js` (matches local build; alias lagged one fetch behind the direct URL, then caught up); `/sw.js` 200 with `no-store`. Production (`main`) untouched.
 - **Remaining.** Real-profile probe of launch auto-apply on the next deploy; canonical E2E laptop-side.
 
 ## 2026-10-11 — Update rebuild integration + dev deploy (b24f6dc, bundle index-BV4cXAU0.js)
