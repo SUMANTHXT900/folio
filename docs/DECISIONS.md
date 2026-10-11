@@ -379,3 +379,11 @@ Each entry records the decision, its reason, alternatives considered where known
 - **Alternatives considered.** A fourth blind recall/detect round without instrumentation (rejected: D33 already rejected this class — see F-21). GPU-backend or threaded-WASM acceleration before measurement (rejected: cap + deprecation + D33 isolation rule; revisit only on Phase-2 evidence).
 - **Consequences.** D46 ML-only miss rule (miss = full frame) and D47 queue-only + K-lane drain + preparing-overlay semantics are untouched. Wire/type shapes stay stable.
 - **Status.** Docs record only; implementation lives in the ML-CORE / VF-BUILD lanes (uncommitted working tree at record time — presence/behavior not verified here). Scoped lane verification only when lanes report it; full E2E explicitly DEFERRED. Field gates: phone-tier latency, threshold-sweep photos, viewfinder feel (see STATUS).
+
+## D52 - Minimal scanner redo (user direction)
+
+- **Decision.** (1) Camera phase is finder plus shutter plus count plus Close: flash, flip, mirror, camera pick, and capture mode consolidate into one More sheet with labeled 44px rows. (2) Status pill renders only when actionable (starting, paused, captured flash, Auto hold-steady, denied/retry); quiet Manual idle shows no pill. (3) Strip becomes a slim count bar with the reserved slot kept (F-15 zero-shift); review keeps the single-canvas hero with a minimal pager, slim filmstrip, and Next-primary plus Discard-quiet bar. (4) Dead branches deleted (docked chrome variant, dwell export, camera detecting badge, top scrim, tripled copy); pipeline takePhoto to commit untouched.
+- **Reason.** User direction: the finder was crammed with visible controls and did not look good; simplicity over feature visibility. Labels move into the sheet rather than vanishing (L-24).
+- **Alternatives considered.** Full pipeline-plus-UI rewrite (rejected: pipeline verified green; debt was chrome layering). Keeping the D51 chrome (rejected by the user).
+- **Consequences.** E2E strip/pill/chrome selectors need updating to the sheet-first geometry (catalogued, suite deferred). All data hooks and labels kept, so behavior assertions should pass untouched.
+- **Status.** Implemented on `dev`; scoped verification only (123/123 capture+review suites); full E2E explicitly deferred.

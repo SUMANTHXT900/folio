@@ -273,7 +273,6 @@ export default function ScanicReview({
   const [adjusting, setAdjusting] = useState(false);
   const [draft, setDraft] = useState<ScanicCorners | null>(null);
   const [frameBox, setFrameBox] = useState<{ w: number; h: number } | null>(null);
-  const [warpedDims, setWarpedDims] = useState<{ w: number; h: number } | null>(null);
   const heroRef = useRef<HTMLDivElement>(null);
   const photoImgRef = useRef<HTMLImageElement>(null);
   const loupeCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -310,11 +309,6 @@ export default function ScanicReview({
     setGrabbed(null);
     setFocusedHandle(null);
   }, [photoUrl]);
-
-  // New warp = fresh aspect: stale dims would letterbox the next hero.
-  useEffect(() => {
-    setWarpedDims(null);
-  }, [warpedUrl]);
   // Measure the adjust frame so the overlay can use content-box-exact rects.
   // ResizeObserver + window resize cover real browsers; the every-render
   // check catches letterboxed mocks applied after mount in tests.
@@ -1037,22 +1031,7 @@ export default function ScanicReview({
           )}
         </div>
       ) : (
-        <div
-          data-crop-result
-          className="relative overflow-hidden rounded-xl bg-ink-950"
-          style={
-            !detecting && verdict !== 'original' && warpedUrl !== null && warpedDims !== null
-              ? {
-                  aspectRatio: `${warpedDims.w} / ${warpedDims.h}`,
-                  marginLeft: 'auto',
-                  marginRight: 'auto',
-                  maxWidth: '100%',
-                  maxHeight: '50dvh',
-                  width: `min(100%, calc(50dvh * ${warpedDims.w} / ${warpedDims.h}))`,
-                }
-              : undefined
-          }
-        >
+        <div data-crop-result className="relative overflow-hidden rounded-xl bg-ink-950">
           {detecting ? (
             <p
               role="status"
@@ -1083,12 +1062,6 @@ export default function ScanicReview({
                 alt="Auto-crop result preview"
                 className="block max-h-[50dvh] w-full object-contain"
                 draggable={false}
-                onLoad={(e) => {
-                  const el = e.currentTarget;
-                  if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-                    setWarpedDims({ w: el.naturalWidth, h: el.naturalHeight });
-                  }
-                }}
               />
               {corners === null && (
                 <p className="px-4 py-2 text-center text-xs text-paper-100/90">

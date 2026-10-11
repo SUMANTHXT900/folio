@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — v1.12.0 minimal scanner redo deploy (D52, bundle index-Coe-NMwJ.js)
+
+- **Freshness rule followed.** Version 1.11.0 → 1.12.0, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.12.0 entry.
+- **Work.** Camera is finder + shutter + count + Close + More sheet; quiet pill; slim count bar (slot kept); review minimal shell around the untouched single-canvas card; dead chrome branches and tripled copy deleted; pipeline byte-identical.
+- **Verification (observed).** tsc/eslint/prettier clean; 123/123 capture+review suites; build green (44 entries / 7836.29 KiB). E2E selector updates catalogued (strip bar, quiet pill, sheet-first chrome) with the deferred suite.
+- **Deploy.** `dev` alias live-verified below. Production (`main`) stays v1.10.3 until you say so.
+- **Remaining.** Your eyes on the new finder; canonical E2E laptop-side.
+
 ## 2026-10-11 — v1.11.0 ML + viewfinder Phase 1 deploy (D51, bundle index-B0Z1BiE2.js)
 
 - **Freshness rule followed.** Version 1.10.3 → 1.11.0, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.11.0 entry.

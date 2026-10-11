@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.0 — Minimal scanner redo (`dev`, 2026-10-11)
+
+The scanner camera UI was crammed with visible controls. Now the finder stands alone: one shutter button, a slim count bar, Close and a More sheet holding flash, flip, mirror, camera pick, and capture mode. The status pill speaks only when actionable; review keeps its single-canvas hero with a minimal pager and Next/Discard bar. Pipeline behavior untouched (takePhoto → queue → drain → warp → commit). Scoped verification only (full suite + E2E laptop-side).
+
 ## v1.11.0 — ML no-regret pass + viewfinder refactor (`dev`, 2026-10-11)
 
 Scanner wave (D51): the detector stays warm between pages (retained client, K lanes from pending work), and every detection now records timing plus confidence evidence for the measured accuracy work to come. The viewfinder is rebuilt around the same pipeline — one top bar, quiet guidance, gallery count, non-blocking review preparation, safe-area and reduced-motion care. No resolution, threshold, or provider changes (all deferred to measured Phase 2). Scoped verification only (full suite + E2E laptop-side).

@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.0 release',
+    date: '2026-10-11',
+    notes: [
+      'The scanner is decluttered — a clean viewfinder with one shutter button, extras tucked into a More menu.',
+    ],
+  },
+  {
     build: 'v1.11.0 release',
     date: '2026-10-11',
     notes: [

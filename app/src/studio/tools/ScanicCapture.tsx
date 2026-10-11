@@ -27,10 +27,11 @@
  *
  * Viewfinder modules (surgical refactor, pipeline untouched —
  * takePhoto→queue→drain→warp→commit is byte-identical in behavior):
- * `FinderChrome` (variant `overlay|docked`, one implementation),
- * `Finder` (video + ticks + one quiet status pill), `ShutterCluster`
- * (single strip + mode pill + shutter + gallery count badge + reserved CTA
- * slot), `ReviewShell` (non-blocking preparing banner; ready pages stay
+ * `FinderChrome` (ONE overlay top bar: close + title + More; a single
+ * overflow sheet owns every secondary control), `Finder` (video + ticks +
+ * one ACTIONABLE status pill, quiet otherwise), shutter cluster (shutter +
+ * slim count bar + bottom-right gallery count entry + reserved CTA slot),
+ * `ReviewShell` (non-blocking preparing banner; ready pages stay
  * interactive — viewing-is-verdict).
  *
  * Preview vs detection: the <video> preview pixels are NEVER the detection
@@ -74,20 +75,27 @@
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
  *   `[data-scan-capture]` (rendered only when live), gallery thumb
  *   `[data-scan-gallery]` (last queued thumb, jumps to review), mode pill
- *   `[data-scan-mode]` (`Manual` default / `Auto capture`), queue
- *   `[data-scan-queue]` with header `Page i of N`, result
- *   `[data-crop-result]` + `[data-crop-result-img]`, handles
+ *   `[data-scan-mode]` (`Manual` default / `Auto capture`, lives in the
+ *   overflow sheet), queue `[data-scan-queue]` with header `Page i of N`,
+ *   result `[data-crop-result]` + `[data-crop-result-img]`, handles
  *   `[data-crop-handle="tl|tr|br|bl"]` (role=slider, arrow-key
  *   steppable via scanic's keyboard mode), review CTA `[data-review-cta]`
- *   (`View N pages` — every queued page is implicitly accepted, no pending),
- *   progress `[data-review-progress]` (aria-label `i of N viewed`, visited
+ *   (`View N pages` — every queued page is implicitly accepted, no pending;
+ *   the slim count bar in the reserved strip slot), progress
+ *   `[data-review-progress]` (aria-label `i of N viewed`, visited
  *   count — INTENTIONAL contract change from `reviewed`), pager
- *   `[data-page-prev]` / `[data-page-next]` (44px, disabled at ends),
- *   finder `[data-finder-frame]` + `[data-finder-status]`, mirror
- *   `[data-mirror-toggle]` (aria-pressed), filmstrip `[data-scan-filmstrip]`
- *   + `[data-film-thumb]` (numbered, tap jumps) + `[data-scan-add]` (back
- *   to camera), batch bar `[data-batch-bar]` (`Discard scans` ghost /
- *   `Next` primary, gated on >=1 page).
+ *   `[data-page-prev]` / `[data-page-next]` (44px, disabled at ends) +
+ *   `[data-page-dot]` (44px page dots, `aria-current` on current), finder
+ *   `[data-finder-frame]` + `[data-finder-status]` (rendered ONLY when
+ *   actionable: starting / paused / captured-flash / Auto hold-steady /
+ *   denied-retry help — quiet Manual idle renders NO pill), mirror
+ *   `[data-mirror-toggle]` (aria-pressed, lives in the overflow sheet),
+ *   filmstrip `[data-scan-filmstrip]` + `[data-film-thumb]` (numbered, tap
+ *   jumps) + `[data-scan-add]` (back to camera), batch bar
+ *   `[data-batch-bar]` (`Discard scans` ghost / `Next` primary, gated on
+ *   >=1 page), overflow `[data-scan-more]` (trigger, `aria-expanded`) +
+ *   `[data-scan-sheet]` (always mounted in the camera phase, hidden when
+ *   closed — flash, flip, mirror, camera select, mode, import rows).
  * - Additive (VF-BUILD, E2E-safe): gallery `[data-gallery-count]` visible
  *   count badge, mirror `[data-mirror-note]` inline back-camera reason,
  *   non-blocking `[data-review-preparing]` slim banner (same text + role —
@@ -118,6 +126,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { prepareImportFile } from './imageImport';
 import type { ScanicCorners } from './scan/index';
@@ -482,12 +491,6 @@ export const AUTO_CAPTURE_STABLE_TICKS_REQUIRED = 4;
 export const AUTO_CAPTURE_TICK_MS = 300;
 /** Minimum spacing between two auto shutter fires (static frames included). */
 export const AUTO_CAPTURE_COOLDOWN_MS = 1500;
-/**
- * Retired: the camera-phase `Scanning…` dwell is gone (the shutter is
- * queue-only, so the finder never works — the review preparing banner owns
- * the busy voice). Kept exported for import compatibility; nothing reads it.
- */
-export const SCAN_STATUS_DWELL_MS = 800;
 
 /**
  * Captured-flash window: after each queue-only shutter park the quiet finder
@@ -725,214 +728,138 @@ function imageDataToJpeg(image: ImageData, quality = 0.9): Promise<Blob | null> 
 }
 
 /* ------------------------------------------------------------------ */
-/* FinderChrome (variant overlay|docked): ONE top-bar implementation   */
+/* FinderChrome: ONE overlay top bar (no variants)                     */
 /* ------------------------------------------------------------------ */
 
-type FinderChromeVariant = 'overlay' | 'docked';
-
 interface FinderChromeProps {
-  variant: FinderChromeVariant;
   onExit: () => void;
-  torchSupported: boolean;
-  torchOn: boolean;
-  onToggleTorch: () => void;
-  torchNote: string | null;
-  facing: 'environment' | 'user';
-  mirrored: boolean;
-  onToggleMirror: () => void;
-  onFlip: () => void;
-  cameras: Array<{ deviceId: string; label: string }>;
-  selectedDeviceId: string | null;
-  onPickCamera: (deviceId: string | null) => void;
-  deviceFallbackNote: string | null;
-  suggestedDeviceId: string | null;
-  onChooseSuggested: (deviceId: string) => void;
+  /** Overflow trigger state (camera phase only). */
+  sheetOpen: boolean;
+  onToggleSheet: () => void;
+  /**
+   * Overflow sheet content. Null outside the camera phase — review/done
+   * chrome is Close + title only. When non-null the sheet panel
+   * (`[data-scan-sheet]`) stays mounted and hides via CSS, so every
+   * camera-phase hook (mode, mirror, select, torch, suggest, fallback)
+   * keeps holding without ever covering the finder uninvited.
+   */
+  sheet: ReactNode | null;
 }
 
 /**
- * The single top-bar implementation for both chrome variants — close,
- * title, flash, flip, mirror, and the camera select render in BOTH, with
- * identical hooks and labels; only the container/button skin changes by
- * variant. Every interactive control carries `pointer-events-auto` so the
- * overlay scrim (pass-through by design) can never swallow a tap (L-24 —
- * pinned by the hit-test suite). The mirror toggle's back-camera reason is
- * INLINE text (`[data-mirror-note]`), never tooltip-only.
+ * The single top-bar implementation: close (top-left), title, and the
+ * overflow trigger (top-right). Every interactive control carries
+ * `pointer-events-auto` so the overlay scrim (pass-through by design) can
+ * never swallow a tap (L-24 — pinned by the hit-test suite). The sheet
+ * rows below carry the labeled 44px controls (L-24 label visibility lives
+ * in the sheet while the finder stays clean).
  */
-function FinderChrome({
-  variant,
-  onExit,
-  torchSupported,
-  torchOn,
-  onToggleTorch,
-  torchNote,
-  facing,
-  mirrored,
-  onToggleMirror,
-  onFlip,
-  cameras,
-  selectedDeviceId,
-  onPickCamera,
-  deviceFallbackNote,
-  suggestedDeviceId,
-  onChooseSuggested,
-}: FinderChromeProps) {
-  const overlay = variant === 'overlay';
-  const chromeButton = overlay
-    ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
-    : 'pointer-events-auto inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-300 px-2 py-1 text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700';
-  const notePill = overlay
-    ? 'max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur'
-    : 'max-w-full truncate text-center text-[11px] text-ink-500 dark:text-ink-300';
+function FinderChrome({ onExit, sheetOpen, onToggleSheet, sheet }: FinderChromeProps) {
+  const chromeButton =
+    'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80';
   return (
     <div
       data-scanner-topbar
-      className={
-        overlay
-          ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col gap-1 px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]'
-          : 'flex shrink-0 flex-col gap-1 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] dark:border-ink-700/70 dark:bg-ink-900/95'
-      }
+      className="pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col gap-1 px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
     >
-      {overlay && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink-950/60 to-transparent"
-        />
-      )}
-      <div
-        className={
-          overlay ? 'relative flex w-full items-center gap-1' : 'flex w-full items-center gap-1'
-        }
-      >
+      <div className="relative flex w-full items-center gap-1">
         <button type="button" aria-label="Close scanner" onClick={onExit} className={chromeButton}>
           <span aria-hidden className="text-sm leading-none">
             ✕
           </span>
           <span className="text-[10px] font-medium leading-none">Close</span>
         </button>
-        <p
-          className={
-            overlay
-              ? 'relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow'
-              : 'min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100'
-          }
-        >
+        <p className="relative min-w-0 flex-1 truncate rounded-xl bg-ink-950/60 px-3 py-1 text-center font-display text-sm font-semibold tracking-tight text-paper-50 backdrop-blur">
           Scan documents
         </p>
-        {torchSupported ? (
+        {sheet !== null ? (
           <button
             type="button"
-            aria-label="Toggle torch"
-            aria-pressed={torchOn}
-            onClick={onToggleTorch}
+            data-scan-more
+            aria-label="More options"
+            aria-expanded={sheetOpen}
+            aria-controls="scan-sheet"
+            onClick={onToggleSheet}
             className={chromeButton}
           >
             <span aria-hidden className="text-sm leading-none">
-              {torchOn ? '🔦' : '💡'}
+              ⋯
             </span>
-            <span className="text-[10px] font-medium leading-none">Flash</span>
+            <span className="text-[10px] font-medium leading-none">More</span>
           </button>
         ) : (
           <span aria-hidden className="min-h-[44px] min-w-[44px]" />
         )}
-        <button type="button" aria-label="Switch camera" onClick={onFlip} className={chromeButton}>
-          <span aria-hidden className="text-sm leading-none">
-            ⇄
-          </span>
-          <span className="text-[10px] font-medium leading-none">Flip</span>
-        </button>
-        <button
-          type="button"
-          data-mirror-toggle
-          aria-pressed={mirrored}
-          aria-label="Mirror front-camera preview"
-          title={
-            facing !== 'user'
-              ? 'Mirror applies to the front camera only'
-              : mirrored
-                ? 'Front preview mirrored (captures stay unmirrored)'
-                : 'Front preview unmirrored'
-          }
-          disabled={facing !== 'user'}
-          onClick={onToggleMirror}
-          className={`${chromeButton} disabled:cursor-not-allowed disabled:opacity-40`}
-        >
-          <span aria-hidden className="text-sm leading-none">
-            {mirrored ? '◐' : '◑'}
-          </span>
-          <span className="text-[10px] font-medium leading-none">Mirror</span>
-        </button>
       </div>
-      <div
-        data-camera-select-row
-        className={
-          overlay
-            ? 'pointer-events-auto relative flex w-full flex-col items-center justify-center gap-1'
-            : 'pointer-events-auto flex w-full flex-col items-center justify-center gap-1'
-        }
-      >
-        <select
-          data-camera-select
-          aria-label="Choose camera"
-          value={selectedDeviceId ?? ''}
-          onChange={(e) => {
-            const id = e.target.value === '' ? null : e.target.value;
-            onPickCamera(id);
-          }}
+      {sheet !== null && (
+        <div
+          data-scan-sheet
+          id="scan-sheet"
           className={
-            overlay
-              ? 'camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]'
-              : 'camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-300 bg-paper-50 px-2 py-1 text-xs text-ink-700 transition-colors hover:bg-paper-200 min-h-[44px] dark:border-ink-700 dark:bg-ink-800 dark:text-paper-100 dark:hover:bg-ink-700'
+            sheetOpen
+              ? 'pointer-events-auto relative w-full rounded-2xl bg-paper-50 shadow-soft dark:bg-ink-900'
+              : 'hidden'
           }
         >
-          <option value="">Default camera</option>
-          {cameras.map((c, i) => (
-            <option key={c.deviceId} value={c.deviceId}>
-              {cameraDisplayName(c, i)}
-            </option>
-          ))}
-        </select>
-        {facing !== 'user' && (
-          <p data-mirror-note role="note" className={notePill}>
-            Mirror applies to the front camera only
-          </p>
-        )}
-        {deviceFallbackNote !== null && (
-          <p data-camera-fallback-note role="status" className={notePill}>
-            {deviceFallbackNote}
-          </p>
-        )}
-        {suggestedDeviceId !== null && (
-          <div
-            data-camera-suggest
-            role="status"
-            className={
-              overlay
-                ? 'pointer-events-auto flex max-w-full items-center gap-2 rounded-full bg-ink-950/60 px-3 py-1 text-[11px] text-paper-100 backdrop-blur'
-                : 'pointer-events-auto flex max-w-full items-center gap-2 rounded-full border border-paper-300 px-3 py-1 text-[11px] text-ink-700 dark:border-ink-700 dark:text-paper-100'
-            }
-          >
-            <span>Sharper camera found — switch</span>
-            <button
-              type="button"
-              aria-label="Switch to sharper camera"
-              onClick={() => onChooseSuggested(suggestedDeviceId)}
-              className={
-                overlay
-                  ? 'inline-flex min-h-[44px] items-center justify-center rounded-full bg-paper-50 px-3 text-[11px] font-semibold text-ink-900'
-                  : 'inline-flex min-h-[44px] items-center justify-center rounded-full bg-ink-900 px-3 text-[11px] font-semibold text-paper-50 dark:bg-paper-50 dark:text-ink-900'
-              }
-            >
-              Switch
-            </button>
-          </div>
-        )}
-        {torchNote !== null && torchSupported && (
-          <p data-torch-note role="status" className={notePill}>
-            {torchNote}
-          </p>
-        )}
-      </div>
+          {sheet}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** One labeled 44px sheet row (button variant): icon + visible label + optional state. */
+function SheetRowButton({
+  icon,
+  label,
+  state,
+  onClick,
+  pressed,
+  disabled,
+  ariaLabel,
+  title,
+  dataAttr,
+}: {
+  icon: ReactNode;
+  label: string;
+  state?: string;
+  onClick: () => void;
+  pressed?: boolean;
+  disabled?: boolean;
+  /**
+   * Explicit accessible name. Omit when the visible label IS the name
+   * (then the button is found by its text, never by label query) — this
+   * keeps `getByLabelText` unambiguous for the hidden file input that
+   * shares the Import copy.
+   */
+  ariaLabel?: string;
+  title?: string;
+  /** Extra data-* hooks (contract attributes) spread onto the row button. */
+  dataAttr?: Record<string, string>;
+}) {
+  // No `aria-label` when the visible label IS the name: the accessible name
+  // comes from content, so label queries stay unambiguous for the hidden
+  // file input that shares the Import copy.
+  const nameProps = ariaLabel !== undefined ? { 'aria-label': ariaLabel } : {};
+  return (
+    <button
+      type="button"
+      {...nameProps}
+      aria-pressed={pressed}
+      disabled={disabled}
+      title={title}
+      {...dataAttr}
+      onClick={onClick}
+      className="pointer-events-auto inline-flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm font-medium text-ink-900 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
+    >
+      <span aria-hidden className="text-base leading-none">
+        {icon}
+      </span>
+      <span>{label}</span>
+      {state !== undefined && (
+        <span className="ml-auto text-xs font-normal text-ink-400 dark:text-ink-300">{state}</span>
+      )}
+    </button>
   );
 }
 
@@ -979,6 +906,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [redetecting, setRedetecting] = useState(false);
   /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  /**
+   * Overflow sheet (More): flash, flip, mirror, camera select, capture
+   * mode, and import all live here so the finder stays clean. The sheet
+   * panel stays mounted while closed (hooks hold, nothing unmounts).
+   */
+  const [sheetOpen, setSheetOpen] = useState(false);
   /**
    * Visited tracking (implicit-accept progress): viewing a page marks it
    * visited. `visitedTick` forces a rerender when the set grows (refs don't
@@ -1886,6 +1819,44 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     };
   }, [phase, mode, camState, captureFrame]);
 
+  // Keyboard: Space fires the shutter on the live camera view (unless focus
+  // sits on an interactive control, where native activation already covers
+  // it, or the sheet is open); Esc closes the sheet first, else steps back
+  // (review/done → camera) or exits (camera → onExit).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (sheetOpen) {
+          e.preventDefault();
+          setSheetOpen(false);
+        } else if (phase === 'camera') {
+          e.preventDefault();
+          onExit();
+        } else {
+          e.preventDefault();
+          setPhase('camera');
+        }
+        return;
+      }
+      if (phase !== 'camera' || e.code !== 'Space') return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName ?? '';
+      if (/^(BUTTON|INPUT|SELECT|TEXTAREA|A)$/.test(tag) || t?.isContentEditable === true) return;
+      if (sheetOpen || camState !== 'live') return;
+      e.preventDefault();
+      lastFireRef.current = Date.now();
+      void captureFrame();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, sheetOpen, camState, captureFrame, onExit]);
+
+  // The sheet belongs to the camera phase: leaving it parks the sheet
+  // closed so returning to the camera always reopens on a clean finder.
+  useEffect(() => {
+    if (phase !== 'camera') setSheetOpen(false);
+  }, [phase]);
+
   const addFilesInstead = useCallback(
     (files: File[]) => {
       const images = files.filter(
@@ -2339,16 +2310,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const preparing = phase === 'review' && queue.length > 0 && preparingDone < preparingTotal;
 
   /**
-   * ONE status pill, quiet by default (D47 — the shutter never works in the
-   * camera phase, so the finder stays idle). Actionable voice only: the
-   * starting/paused states, the 900ms captured flash, and the Auto-mode
-   * hold-steady hint; denied/retry states come from `cameraHelp` below with
-   * the Import alternate, never a dead end. No `Scanning…` branch, no dwell:
-   * the review preparing banner owns the busy voice. (No dark-surface hint:
-   * detection is deferred to review, so the camera phase has no brightness
-   * signal — inventing one would be fake guidance.)
+   * ONE status pill, rendered ONLY when actionable (minimal finder — a quiet
+   * Manual idle shows NO pill at all): the starting/paused states, the 900ms
+   * captured flash, and the Auto-mode hold-steady hint; denied/retry states
+   * come from `cameraHelp` below with the Import alternate, never a dead
+   * end. No `Scanning…` branch, no dwell: the review preparing banner owns
+   * the busy voice. (No dark-surface hint: detection is deferred to review,
+   * so the camera phase has no brightness signal — inventing one would be
+   * fake guidance.)
    */
-  const finderStatus =
+  const finderPill: string | null =
     camState === 'requesting'
       ? 'Starting camera…'
       : paused
@@ -2357,89 +2328,193 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? 'Captured — keep shooting'
           : mode === 'auto'
             ? 'Hold steady over the page'
-            : 'Point at the page';
+            : null;
 
   // Camera-phase flag: the camera is true full-bleed (video fills the
   // fixed surface edge-to-edge, chrome floats over it); review/done keep
-  // the docked chrome.
+  // the same overlay chrome (Close + title only — camera controls live in
+  // the camera-phase sheet, never in review).
   const isCamera = phase === 'camera';
-  // ShutterCluster strip: the SINGLE session-strip container lives in the
-  // camera bottom overlay below (the review phase navigates via its own
-  // filmstrip). Compact thumbs (h-14 w-11) with 44px targets; queued thumbs
-  // show the photo immediately, detecting ones carry the … overlay.
-  const stripBody =
-    queue.length === 0 ? (
-      <p className="text-xs text-paper-100/80">No pages yet — capture or add images.</p>
-    ) : (
-      queue.map((entry, i) => (
-        <button
-          key={entry.id}
-          type="button"
-          onClick={() => goToReview(i)}
-          aria-label={`Review page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
-          className="relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 border-paper-200 transition-colors dark:border-ink-700"
-        >
-          {entry.photoUrl ? (
-            <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
-              {i + 1}
-            </span>
-          )}
-          {entry.status === 'detecting' && (
-            <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
-              …
-            </span>
-          )}
-        </button>
-      ))
-    );
 
   // Review phase: the single-page card is owned by `./ScanicReview` (props
   // below stay EXACT minus the removed Looks-good reliance); the pager +
   // filmstrip + batch bar underneath are owned here because the review
   // component renders the card only (never duplicates).
+  // Overflow sheet rows: every secondary camera control with a visible
+  // label on a 44px row (L-24 label visibility lives here while the finder
+  // stays clean). The panel stays mounted while closed (hooks hold, nothing
+  // unmounts) — camera phase only; review/done chrome is Close + title.
+  const sheetNote = 'px-3 py-1 text-center text-[11px] text-ink-500 dark:text-ink-300';
+  const flipFacing = useCallback(() => {
+    // Quick flip alongside the picker: clears any explicit
+    // device pick (exact selection would otherwise ignore
+    // facingMode) so the flip always takes effect.
+    chooseCamera(null);
+    setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+  }, [chooseCamera]);
+  const pickCamera = useCallback(
+    (id: string | null) => {
+      // Keep the mirror semantics honest when the OS label
+      // names a side: a picked front lens mirrors the
+      // preview, a picked back lens never does. Unknown
+      // labels leave the facing toggle untouched (the live
+      // track's facingMode reconciles after start when
+      // exposed).
+      const picked = cameras.find((c) => c.deviceId === id);
+      const lbl = (picked?.label ?? '').toLowerCase();
+      if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
+      else if (id !== null && /back|rear|environment/.test(lbl)) setFacing('environment');
+      chooseCamera(id);
+    },
+    [cameras, chooseCamera],
+  );
+  const cameraSheet = (
+    <div className="flex max-h-[60dvh] flex-col gap-0.5 overflow-y-auto p-1.5">
+      {torchSupported && (
+        <SheetRowButton
+          icon={torchOn ? '🔦' : '💡'}
+          label="Flash"
+          state={torchOn ? 'On' : 'Off'}
+          ariaLabel="Toggle torch"
+          pressed={torchOn}
+          onClick={() => void toggleTorch()}
+        />
+      )}
+      <SheetRowButton icon="⇄" label="Flip" ariaLabel="Switch camera" onClick={flipFacing} />
+      <SheetRowButton
+        icon={mirrored ? '◐' : '◑'}
+        label="Mirror"
+        state={facing !== 'user' ? 'Front only' : mirrored ? 'On' : 'Off'}
+        ariaLabel="Mirror front-camera preview"
+        title={
+          facing !== 'user'
+            ? 'Mirror applies to the front camera only'
+            : mirrored
+              ? 'Front preview mirrored (captures stay unmirrored)'
+              : 'Front preview unmirrored'
+        }
+        pressed={mirrored}
+        disabled={facing !== 'user'}
+        dataAttr={{ 'data-mirror-toggle': '' }}
+        onClick={() => setMirrored((v) => !v)}
+      />
+      {facing !== 'user' && (
+        <p data-mirror-note role="note" className={sheetNote}>
+          Mirror applies to the front camera only
+        </p>
+      )}
+      <div
+        data-camera-select-row
+        className="pointer-events-auto flex w-full flex-col gap-1 px-1 py-1"
+      >
+        <label
+          htmlFor="scan-camera-select"
+          className="px-2 text-[10px] font-semibold uppercase tracking-wide text-ink-400 dark:text-ink-300"
+        >
+          Camera
+        </label>
+        <select
+          id="scan-camera-select"
+          data-camera-select
+          aria-label="Choose camera"
+          value={selectedDeviceId ?? ''}
+          onChange={(e) => {
+            const id = e.target.value === '' ? null : e.target.value;
+            pickCamera(id);
+          }}
+          className="camera-select-compact pointer-events-auto inline-flex max-h-[44px] min-h-[44px] w-full truncate rounded-lg border border-paper-300 bg-paper-50 px-2 py-1 text-xs text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:bg-ink-800 dark:text-paper-100 dark:hover:bg-ink-700"
+        >
+          <option value="">Default camera</option>
+          {cameras.map((c, i) => (
+            <option key={c.deviceId} value={c.deviceId}>
+              {cameraDisplayName(c, i)}
+            </option>
+          ))}
+        </select>
+        {deviceFallbackNote !== null && (
+          <p data-camera-fallback-note role="status" className={sheetNote}>
+            {deviceFallbackNote}
+          </p>
+        )}
+        {suggestedDeviceId !== null && (
+          <div
+            data-camera-suggest
+            role="status"
+            className="pointer-events-auto flex max-w-full items-center gap-2 rounded-xl border border-paper-300 px-3 py-1 text-[11px] text-ink-700 dark:border-ink-700 dark:text-paper-100"
+          >
+            <span>Sharper camera found — switch</span>
+            <button
+              type="button"
+              aria-label="Switch to sharper camera"
+              onClick={() => chooseCamera(suggestedDeviceId)}
+              className="inline-flex min-h-[44px] items-center justify-center rounded-full bg-ink-900 px-3 text-[11px] font-semibold text-paper-50 dark:bg-paper-50 dark:text-ink-900"
+            >
+              Switch
+            </button>
+          </div>
+        )}
+        {torchNote !== null && torchSupported && (
+          <p data-torch-note role="status" className={sheetNote}>
+            {torchNote}
+          </p>
+        )}
+      </div>
+      <div className="px-1 py-1">
+        <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400 dark:text-ink-300">
+          Capture mode
+        </p>
+        <div
+          data-scan-mode
+          role="group"
+          aria-label="Capture mode"
+          className="inline-flex w-full rounded-full border border-paper-300 p-1 dark:border-ink-700"
+        >
+          <button
+            type="button"
+            aria-pressed={mode === 'manual'}
+            onClick={() => setMode('manual')}
+            className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+              mode === 'manual'
+                ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                : 'text-ink-500 dark:text-ink-300'
+            }`}
+          >
+            Manual
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === 'auto'}
+            onClick={() => setMode('auto')}
+            className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+              mode === 'auto'
+                ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                : 'text-ink-500 dark:text-ink-300'
+            }`}
+          >
+            Auto capture
+          </button>
+        </div>
+      </div>
+      <SheetRowButton
+        icon="▦"
+        label="Add image files instead"
+        onClick={() => fileInputRef.current?.click()}
+      />
+      <p className={sheetNote}>On-device ML auto-crop — images never leave this device.</p>
+    </div>
+  );
+
   const content = (
     <div
       data-scanner-root
       data-detector={DEFAULT_DETECTOR}
-      className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 [--finder-clear:9rem] sm:[--finder-clear:10rem] dark:bg-ink-900 dark:text-paper-100"
+      className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 [--finder-clear:5.5rem] sm:[--finder-clear:6rem] dark:bg-ink-900 dark:text-paper-100"
     >
       <FinderChrome
-        variant={isCamera ? 'overlay' : 'docked'}
         onExit={onExit}
-        torchSupported={torchSupported}
-        torchOn={torchOn}
-        onToggleTorch={() => void toggleTorch()}
-        torchNote={torchNote}
-        facing={facing}
-        mirrored={mirrored}
-        onToggleMirror={() => setMirrored((v) => !v)}
-        onFlip={() => {
-          // Quick flip alongside the picker: clears any explicit
-          // device pick (exact selection would otherwise ignore
-          // facingMode) so the flip always takes effect.
-          chooseCamera(null);
-          setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
-        }}
-        cameras={cameras}
-        selectedDeviceId={selectedDeviceId}
-        onPickCamera={(id) => {
-          // Keep the mirror semantics honest when the OS label
-          // names a side: a picked front lens mirrors the
-          // preview, a picked back lens never does. Unknown
-          // labels leave the facing toggle untouched (the live
-          // track's facingMode reconciles after start when
-          // exposed).
-          const picked = cameras.find((c) => c.deviceId === id);
-          const lbl = (picked?.label ?? '').toLowerCase();
-          if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
-          else if (id !== null && /back|rear|environment/.test(lbl)) setFacing('environment');
-          chooseCamera(id);
-        }}
-        deviceFallbackNote={deviceFallbackNote}
-        suggestedDeviceId={suggestedDeviceId}
-        onChooseSuggested={(id) => chooseCamera(id)}
+        sheetOpen={sheetOpen}
+        onToggleSheet={() => setSheetOpen((v) => !v)}
+        sheet={isCamera ? cameraSheet : null}
       />
 
       {isCamera && (
@@ -2482,22 +2557,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
                   </div>
                 </div>
-                {/* Status pill rides top-center below the slim top bar +
-                    compact select row (`--finder-clear` clears both, same
-                    var as the frame) so the bottom overlay can never cover
-                    it. Quiet by default; actionable voice only. */}
-                <p
-                  data-finder-status
-                  role="status"
-                  className="absolute left-1/2 top-[var(--finder-clear)] max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
-                >
-                  {finderStatus}
-                </p>
+                {/* Status pill rides top-center below the slim top bar
+                    (`--finder-clear` clears it, same var as the frame) so the
+                    bottom overlay can never cover it. Rendered ONLY when
+                    actionable — a quiet Manual idle shows NO pill. */}
+                {finderPill !== null && (
+                  <p
+                    data-finder-status
+                    role="status"
+                    className="absolute left-1/2 top-[var(--finder-clear)] max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
+                  >
+                    {finderPill}
+                  </p>
+                )}
               </div>
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center bg-ink-950 p-4 pb-72 pt-20">
+              <div className="absolute inset-0 flex items-center justify-center bg-ink-950 p-4 pb-52 pt-20">
                 {/* No-preview fallback fills the same full-bleed slot (lifted
-                    above the bottom overlay) so the controls never move
+                    above the slim bottom overlay) so the controls never move
                     between camera states. */}
                 <div className="rounded-xl border border-dashed border-paper-300 bg-paper-50 px-4 py-6 text-center dark:border-ink-700 dark:bg-ink-900">
                   <p
@@ -2533,61 +2610,51 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             )}
           </div>
 
-          {/* Bottom overlay: floating filmstrip + controls over a bottom
-              scrim (pointer-events-none except the controls). The strip keeps
-              the same [data-scan-strip] thumbs, compact (h-16). The
-              review-CTA slot stays reserved (min-h-[52px]) so the first
-              capture never grows the overlay. */}
+          {/* Bottom overlay: slim count bar + shutter cluster over a bottom
+              scrim (pointer-events-none except the controls). The strip slot
+              stays reserved at a fixed height (F-15 zero-shift): empty shows
+              nothing visible, N>0 shows the slim review CTA bar. Secondary
+              controls (mode, import) live in the More sheet — the bottom
+              holds ONE primary action (72px shutter, thumb zone) plus the
+              bottom-right count entry into review. */}
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
             <div
               aria-hidden
               className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink-950/70 via-ink-950/30 to-transparent"
             />
             <div className="pointer-events-auto relative flex flex-col gap-2 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-10">
-              <div
-                data-scan-strip
-                className="flex h-16 shrink-0 items-center gap-2 overflow-x-auto py-1"
-              >
-                {stripBody}
-              </div>
-              {/* Manual/Auto segmented mode pill */}
-              <div className="flex justify-center">
-                <div
-                  data-scan-mode
-                  role="group"
-                  aria-label="Capture mode"
-                  className="inline-flex rounded-full border border-paper-50/25 bg-ink-950/60 p-1 backdrop-blur"
-                >
+              <div data-scan-strip className="flex h-12 shrink-0 items-center justify-center">
+                {queue.length === 0 ? (
+                  <span aria-hidden="true" className="block h-full w-full" />
+                ) : (
                   <button
                     type="button"
-                    aria-pressed={mode === 'manual'}
-                    onClick={() => setMode('manual')}
-                    className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                      mode === 'manual' ? 'bg-paper-50 text-ink-900' : 'text-paper-100/75'
-                    }`}
+                    data-review-cta
+                    onClick={() => goToReview()}
+                    className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-paper-50/95 px-5 py-2 text-sm font-medium text-ink-900 backdrop-blur transition-colors hover:bg-paper-200"
                   >
-                    Manual
+                    {`View ${queue.length} pages`}
                   </button>
-                  <button
-                    type="button"
-                    aria-pressed={mode === 'auto'}
-                    onClick={() => setMode('auto')}
-                    className={`inline-flex min-h-[44px] items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                      mode === 'auto' ? 'bg-paper-50 text-ink-900' : 'text-paper-100/75'
-                    }`}
-                  >
-                    Auto capture
-                  </button>
-                </div>
+                )}
               </div>
-              {mode === 'auto' && (
-                <p className="text-center text-[11px] text-paper-100/75">
-                  Hold steady over the page — the shutter fires itself.
-                </p>
-              )}
 
-              {/* Bottom cluster: gallery thumb · big shutter · balance spacer */}
+              {/* Bottom cluster: balance spacer · shutter · count entry */}
               <div className="flex items-center justify-between gap-4 px-2">
+                <span aria-hidden className="w-14 shrink-0" />
+                {camState === 'live' ? (
+                  <button
+                    type="button"
+                    data-scan-capture
+                    aria-label="Capture page"
+                    autoFocus
+                    onClick={manualCapture}
+                    className="inline-flex h-[72px] w-[72px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
+                  >
+                    <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
+                  </button>
+                ) : (
+                  <span aria-hidden className="h-[72px] w-[72px] shrink-0" />
+                )}
                 <button
                   type="button"
                   data-scan-gallery
@@ -2619,20 +2686,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     </span>
                   )}
                 </button>
-                {camState === 'live' ? (
-                  <button
-                    type="button"
-                    data-scan-capture
-                    aria-label="Capture page"
-                    onClick={manualCapture}
-                    className="inline-flex h-[76px] w-[76px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
-                  >
-                    <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
-                  </button>
-                ) : (
-                  <span aria-hidden className="h-[76px] w-[76px] shrink-0" />
-                )}
-                <span aria-hidden className="w-14 shrink-0" />
               </div>
               {captureError !== null && (
                 <p role="alert" className="text-center text-xs text-red-300">
@@ -2640,46 +2693,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 </p>
               )}
 
-              <div className="flex flex-col items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,.jpg,.jpeg,.png"
-                  multiple
-                  className="hidden"
-                  aria-label="Add image files instead"
-                  onChange={(e) => {
-                    addFilesInstead(Array.from(e.target.files ?? []));
-                    e.target.value = '';
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-50/25 bg-ink-950/60 px-5 py-2.5 text-sm font-medium text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                >
-                  Add image files instead
-                </button>
-                <p className="text-center text-[11px] text-paper-100/70">
-                  On-device ML auto-crop — images never leave this device.
-                </p>
-                {/* Review-CTA slot: ALWAYS reserved at a fixed min-height so
-                    the first capture never grows the overlay (and never moves
-                    anything above it). The button itself stays queue-gated
-                    per the E2E contract. */}
-                <div className="flex min-h-[52px] items-center justify-center">
-                  {queue.length > 0 && (
-                    <button
-                      type="button"
-                      data-review-cta
-                      onClick={() => goToReview()}
-                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-paper-50 px-5 py-2.5 text-sm font-medium text-ink-900 transition-colors hover:bg-paper-200"
-                    >
-                      {`View ${queue.length} pages`}
-                    </button>
-                  )}
-                </div>
-              </div>
+              {/* Hidden file input: the sheet's Import row + the fallback
+                  card share it (files stay on-device). Always mounted. */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+                multiple
+                className="hidden"
+                aria-label="Add image files instead"
+                onChange={(e) => {
+                  addFilesInstead(Array.from(e.target.files ?? []));
+                  e.target.value = '';
+                }}
+              />
             </div>
           </div>
         </>
@@ -2688,7 +2715,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       {phase === 'review' && current !== null && (
         <div
           data-scan-queue
-          className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]"
+          className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))]"
         >
           {preparing && (
             <div
@@ -2718,27 +2745,58 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               {cardError}
             </p>
           )}
-          {/* Pager beside the hero: prev/next page without any accept click. */}
-          <div className="flex items-center justify-between gap-2">
+          {/* Pager: minimal prev/next + dots. Labels stay pinned (‹/› glyphs
+              with EXACT sr-only labels, same pattern as the review card's
+              icon row); dots are additive 44px navigation. No accept click
+              anywhere. */}
+          <div className="flex items-center justify-center gap-1">
             <button
               type="button"
               data-page-prev
               aria-label="Go to previous page"
               disabled={safeIndex <= 0}
               onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
             >
-              Previous page
+              <span aria-hidden>‹</span>
+              <span className="sr-only">Previous page</span>
             </button>
+            <div
+              role="group"
+              aria-label="Pages"
+              className="flex min-w-0 flex-1 items-center justify-center gap-0 overflow-x-auto"
+            >
+              {queue.map((entry, i) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  data-page-dot={i}
+                  aria-label={`Go to page ${i + 1}`}
+                  aria-current={i === safeIndex}
+                  onClick={() => setReviewIndex(i)}
+                  className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
+                >
+                  <span
+                    aria-hidden
+                    className={`rounded-full transition-colors ${
+                      i === safeIndex
+                        ? 'h-2.5 w-2.5 bg-brass-400'
+                        : 'h-1.5 w-1.5 bg-ink-300 dark:bg-ink-600'
+                    }`}
+                  />
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               data-page-next
               aria-label="Go to next page"
               disabled={safeIndex >= queue.length - 1}
               onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
             >
-              Next page
+              <span aria-hidden>›</span>
+              <span className="sr-only">Next page</span>
             </button>
           </div>
           <ScanicReview
@@ -2764,7 +2822,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
           />
           {/* Review filmstrip (owned here — ScanicReview renders the single
-              card only): numbered thumbs jump to a page, + returns to camera. */}
+              card only): numbered thumbs jump to a page, + returns to camera.
+              Slim (h-12) with 44px targets kept. */}
           <div
             data-scan-filmstrip
             aria-label="Scanned pages"
@@ -2778,7 +2837,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
                 aria-current={i === safeIndex}
                 onClick={() => setReviewIndex(i)}
-                className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
+                className={`relative h-12 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
                   i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
                 }`}
               >
@@ -2804,7 +2863,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               data-scan-add
               aria-label="Back to camera"
               onClick={() => setPhase('camera')}
-              className="inline-flex h-14 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+              className="inline-flex h-12 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
             >
               + Add
             </button>
@@ -2835,7 +2894,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       )}
 
       {phase === 'done' && (
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] text-center">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))] text-center">
           <p className="font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
             {accepted.length > 0 ? 'All pages ready' : 'No pages kept'}
           </p>

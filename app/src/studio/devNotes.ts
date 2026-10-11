@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D52 minimal scanner redo',
+    date: '2026-10-11',
+    notes: [
+      'Camera is finder plus shutter plus count: flash, flip, mirror, camera pick, and capture mode live in one More sheet.',
+      'Status pill speaks only when actionable; the strip is a slim count bar with a reserved slot.',
+      'Review keeps the single-canvas hero with a minimal pager, slim filmstrip, and Next plus Discard bar.',
+    ],
+  },
+  {
     build: 'D51 ML + viewfinder phase 1',
     date: '2026-10-11',
     notes: [

@@ -284,7 +284,8 @@ describe('viewfinder', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     expect(q('[data-finder-frame]')).toBeTruthy();
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    // Minimal finder: a quiet Manual idle renders NO status pill.
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
     const video = document.querySelector(
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
@@ -300,12 +301,13 @@ describe('viewfinder', () => {
     expect(layer.className).toContain('inset-0');
     expect(layer.className).not.toMatch('aspect-');
     expect(layer.className).not.toMatch('max-w');
-    // Floating chrome: top + bottom scrims fade from ink-950, pointer-events
-    // pass through except on the controls themselves.
+    // Floating chrome: the bottom scrim fades from ink-950 and the top bar
+    // floats its own pills (no top gradient — Close/title/More carry their
+    // own scrim skins). Pointer-events pass through except on controls.
     const scrims = Array.from(document.querySelectorAll('[data-scanner-root] div')).filter((d) =>
       d.className.includes('from-ink-950'),
     );
-    expect(scrims.length).toBeGreaterThanOrEqual(2);
+    expect(scrims.length).toBeGreaterThanOrEqual(1);
     for (const s of scrims) expect(s.className).toContain('pointer-events-none');
     expect(scrims.some((d) => d.className.includes('to-transparent'))).toBe(true);
   });
@@ -340,45 +342,38 @@ describe('viewfinder', () => {
 });
 
 describe('zero layout shift', () => {
-  function ctaSlot(): HTMLElement {
-    const slot = Array.from(document.querySelectorAll('div')).find((d) =>
-      d.className.includes('min-h-[52px]'),
-    );
-    if (!slot) throw new Error('missing review-CTA slot');
-    return slot as HTMLElement;
+  function stripSlot(): HTMLElement {
+    // The reserved strip slot: fixed height, always mounted (F-15).
+    return q('[data-scan-strip]');
   }
 
-  it('keeps the floating filmstrip, full-bleed layer, and controls fixed across the first capture', async () => {
+  it('keeps the reserved strip slot, full-bleed layer, and controls fixed across the first capture', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
 
-    // Overlay invariants BEFORE any page exists: the floating filmstrip is
-    // always rendered at a fixed height (never collapses when empty), and
-    // the viewfinder is an unboxed full-bleed layer.
-    const stripClass = q('[data-scan-strip]').className;
-    expect(stripClass).toContain('h-16');
-    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
+    // Minimal invariants BEFORE any page exists: the strip slot is always
+    // rendered at a fixed height but shows nothing visible, and the
+    // viewfinder is an unboxed full-bleed layer.
+    const stripClass = stripSlot().className;
+    expect(stripClass).toContain('h-12');
+    expect(stripSlot().textContent).toBe('');
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
 
     const layerClass = q('[data-viewfinder]').className;
     expect(layerClass).toContain('inset-0');
     expect(layerClass).not.toMatch('aspect-');
-
-    // The review-CTA slot is reserved even with an empty queue (the button
-    // itself stays queue-gated per the E2E contract).
-    const reservedClass = ctaSlot().className;
-    expect(document.querySelector('[data-review-cta]')).toBeNull();
 
     // First capture: enqueue a page while staying on the camera view.
     injectFiles(photo('a.jpg', [1, 2]));
     await findQ('[data-review-cta]');
 
     // The overlay must not move: same layers, same classes, zero shift.
-    expect(q('[data-scan-strip]').className).toBe(stripClass);
+    expect(stripSlot().className).toBe(stripClass);
     expect(q('[data-viewfinder]').className).toBe(layerClass);
-    expect(ctaSlot().className).toBe(reservedClass);
-    // The CTA rides inside its reserved slot — present, slot unchanged.
-    expect(q('[data-review-cta]').parentElement?.className).toBe(reservedClass);
+    // The slim count bar rides inside its reserved slot.
+    expect(q('[data-review-cta]').parentElement).toBe(stripSlot());
+    expect(q('[data-review-cta]').textContent).toBe('View 1 pages');
   });
 });
 
@@ -761,22 +756,23 @@ describe('capture mode + gallery cluster', () => {
     );
   });
 
-  it('voices hold-steady in Auto mode and stays quiet in Manual', async () => {
+  it('shows no pill in Manual idle, voices hold-steady in Auto mode', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    // Minimal finder: quiet Manual idle renders NO pill.
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
     fireEvent.click(screen.getByText('Auto capture', { exact: true }));
     expect(q('[data-finder-status]').textContent).toBe('Hold steady over the page');
     fireEvent.click(screen.getByText('Manual', { exact: true }));
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
   });
 
   it('keeps the shutter instant and queue-only: no worker call, captured flash, back to quiet', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
     injectFiles(photo('a.jpg', [9]));
     await findQ('[data-review-cta]');
     // The entry parks `queued` with its photo thumb: never-resolving ML
@@ -785,13 +781,11 @@ describe('capture mode + gallery cluster', () => {
     expect(q('[data-finder-status]').textContent).toBe('Captured — keep shooting');
     await new Promise((r) => setTimeout(r, 200));
     expect(mockDetect).not.toHaveBeenCalled();
-    // Queued thumbs show the photo immediately with no … overlay.
-    const strip = q('[data-scan-strip]');
-    expect(strip.querySelector('img')).not.toBeNull();
-    expect(strip.textContent).not.toContain('…');
+    // The slim count bar carries the queue — no per-page thumbs on camera.
+    expect(q('[data-review-cta]').textContent).toBe('View 1 pages');
     // The flash is brief: back to quiet without any action.
     await new Promise((r) => setTimeout(r, 1000));
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
   });
 
   it('flashes Captured for 900ms after enqueue, never a Scanning dwell', async () => {
@@ -806,8 +800,7 @@ describe('capture mode + gallery cluster', () => {
     expect(q('[data-finder-status]').textContent).toBe('Captured — keep shooting');
     expect(q('[data-finder-status]').textContent).not.toMatch(/Scanning/);
     await new Promise((r) => setTimeout(r, 1100));
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
-    expect(q('[data-finder-status]').textContent).not.toMatch(/Scanning/);
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
   });
 });
 
@@ -880,7 +873,7 @@ describe('deferred review drain', () => {
       expect(document.querySelector('[data-scan-queue]')).toBeNull();
     });
     expect(q('[data-review-cta]').textContent).toBe('View 2 pages');
-    expect(q('[data-scan-strip]').querySelectorAll('img').length).toBe(2);
+    expect(q('[data-gallery-count]').textContent).toBe('2');
     // …and re-entering review re-drains the interrupted pages.
     fireEvent.click(q('[data-review-cta]'));
     await findQ('[data-review-preparing]');
@@ -983,7 +976,9 @@ describe('review filmstrip + batch bar', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-scan-queue]')).toBeNull();
     });
-    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
+    // Back on the empty reserved slot: no CTA, nothing visible.
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
+    expect(q('[data-scan-strip]').textContent).toBe('');
   });
 
   it('[data-scan-add] returns to the camera without losing the queue', async () => {
@@ -1011,10 +1006,11 @@ describe('implicit accept navigation', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(screen.getByText('Discard', { exact: true }));
-    // The single strip lives in the camera overlay: wait for the return to
-    // the camera phase, then the empty slot reads back.
+    // The reserved strip slot lives in the camera overlay: wait for the
+    // return to the camera phase, then the empty slot reads back.
     const strip = await findQ('[data-scan-strip]');
-    expect(strip.textContent).toMatch(/No pages yet/);
+    expect(strip.textContent).toBe('');
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
   });
 });
 
@@ -1594,16 +1590,20 @@ describe('camera-phase chrome (slim top bar)', () => {
     expect(topbar).not.toBe(finder);
     expect(finder.contains(topbar)).toBe(false);
     expect(topbar.contains(finder)).toBe(false);
-    // Top bar stacks vertically (slim row + select row below it).
+    // Top bar stacks vertically (Close/title/More row + sheet below it).
     expect(topbar.className).toMatch('flex-col');
-    // Finder frame carries top clearance below both chrome rows via the
+    // Finder frame carries top clearance below the slim chrome via the
     // `--finder-clear` CSS var (responsive override on the root) — never a
     // hardcoded pt- class beside stacking notes.
     expect(finder.className).toMatch('pt-[var(--finder-clear)]');
     expect(finder.className).not.toMatch('pt-36');
-    expect(q('[data-scanner-root]').className).toMatch('[--finder-clear:9rem]');
-    // The status pill rides the same var.
+    expect(q('[data-scanner-root]').className).toMatch('[--finder-clear:5.5rem]');
+    // Minimal finder: quiet Manual idle renders NO status pill; Auto mode
+    // voices hold-steady on the same var.
+    expect(document.querySelector('[data-finder-status]')).toBeNull();
+    fireEvent.click(screen.getByText('Auto capture', { exact: true }));
     expect(q('[data-finder-status]').className).toMatch('top-[var(--finder-clear)]');
+    expect(q('[data-finder-status]').textContent).toBe('Hold steady over the page');
     // Camera select lives in its own compact row below the top bar,
     // never inside (over) the finder frame.
     const selectRow = q('[data-camera-select-row]');
@@ -1614,26 +1614,27 @@ describe('camera-phase chrome (slim top bar)', () => {
     expect(finder.contains(select)).toBe(false);
   });
 
-  it('renders the camera select as a compact slim row (bounded, small text)', async () => {
+  it('renders the camera select as a full-width sheet row (44px, small text)', async () => {
     mockCameraWithCaps({});
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     const select = (await findQ('[data-camera-select]')) as HTMLSelectElement;
     expect(select.getAttribute('aria-label')).toBe('Choose camera');
-    // 44px target kept, compactness additive: small text + max-width bound.
+    // 44px target kept inside the sheet row: small text, full width.
     expect(select.className).toMatch('min-h-[44px]');
     expect(select.className).toMatch('text-xs');
-    expect(select.className).toMatch('max-w-');
+    expect(select.className).toMatch('w-full');
     expect(select.className).toMatch('camera-select-compact');
   });
 
-  it('docks the session strip in the bottom overlay cluster above the shutter row', async () => {
+  it('docks the reserved strip slot in the bottom overlay cluster above the shutter row', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     const strip = q('[data-scan-strip]');
-    // Compact floating filmstrip keeps its height contract.
-    expect(strip.className).toContain('h-16');
+    // Slim reserved slot keeps its height contract (empty shows nothing).
+    expect(strip.className).toContain('h-12');
+    expect(strip.textContent).toBe('');
     // Docked-bottom: an absolute bottom-0 ancestor carries the overlay.
     const dock = strip.closest('div.absolute');
     expect(dock).not.toBeNull();
@@ -1939,21 +1940,22 @@ describe('finder chrome hit-testing (L-24)', () => {
     expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
   });
 
-  it('keeps every docked control labelled with the mirror reason inline', async () => {
+  it('keeps review chrome to Close + title only (camera controls live in the camera sheet)', async () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
-    for (const el of chromeControls()) {
-      expect(el.className).toMatch('pointer-events-auto');
-    }
-    // Full control set in the docked variant too — no icon-only toggles.
+    // Single overlay chrome everywhere: Close + title, no More trigger, no
+    // camera controls in review (flash/flip/mirror/select/mode unmount with
+    // the camera phase — their hooks hold there).
     expect(screen.getByText('Close', { exact: true })).toBeTruthy();
-    expect(screen.getByText('Flash', { exact: true })).toBeTruthy();
-    expect(screen.getByText('Flip', { exact: true })).toBeTruthy();
-    expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
-    expect(screen.getByLabelText('Choose camera')).toBeTruthy();
-    // Back-camera mirror reason is inline text, never tooltip-only.
-    expect(q('[data-mirror-note]').textContent).toBe('Mirror applies to the front camera only');
-    expect((q('[data-mirror-toggle]') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Scan documents', { exact: true })).toBeTruthy();
+    expect(document.querySelector('[data-scan-more]')).toBeNull();
+    expect(document.querySelector('[data-scan-sheet]')).toBeNull();
+    expect(document.querySelector('[data-mirror-toggle]')).toBeNull();
+    expect(document.querySelector('[data-camera-select]')).toBeNull();
+    expect(document.querySelector('[data-scan-mode]')).toBeNull();
+    expect(screen.queryByLabelText('Toggle torch')).toBeNull();
+    expect(screen.queryByLabelText('Switch camera')).toBeNull();
+    expect(document.querySelector('[data-mirror-note]')).toBeNull();
   });
 });
 
@@ -1980,5 +1982,188 @@ describe('review chrome safe-area + reduced motion', () => {
     const dot = banner.querySelector('span[aria-hidden]') as HTMLElement | null;
     expect(dot?.className).toMatch('animate-pulse');
     expect(dot?.className).toMatch('motion-reduce:animate-none');
+  });
+});
+
+describe('overflow sheet (More)', () => {
+  function openSheet() {
+    const more = q('[data-scan-more]');
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(more);
+    expect(q('[data-scan-more]').getAttribute('aria-expanded')).toBe('true');
+    expect(q('[data-scan-sheet]').className).not.toMatch('hidden');
+  }
+
+  it('hides secondary controls in one sheet while hooks stay mounted', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // Camera chrome is Close + title + More only.
+    expect(screen.getByText('Close', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Scan documents', { exact: true })).toBeTruthy();
+    expect(screen.getByText('More', { exact: true })).toBeTruthy();
+    // Every secondary hook mounts with the camera phase (panel hidden).
+    expect(q('[data-scan-sheet]').className).toMatch('hidden');
+    for (const sel of [
+      '[data-mirror-toggle]',
+      '[data-camera-select]',
+      '[data-camera-select-row]',
+      '[data-scan-mode]',
+      '[data-mirror-note]',
+    ]) {
+      expect(document.querySelector(sel)).not.toBeNull();
+    }
+    // Labels keep L-24 visibility inside the sheet rows.
+    for (const label of ['Flash', 'Flip', 'Mirror', 'Manual', 'Auto capture']) {
+      expect(screen.getByText(label, { exact: true })).toBeTruthy();
+    }
+    openSheet();
+    // Rows are 44px labeled targets.
+    for (const el of [
+      screen.getByLabelText('Toggle torch'),
+      screen.getByLabelText('Switch camera'),
+      q('[data-mirror-toggle]'),
+    ]) {
+      expect(el.className).toMatch('min-h-[44px]');
+      expect(el.className).toMatch('pointer-events-auto');
+    }
+    // The sheet carries the single honest line.
+    expect(
+      screen.getByText('On-device ML auto-crop — images never leave this device.'),
+    ).toBeTruthy();
+  });
+
+  it('toggles closed via More again and via Escape', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    openSheet();
+    fireEvent.click(q('[data-scan-more]'));
+    expect(q('[data-scan-more]').getAttribute('aria-expanded')).toBe('false');
+    expect(q('[data-scan-sheet]').className).toMatch('hidden');
+    // Hooks still hold while closed.
+    expect(document.querySelector('[data-scan-mode]')).not.toBeNull();
+    openSheet();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(q('[data-scan-more]').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('Escape with a closed sheet exits the scanner', async () => {
+    mockLiveCamera();
+    const onExit = vi.fn();
+    render(<ScanicCapture onCommit={() => undefined} onExit={onExit} />);
+    await findQ('[data-scan-capture]');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it('switches Manual/Auto from inside the sheet', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const group = q('[data-scan-mode]');
+    expect(group.getAttribute('role')).toBe('group');
+    expect(screen.getByText('Manual', { exact: true }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByText('Auto capture', { exact: true }));
+    expect(screen.getByText('Auto capture', { exact: true }).getAttribute('aria-pressed')).toBe(
+      'true',
+    );
+    expect(q('[data-finder-status]').textContent).toBe('Hold steady over the page');
+  });
+});
+
+describe('minimal camera cluster', () => {
+  it('renders ONE 72px primary shutter, bottom-center', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    const shutter = (await findQ('[data-scan-capture]')) as HTMLButtonElement;
+    expect(shutter.getAttribute('aria-label')).toBe('Capture page');
+    expect(shutter.className).toMatch('h-[72px]');
+    expect(shutter.className).toMatch('w-[72px]');
+    // Exactly one shutter on the finder.
+    expect(document.querySelectorAll('[data-scan-capture]').length).toBe(1);
+  });
+
+  it('Space fires the shutter when live with a closed sheet', async () => {
+    // Sensor-native stub: jsdom has no ImageCapture and no video frames,
+    // so the shutter resolves through the takePhoto path directly.
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        constructor(_track: unknown) {
+          void _track;
+        }
+        async takePhoto() {
+          return new Blob(['space-bytes'], { type: 'image/jpeg' });
+        }
+      },
+    );
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // Space on a bare finder: the queue-only shutter parks (the window
+    // handler skips focused controls, where native activation covers it).
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+    await findQ('[data-review-cta]');
+    expect(q('[data-review-cta]').textContent).toBe('View 1 pages');
+  });
+
+  it('Space never fires while the sheet is open', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    fireEvent.click(q('[data-scan-more]'));
+    expect(q('[data-scan-sheet]').className).not.toMatch('hidden');
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(document.querySelector('[data-review-cta]')).toBeNull();
+  });
+
+  it('gallery count entry sits bottom-right and jumps to review at the end', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect((q('[data-scan-gallery]') as HTMLButtonElement).disabled).toBe(true);
+    injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
+    const gallery = await findQ('[data-scan-gallery]');
+    expect((gallery as HTMLButtonElement).disabled).toBe(false);
+    expect(q('[data-gallery-count]').textContent).toBe('2');
+    // Bottom-right: the gallery follows the shutter in the cluster row.
+    const row = gallery.parentElement as HTMLElement;
+    const shutterEl = q('[data-scan-capture]') as HTMLElement;
+    expect(row.contains(shutterEl)).toBe(true);
+    expect(Array.from(row.children).indexOf(gallery)).toBeGreaterThan(
+      Array.from(row.children).indexOf(shutterEl),
+    );
+    fireEvent.click(gallery);
+    expect(await findQ('[data-scan-queue]')).toBeTruthy();
+    expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+  });
+});
+
+describe('review pager dots', () => {
+  it('renders one 44px dot per page with aria-current, tap jumps', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    const dots = Array.from(document.querySelectorAll('[data-page-dot]'));
+    expect(dots.length).toBe(2);
+    for (const [i, dot] of dots.entries()) {
+      expect((dot as HTMLElement).getAttribute('aria-label')).toBe(`Go to page ${i + 1}`);
+      expect((dot as HTMLElement).className).toMatch('min-h-[44px]');
+      expect((dot as HTMLElement).className).toMatch('min-w-[44px]');
+    }
+    expect(dots[0].getAttribute('aria-current')).toBe('true');
+    expect(dots[1].getAttribute('aria-current')).toBe('false');
+    // Pager copy stays pinned (‹/› glyphs + EXACT sr-only labels).
+    expect(q('[data-page-prev]').textContent).toContain('Previous page');
+    expect(q('[data-page-next]').textContent).toContain('Next page');
+    fireEvent.click(dots[1] as HTMLElement);
+    await screen.findByText('Page 2 of 2');
+    await waitFor(() => {
+      expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('2 of 2 viewed');
+    });
   });
 });
