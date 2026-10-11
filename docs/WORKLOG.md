@@ -6,7 +6,7 @@ Chronological record of meaningful development events. Each entry records object
 
 - **Freshness rule followed.** Version 1.10.2 → 1.10.3, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.10.3 entry.
 - **Verification (observed).** tsc/eslint/prettier clean; 412/412 studio smoke (8 new F-23 tests); build green (44 entries / 7831.44 KiB). E2E deferred.
-- **Deploy.** `dev` alias live-verified below. Production (`main`) untouched.
+- **Deploy.** `699a7ce` → `wrangler pages deploy dist --branch dev` → `https://ccb2e0d1.folio-pdf.pages.dev` (alias `dev.folio-pdf.pages.dev` verified serving `/assets/index-ydYGM36m.js`, matches local build). Production (`main`) untouched.
 - **Remaining.** Field sharpness on the user's phone; canonical E2E laptop-side.
 
 ## 2026-10-11 — Split thumbnail sharpness fix (F-23, L-26)
