@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  APPLIED_BUILD_FLAG,
   APPLIED_FLAG,
+  APPLIED_FROM_FLAG,
   classifyEnv,
   createUpdateManager,
+  platformNeedsFullClose,
   statusTextFor,
   type RegistrarHooks,
   type UpdateEnv,
@@ -66,7 +69,39 @@ describe('statusTextFor', () => {
 describe('createUpdateManager', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    sessionStorage.clear();
   });
+
+  function stubUserAgent(value: string): () => void {
+    const descriptor = Object.getOwnPropertyDescriptor(window.navigator, 'userAgent');
+    Object.defineProperty(window.navigator, 'userAgent', { value, configurable: true });
+    return () => {
+      if (descriptor) {
+        Object.defineProperty(window.navigator, 'userAgent', descriptor);
+      } else {
+        delete (window.navigator as unknown as Record<string, unknown>).userAgent;
+      }
+    };
+  }
+
+  function stubStandaloneDisplay(matches: boolean): () => void {
+    const original = window.matchMedia;
+    const impl = (query: string) =>
+      ({
+        matches: matches && query === '(display-mode: standalone)',
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList;
+    window.matchMedia = impl as unknown as typeof window.matchMedia;
+    return () => {
+      if (original === undefined) {
+        delete (window as unknown as Record<string, unknown>).matchMedia;
+      } else {
+        window.matchMedia = original;
+      }
+    };
+  }
 
   function fakeRegistrar(hooks: RegistrarHooks, impl?: Partial<{ update: () => Promise<void> }>) {
     return {
@@ -288,7 +323,15 @@ describe('createUpdateManager', () => {
       settleWaitMs: 5000,
     });
     expect(Object.keys(manager.snapshot()).sort()).toEqual(
-      ['canCheck', 'checking', 'log', 'phase', 'statusText', 'updateAvailable'].sort(),
+      [
+        'canCheck',
+        'checking',
+        'log',
+        'phase',
+        'statusText',
+        'updateAvailable',
+        'updatedFrom',
+      ].sort(),
     );
     const check = manager.checkForUpdates(true);
     await vi.advanceTimersByTimeAsync(300);
@@ -453,9 +496,59 @@ describe('createUpdateManager', () => {
     expect(update).toHaveBeenCalledTimes(2);
   });
 
-  it('post-reload worker signal names the iOS full-close recovery (no reload loop)', async () => {
+  it('platformNeedsFullClose: standalone, navigator.standalone, and iOS UA gate the full-close copy', () => {
+    // jsdom default is a desktop browser: no full-close copy.
+    expect(platformNeedsFullClose()).toBe(false);
+    const restoreUA = stubUserAgent(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    );
+    try {
+      expect(platformNeedsFullClose()).toBe(true);
+    } finally {
+      restoreUA();
+    }
+    expect(platformNeedsFullClose()).toBe(false);
+    const restoreStandalone = stubStandaloneDisplay(true);
+    try {
+      expect(platformNeedsFullClose()).toBe(true);
+    } finally {
+      restoreStandalone();
+    }
+    expect(platformNeedsFullClose()).toBe(false);
+  });
+
+  it('post-reload worker signal on iOS names the full-close recovery (no reload loop)', async () => {
+    const restoreUA = stubUserAgent(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+    );
+    try {
+      let onNeedRefresh: (() => void) | undefined;
+      sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+      const manager = createUpdateManager({
+        register: (h) => {
+          onNeedRefresh = h.onNeedRefresh;
+          return Promise.resolve(fakeRegistrar(h));
+        },
+        env: () => onlineHost,
+        autoCheckDelayMs: -1,
+        settleWaitMs: 100,
+      });
+      manager.init();
+      expect(sessionStorage.getItem(APPLIED_FLAG)).toBeNull();
+      onNeedRefresh?.();
+      expect(manager.snapshot().phase).toBe('update-available');
+      expect(manager.snapshot().log.join('\n')).toMatch(/fully close and reopen/);
+    } finally {
+      restoreUA();
+    }
+  });
+
+  it('post-reload worker signal on desktop names closing other tabs (no reload loop)', async () => {
+    // Desktop default (jsdom UA, no standalone): the old worker is usually
+    // held by another open Folio tab, not by the OS.
     let onNeedRefresh: (() => void) | undefined;
     sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+    sessionStorage.setItem(APPLIED_FROM_FLAG, '1.9.7');
     const manager = createUpdateManager({
       register: (h) => {
         onNeedRefresh = h.onNeedRefresh;
@@ -464,11 +557,135 @@ describe('createUpdateManager', () => {
       env: () => onlineHost,
       autoCheckDelayMs: -1,
       settleWaitMs: 100,
+      readVersion: () => '1.9.7',
     });
     manager.init();
     expect(sessionStorage.getItem(APPLIED_FLAG)).toBeNull();
+    // Same version: proof stays armed, no verified-new line yet.
+    expect(manager.snapshot().log.join('\n')).not.toMatch(/Updated /);
     onNeedRefresh?.();
     expect(manager.snapshot().phase).toBe('update-available');
-    expect(manager.snapshot().log.join('\n')).toMatch(/fully close and reopen/);
+    expect(manager.snapshot().log.join('\n')).toMatch(/close other Folio tabs/);
+    expect(manager.snapshot().log.join('\n')).not.toMatch(/fully close and reopen/);
+  });
+
+  it('post-reload proof: a version change logs Updated old → new and clears the banner', async () => {
+    sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+    sessionStorage.setItem(APPLIED_FROM_FLAG, '1.2.3');
+    const manager = createUpdateManager({
+      register: (h) => Promise.resolve(fakeRegistrar(h)),
+      env: () => onlineHost,
+      autoCheckDelayMs: -1,
+      settleWaitMs: 100,
+      readVersion: () => '1.9.7',
+    });
+    manager.init();
+    expect(sessionStorage.getItem(APPLIED_FLAG)).toBeNull();
+    expect(sessionStorage.getItem(APPLIED_FROM_FLAG)).toBeNull();
+    expect(manager.snapshot().phase).toBe('idle');
+    expect(manager.snapshot().updateAvailable).toBe(false);
+    expect(manager.snapshot().updatedFrom).toBe('1.2.3');
+    expect(manager.snapshot().log.join('\n')).toMatch(/Updated 1\.2\.3 → 1\.9\.7/);
+  });
+
+  it('post-reload proof: a build-time change verifies the update at the same version', async () => {
+    sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+    sessionStorage.setItem(APPLIED_FROM_FLAG, '1.9.7');
+    sessionStorage.setItem(APPLIED_BUILD_FLAG, '2026-10-04T00:00:00.000Z');
+    const manager = createUpdateManager({
+      register: (h) => Promise.resolve(fakeRegistrar(h)),
+      env: () => onlineHost,
+      autoCheckDelayMs: -1,
+      settleWaitMs: 100,
+      readVersion: () => '1.9.7',
+      readBuildTime: () => '2026-10-05T00:00:00.000Z',
+    });
+    manager.init();
+    expect(manager.snapshot().phase).toBe('idle');
+    expect(manager.snapshot().updateAvailable).toBe(false);
+    expect(manager.snapshot().log.join('\n')).toMatch(/Updated to the latest build/);
+  });
+
+  it('applyUpdate persists the running version beside the applied flag', async () => {
+    const reload = vi.fn();
+    const manager = createUpdateManager({
+      register: () =>
+        Promise.resolve({ update: () => Promise.resolve(), applyUpdate: () => Promise.resolve() }),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      reload,
+      readVersion: () => '1.9.7',
+      readBuildTime: () => '2026-10-05T00:00:00.000Z',
+      waitForActivation: () => Promise.resolve(),
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    await manager.applyUpdate();
+    expect(sessionStorage.getItem(APPLIED_FROM_FLAG)).toBe('1.9.7');
+    expect(sessionStorage.getItem(APPLIED_BUILD_FLAG)).toBe('2026-10-05T00:00:00.000Z');
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('applyUpdate gates reload on worker activation (never reloads early)', async () => {
+    let releaseActivation!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseActivation = resolve;
+    });
+    const applyUpdate = vi.fn(() => Promise.resolve());
+    const reload = vi.fn();
+    const manager = createUpdateManager({
+      register: () => Promise.resolve({ update: () => Promise.resolve(), applyUpdate }),
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      reload,
+      waitForActivation: () => gate,
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    const applying = manager.applyUpdate();
+    // Skip-waiting posted, but the activation gate is still held: the page
+    // must stay put (an early reload would be served by the old worker).
+    await vi.advanceTimersByTimeAsync(10);
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(manager.snapshot().phase).toBe('applying');
+    expect(reload).not.toHaveBeenCalled();
+    releaseActivation();
+    await applying;
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('activation timeout unfreezes the UI with a retry (unlatch, no reload)', async () => {
+    let onNeedRefresh: (() => void) | undefined;
+    const reload = vi.fn();
+    const manager = createUpdateManager({
+      register: (h) => {
+        onNeedRefresh = h.onNeedRefresh;
+        return Promise.resolve({
+          update: () => Promise.resolve(),
+          applyUpdate: () => Promise.resolve(),
+        });
+      },
+      env: () => onlineHost,
+      settleWaitMs: 100,
+      applyTimeoutMs: 1000,
+      reload,
+      // The new worker never takes control: the gate must time out loudly.
+      waitForActivation: () => new Promise<void>(() => {}),
+    });
+    const check = manager.checkForUpdates(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await check;
+    onNeedRefresh?.();
+    const applying = manager.applyUpdate();
+    await vi.advanceTimersByTimeAsync(1500);
+    await applying;
+    expect(manager.snapshot().phase).toBe('update-available');
+    expect(manager.snapshot().log.join('\n')).toMatch(/Activation failed/);
+    expect(manager.snapshot().log.join('\n')).toMatch(/timed out/);
+    expect(reload).not.toHaveBeenCalled();
+    // The latch released: a retry is possible (still latched per attempt only).
+    expect(manager.snapshot().canCheck).toBe(false);
   });
 });

@@ -17,6 +17,61 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D48 continue-flow handoff',
+    date: '2026-10-11',
+    notes: [
+      'Post-completion fork: Use-in-another-tool picker vs Download branch behind a toggle.',
+      'By-reference single-slot handoff (PendingTransfer); Images is source-only, never a target.',
+      'Split offers per-part plus all-as-merge; source names stay verbatim.',
+    ],
+  },
+  {
+    build: 'D47 deferred review-time detection',
+    date: '2026-10-06',
+    notes: [
+      'Shutter is queue-only: instant capture with no decode or ML per tap, finder stays idle.',
+      'ML drains deferred at review entry over K parallel lanes behind a blocking Preparing overlay with Cancel.',
+      'A miss still keeps the full frame; eager warp waits for ready.',
+    ],
+  },
+  {
+    build: 'v1.10.1 release',
+    date: '2026-10-05',
+    notes: [
+      'Detection is ML-only: a miss keeps the full frame, never a guessed crop.',
+      'ML assets back in the PWA precache; offline-first after first open.',
+      'Classical stays on the wire and type but never runs.',
+    ],
+  },
+  {
+    build: 'v1.10.0 release',
+    date: '2026-10-05',
+    notes: [
+      'Interaction-performance pass; no behavior changes, engine contract untouched.',
+      'Images: 256px JPEG thumbs at import, modal keyed by page id, rotate via the encode worker.',
+      'Scan: detection plus warp on the ScanicClient worker, single warp per Apply with cancel-supersede.',
+      'PDF tools close docs on remove (leak fix) with tiered thumbs; engine shares extract tables in place.',
+    ],
+  },
+  {
+    build: 'v1.9.7 release',
+    date: '2026-10-05',
+    notes: [
+      'About App-updates repair: prompt registration with user-gated activation.',
+      'Bounded 15s update check; missing registration is an error, failed activation retries.',
+      'Offline stays checkable with resurface on return; suite 462/462.',
+    ],
+  },
+  {
+    build: 'v1.9.6 release',
+    date: '2026-10-05',
+    notes: [
+      'Test-only wave, no shipped code.',
+      '14 pure-logic test files run under node instead of jsdom.',
+      'Suite 448/448; wall time about 270s down to about 206s.',
+    ],
+  },
+  {
     build: 'v1.9.5 release',
     date: '2026-10-04',
     notes: ['Scanic ML scanner to production.', 'Main-lens default + JPEG warp.', 'Version 1.9.5.'],

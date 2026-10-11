@@ -1,6 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { usePwaUpdate } from './usePwaUpdate';
+
+/**
+ * Scroll to the About updates card (anchored as #app-updates).
+ * Guarded: the anchor may not exist yet — never throw, never crash.
+ */
+function scrollToUpdatesCard() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const card = document.getElementById('app-updates');
+  card?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+  const heading = card?.querySelector('h2') ?? card;
+  if (heading instanceof HTMLElement) {
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: true });
+  }
+}
 
 /**
  * Global update prompt. Renders only while a worker update waits —
@@ -25,6 +41,17 @@ export default function UpdateBanner() {
   }, [state.updateAvailable]);
   const busy = useBusyGuard();
   const applying = state.phase === 'applying';
+  // Same-hash tap is a no-op for hash routing (no hashchange, so
+  // useHashRoute never moves) — intercept it and scroll to the updates
+  // card instead. Expansion is handled by the About effect; cross-route
+  // taps use default hash navigation and the About mount effect scrolls.
+  const handleReviewClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (typeof window === 'undefined') return;
+    if (window.location.hash.endsWith('#/about')) {
+      e.preventDefault();
+      scrollToUpdatesCard();
+    }
+  };
   // Enter/exit is an opacity-only fade (180ms): the banner conditionally
   // mounts, so AnimatePresence plays both directions. Dismiss sets state
   // directly — unmount never waits on JS. No slide: banner motion stays
@@ -43,7 +70,8 @@ export default function UpdateBanner() {
           <div className="mx-auto flex max-w-xl items-center gap-2 rounded-2xl border border-brass-400/40 bg-ink-900/95 px-4 py-3 shadow-soft backdrop-blur dark:bg-paper-100 dark:text-ink-900 text-paper-50">
             <a
               href="#/about"
-              className="flex min-w-0 flex-1 items-center gap-3"
+              onClick={handleReviewClick}
+              className="flex min-w-0 flex-1 items-center gap-3 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
               aria-label={busy ? 'Update ready — review after your current task' : undefined}
             >
               <span className="min-w-0 flex-1">
@@ -67,7 +95,7 @@ export default function UpdateBanner() {
               type="button"
               onClick={() => setDismissed(true)}
               aria-label="Dismiss update notice"
-              className="shrink-0 rounded-full px-3 py-1 text-sm opacity-70 transition-opacity hover:opacity-100 hover:bg-white/10"
+              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-full text-sm opacity-70 transition-opacity hover:opacity-100 hover:bg-white/10"
             >
               ✕
             </button>

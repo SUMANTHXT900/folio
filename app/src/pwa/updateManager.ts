@@ -16,6 +16,14 @@
  * `'autoUpdate'` the client never calls `onNeedRefresh` (it activates in
  * the background and force-reloads, and `updateSW(true)` is a skip-waiting
  * no-op) — the whole UI below would go dead. See `vite.config.ts`.
+ *
+ * Apply gates the reload on activation: after skip-waiting it waits for the
+ * new worker to control the page (`controllerchange`, bounded by
+ * `applyTimeoutMs`) before reloading. Reloading earlier is served by the
+ * still-active OLD worker — no `clientsClaim` in the built `sw.js`, and old
+ * chunks stay alive via `cleanupOutdatedCaches: false` — the "reloaded but
+ * old" defect. Post-reload, the pre-apply version persisted beside
+ * `APPLIED_FLAG` proves whether the new build actually landed.
  */
 
 export type UpdatePhase =
@@ -39,6 +47,12 @@ export interface UpdateSnapshot {
   /** Newest-last diagnostic lines (capped), rendered in About. */
   log: string[];
   canCheck: boolean;
+  /**
+   * Pre-apply running version persisted at apply, consumed on next init.
+   * Optional so older snapshots stay assignable; always populated by the
+   * current manager (null when the version was never known).
+   */
+  updatedFrom?: string | null;
 }
 
 export interface UpdateEnv {
@@ -136,6 +150,17 @@ export interface UpdateManagerOptions {
   env?: () => UpdateEnv;
   /** Page reload used after activation. Injectable so tests never navigate. */
   reload?: () => void;
+  /**
+   * Waits until the new worker controls the page after skip-waiting.
+   * Default: one `navigator.serviceWorker` `controllerchange` (exactly-once,
+   * resolves at once where no Service Worker container exists, e.g. tests).
+   * Injectable so tests can hold or release the activation gate on demand.
+   */
+  waitForActivation?: () => Promise<void>;
+  /** Running version reader. Default: the `__FOLIO_VERSION__` Vite define. Injectable for tests. */
+  readVersion?: () => string | null;
+  /** Running build-time reader. Default: the `__FOLIO_BUILD_TIME__` Vite define. Injectable for tests. */
+  readBuildTime?: () => string | null;
   /** Silent launch-check delay. Zero/negative disables. */
   autoCheckDelayMs?: number;
   /** How long a manual check waits for the worker signal before calling it current. */
@@ -155,6 +180,10 @@ const APPLY_TIMEOUT_DEFAULT_MS = 8000;
 const RESURFACE_DEFAULT_MS = 60 * 60 * 1000;
 /** sessionStorage flag: set before the apply-reload, read on next launch. Exported for tests. */
 export const APPLIED_FLAG = 'folio-update-applied-at';
+/** sessionStorage slot beside APPLIED_FLAG: the running version at apply time. Exported for tests. */
+export const APPLIED_FROM_FLAG = 'folio-update-applied-from';
+/** sessionStorage slot beside APPLIED_FLAG: the running build time at apply time. Exported for tests. */
+export const APPLIED_BUILD_FLAG = 'folio-update-applied-build';
 
 export function statusTextFor(phase: UpdatePhase): string {
   switch (phase) {
@@ -179,6 +208,68 @@ export function statusTextFor(phase: UpdatePhase): string {
     case 'error':
       return 'Update check failed — try again.';
   }
+}
+
+/** Running version from the Vite define. Null when unavailable (e.g. unit tests with no define). */
+function readVersionDefine(): string | null {
+  try {
+    return typeof __FOLIO_VERSION__ !== 'undefined' ? __FOLIO_VERSION__ : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Running build time from the Vite define. Null when unavailable (e.g. unit tests with no define). */
+function readBuildTimeDefine(): string | null {
+  try {
+    return typeof __FOLIO_BUILD_TIME__ !== 'undefined' ? __FOLIO_BUILD_TIME__ : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a worker update only sticks after the app is fully closed:
+ * installed (standalone display-mode), legacy iOS standalone, or any iOS
+ * user agent. Otherwise the old worker is usually held by another open
+ * Folio tab, and closing those tabs is enough. Exported for tests.
+ */
+export function platformNeedsFullClose(): boolean {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    try {
+      if (window.matchMedia('(display-mode: standalone)').matches) return true;
+    } catch {
+      // Probe failed: fall through to the remaining signals.
+    }
+  }
+  if (typeof navigator !== 'undefined') {
+    if ((navigator as Navigator & { standalone?: unknown }).standalone === true) return true;
+    if (typeof navigator.userAgent === 'string' && /iPad|iPhone|iPod/.test(navigator.userAgent)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolves once the newly activated worker controls this page
+ * (exactly-once `controllerchange`, per page load). Resolves at once where
+ * no Service Worker container exists. A skip-waiting post that already
+ * handed over control before this listener attaches also resolves at once
+ * instead of waiting for a change that already happened.
+ */
+function defaultWaitForActivation(): Promise<void> {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
+    return Promise.resolve();
+  }
+  const container = navigator.serviceWorker;
+  const previous = container.controller;
+  if (container.controller !== null && container.controller !== previous) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    container.addEventListener('controllerchange', () => resolve(), { once: true });
+  });
 }
 
 /** Rejects if `work` takes longer than `ms`. Timer via globalThis: works in workers/tests, not just windows. */
@@ -209,6 +300,9 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   const applyTimeoutMs = options.applyTimeoutMs ?? APPLY_TIMEOUT_DEFAULT_MS;
   const resurfaceIntervalMs = options.resurfaceIntervalMs ?? RESURFACE_DEFAULT_MS;
   const maxLog = options.maxLogLines ?? MAX_LOG_DEFAULT;
+  const waitForActivation = options.waitForActivation ?? defaultWaitForActivation;
+  const readVersion = options.readVersion ?? readVersionDefine;
+  const readBuildTime = options.readBuildTime ?? readBuildTimeDefine;
 
   let phase: UpdatePhase = 'unknown';
   let updateAvailable = false;
@@ -220,8 +314,12 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   let checkGen = 0;
   let lastCheckAt = 0;
   let applyLatched = false;
-  /** True when this launch follows our own apply-reload (iOS may still serve the old worker). */
+  /** True when this launch follows our own apply-reload but the version proof did not verify the new build. */
   let justReloadedForUpdate = false;
+  /** Pre-apply running version consumed at init; informational for the page load. */
+  let updatedFrom: string | null = null;
+  /** Exactly-once reload per page load: the manager's timed path contributes one navigation. */
+  let reloadFired = false;
   let cached: UpdateSnapshot | null = null;
   const listeners = new Set<() => void>();
 
@@ -245,6 +343,13 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     emit();
   };
 
+  /** Reload exactly once: a throwing reload leaves the latch clear so a retry can still fire. */
+  const fireReloadOnce = () => {
+    if (reloadFired) return;
+    reloadFn();
+    reloadFired = true;
+  };
+
   const snapshot = (): UpdateSnapshot => {
     // Cached: useSyncExternalStore requires a stable reference between
     // emissions, or React loops forever. Invalidated on every emit().
@@ -255,6 +360,7 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         checking,
         statusText: statusTextFor(phase),
         log,
+        updatedFrom,
         // 'offline' stays checkable: it is the retry button once back online.
         // 'applying' stays locked (the apply path is latched, exactly-once).
         canCheck:
@@ -269,10 +375,20 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     updateAvailable = true;
     pushLog('Service worker reported a waiting update.');
     if (justReloadedForUpdate) {
-      // The apply-reload happened but the old worker is still in charge —
-      // the iOS standalone signature (worker updates only stick after the
-      // app is fully closed). Say so plainly instead of looping reloads.
-      pushLog('Still on the old version after reload — fully close and reopen the app to finish.');
+      // The apply-reload happened but the old worker is still in charge.
+      // Where to point the user depends on the platform: installed/iOS
+      // updates only stick after a full close, while on desktop the old
+      // worker is usually held by another open Folio tab. Never reloads
+      // here — that would loop.
+      if (platformNeedsFullClose()) {
+        pushLog(
+          'Still on the old version after reload — fully close and reopen the app to finish.',
+        );
+      } else {
+        pushLog(
+          'Still on the old version after reload — close other Folio tabs, then tap Apply again.',
+        );
+      }
       justReloadedForUpdate = false;
     }
     setPhase('update-available');
@@ -400,11 +516,12 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
   };
 
   /**
-   * One-tap apply: activates the waiting worker and reloads into it.
-   * Latched exactly-once per page load; a failed activation unfreezes the
-   * UI back to the waiting version with a retry instead of sticking on
-   * 'applying' forever (the previous `void applyUpdate()` had no error
-   * path at all — and under autoUpdate it was a silent no-op).
+   * One-tap apply: activates the waiting worker, waits until it controls
+   * this page, then reloads into it exactly once. Latched exactly-once per
+   * page load; a failed activation unfreezes the UI back to the waiting
+   * version with a retry instead of sticking on 'applying' forever (the
+   * previous `void applyUpdate()` had no error path at all — and under
+   * autoUpdate it was a silent no-op).
    */
   const applyUpdate = async (): Promise<void> => {
     const active = registrar;
@@ -423,13 +540,30 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
         applyTimeoutMs,
         'Activating the waiting worker',
       );
+      // Gate the reload on activation: the new worker must control this
+      // page before we navigate, or the early navigation is served by the
+      // still-active OLD worker ("reloaded but old"). Bounded by the same
+      // apply timeout; a timeout unlatches into the retry path below.
+      // Single timed path: the plugin client also reloads on its own
+      // controlling event, but both calls land in the same task and commit
+      // as one navigation, while this latch guarantees the manager
+      // contributes exactly one reload.
+      await withTimeout(
+        waitForActivation(),
+        applyTimeoutMs,
+        'Waiting for the new worker to take control',
+      );
       try {
         sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
+        const fromVersion = readVersion();
+        if (fromVersion !== null) sessionStorage.setItem(APPLIED_FROM_FLAG, fromVersion);
+        const fromBuild = readBuildTime();
+        if (fromBuild !== null) sessionStorage.setItem(APPLIED_BUILD_FLAG, fromBuild);
       } catch {
-        // Private mode / blocked storage: the iOS resume hint is skipped,
+        // Private mode / blocked storage: the resume hint is skipped,
         // the update itself still proceeds.
       }
-      reloadFn();
+      fireReloadOnce();
     } catch (error) {
       applyLatched = false;
       pushLog(
@@ -476,7 +610,26 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     try {
       if (sessionStorage.getItem(APPLIED_FLAG) !== null) {
         sessionStorage.removeItem(APPLIED_FLAG);
-        justReloadedForUpdate = true;
+        const fromVersion = sessionStorage.getItem(APPLIED_FROM_FLAG);
+        sessionStorage.removeItem(APPLIED_FROM_FLAG);
+        const fromBuild = sessionStorage.getItem(APPLIED_BUILD_FLAG);
+        sessionStorage.removeItem(APPLIED_BUILD_FLAG);
+        updatedFrom = fromVersion;
+        // Post-reload proof: did the reload actually land the new build?
+        // A version (or build-time) change verifies the update — log it and
+        // stand down. Anything else stays armed: a later worker signal means
+        // the old worker is still in charge (the still-old hint).
+        const nowVersion = readVersion();
+        const nowBuild = readBuildTime();
+        if (fromVersion !== null && nowVersion !== null && fromVersion !== nowVersion) {
+          pushLog(`Updated ${fromVersion} → ${nowVersion}.`);
+          justReloadedForUpdate = false;
+        } else if (fromBuild !== null && nowBuild !== null && fromBuild !== nowBuild) {
+          pushLog('Updated to the latest build (same version).');
+          justReloadedForUpdate = false;
+        } else {
+          justReloadedForUpdate = true;
+        }
       }
     } catch {
       // Blocked storage: skip the resume hint, nothing else changes.
