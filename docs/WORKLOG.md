@@ -2,6 +2,20 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — v1.10.3 Split sharpness deploy (F-23, bundle index-ydYGM36m.js)
+
+- **Freshness rule followed.** Version 1.10.2 → 1.10.3, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.10.3 entry.
+- **Verification (observed).** tsc/eslint/prettier clean; 412/412 studio smoke (8 new F-23 tests); build green (44 entries / 7831.44 KiB). E2E deferred.
+- **Deploy.** `dev` alias live-verified below. Production (`main`) untouched.
+- **Remaining.** Field sharpness on the user's phone; canonical E2E laptop-side.
+
+## 2026-10-11 — Split thumbnail sharpness fix (F-23, L-26)
+
+- **Roots.** List-tier backing (96–192 box) stretched 2–2.5× into Split grid tiles (111–180 CSS px) and far worse into the preview dialog, which rendered the list URL at up to 768 CSS px; decode check proved bytes, never fit.
+- **Fix.** `thumbGridBox()` in `folio.ts` (192 CSS px base × DPR, 192–400 cap); `usePageThumbs.load` 4th param stored per-hook so first/background/Show-all waves share one tier (default two-arg path untouched); Split loads grid tier, previews via `renderPreview` full-res borrow with thumb fallback + rendering note, tile imgs eager.
+- **Verification (observed).** tsc/eslint/prettier clean; Split 11/11 (3 new), hook 7/7 (2 new), folio 33/33 (3 new grid-box). Studio smoke + production build below. E2E deferred. Field sharpness pending the user's phone.
+- **Docs.** `BUGS.md` F-23 (Active), `LESSONS.md` L-26, STATUS scoped bullet.
+
 ## 2026-10-11 — Update simplification + v1.10.2 dev deploy (D50, bundle index-sFE0MxAh.js)
 
 - **Direction.** User: remove all update popups/confirms — one Update button in About, auto check + hard refresh on every open. D49 confirm flow deleted (`UpdateBanner.tsx` + test removed, banner unmounted from StudioApp, manager log/update-available phase gone); activation gate, proof, one-shot still-old note, and `_headers` kept invisibly.

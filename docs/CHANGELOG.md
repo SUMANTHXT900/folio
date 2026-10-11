@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.10.3 — Sharp Split thumbnails (`dev`, 2026-10-11)
+
+Split pick-grid tiles and the preview dialog rendered from the small list-tier backing store, upscaling 2–2.5× into tiles and far worse into the dialog (F-23). The grid now renders at a grid tier (192px base × DPR) and the preview borrows the full-res render with the thumb as fallback. Scoped verification only (full suite + E2E laptop-side).
+
 ## v1.10.2 — One-button updates (`dev`, 2026-10-11)
 
 The confirm-then-apply update flow (D49) is replaced with the simplest thing that works: one Update button in About plus an automatic check on every launch. Check → a found build activates and hard-reloads straight into it. No popups, no banners, no confirm step. The About card shows version plus build time on every host, and the release notes ride along, so "is this the latest?" is answerable from the page. Scoped verification only (full suite + E2E laptop-side).

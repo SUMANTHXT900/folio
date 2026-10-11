@@ -20,6 +20,12 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Why it matters.** Tab crashes and runaway memory on exactly the large files Folio promises to handle.
 - **Rule.** Windows (24 pages), concurrency 2, LRU URL cache (6 documents), canvas release on encode, MIME fallback chain (WebP → JPEG → PNG). Never materialize a whole huge document's thumbnails. Evidence: `folio.ts` thumbnail section; large-file E2E asserts 24 images for 2585 pages.
 
+## L-26 — Thumbnails must be rendered for their display size, not the smallest consumer
+
+- **Observation.** Every window rendered at the list tier (64 CSS px base) while the Split pick grid displays 111–180 CSS px tiles and its preview dialog up to 768 CSS px — a 2–2.5× upscale into tiles and far worse into the dialog (F-23). The decode check (`naturalWidth > 0`) proved bytes, never backing-store fit.
+- **Why it matters.** A small thumb is silently reusable everywhere it fits the cache key, so one undersized render blurs every larger surface — intermittently, depending on which tool renders first.
+- **Rule.** Request backing store for display CSS size × DPR per surface tier (`thumbListBox` for rows, `thumbGridBox` for pick grids, `studioPreview` for dialogs); keep one tier per hook lifetime so waves never mix sharp and upscaled tiles. Evidence: `docs/BUGS.md` F-23.
+
 ## L-4 — Unbounded retention is a bug, even in dev tools
 
 - **Observation.** The former Testbench's unbounded `pastExecutions` map retained full event histories until the DOM and memory suffered.

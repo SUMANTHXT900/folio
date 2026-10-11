@@ -4,6 +4,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-23 — Blurry Split thumbnails (list-tier backing stretched into grid + dialog)
+
+- **Status.** Fix implemented on `dev`; field confirmation pending on the user's phone. **Area.** Split pick grid + preview (`SplitTool.tsx`, `usePageThumbs.ts`, `folio.ts` thumb tiers). **Severity.** Medium (picking pages blind-by-blur; preview unreadable).
+- **Symptoms.** Split page tiles look soft on phones and desktops; the Split preview dialog is always visibly blurry.
+- **Root cause (two stacked).** (1) Every window rendered at the list tier (`thumbListBox()`: 64 CSS px × DPR, 96–192 box) while Split tiles display ~111 CSS px (phone, 3 cols) to ~180 CSS px (desktop, 5 cols) — a 2–2.5× CSS upscale before DPR. (2) The Split preview dialog rendered the same list-tier URL (`thumbs[preview]`, ≤192 box) at up to 768 CSS px wide, where Rearrange borrows the full-res `studioPreview` render. The F-20 decode check (`naturalWidth > 0`) proves bytes decoded, never that the backing store suits the display size.
+- **Fix.** Pick grid loads at `thumbGridBox()` (192 CSS px base × DPR, 192–400 cap; stored per-hook so background-fill/Show-all waves match — never mixed tiers); preview dialog borrows `renderPreview` full-res with the grid thumb as the loading fallback (Rearrange parity, service-owned, never revoked); tile imgs load eagerly (blob URLs + lazy prefix, F-18 class).
+- **Verification.** New suites: grid-box ranges, hook box forwarding (default two-arg path untouched), Split grid-tier load + hi-res swap + fallback note (scoped green; full numbers in WORKLOG). Field sharpness still to be confirmed on device.
+
 ### F-22 — Shutter-tap freeze (scan capture jank)
 
 - **Status.** Fix implemented (D47 deferred review-time detection); field confirmation pending on the user's phone. **Area.** Scanner (`ScanicCapture.tsx` shutter path). **Severity.** High (user-reported blocker: tap lagged, then recovered).

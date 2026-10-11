@@ -52,6 +52,13 @@ export function usePageThumbs() {
   const doneRef = useRef(0);
   /** Pages that failed to render: marked, never retried by later waves. */
   const failedRef = useRef<Set<number>>(new Set());
+  /**
+   * Requested render box for this document's windows (F-23): pick grids
+   * display far above list size, so Split loads with `thumbGridBox()`.
+   * Stored on load so background-fill and Show-all waves render holes at
+   * the same resolution — never a mix of sharp and upscaled tiles.
+   */
+  const boxRef = useRef<number | undefined>(undefined);
 
   const memoizedThumbs = useMemo(() => thumbs, [thumbs]);
 
@@ -118,8 +125,15 @@ export function usePageThumbs() {
       gen: number,
       docId: string,
       pages: number[],
+      box?: number,
     ): Promise<Map<number, string> | null> => {
-      const job = studioThumbWindow(docId, pages);
+      // Box is forwarded only when the caller passes one: the two-arg call
+      // keeps the list-tier default (and existing mock arity) untouched.
+      const effectiveBox = box ?? boxRef.current;
+      const job =
+        effectiveBox === undefined
+          ? studioThumbWindow(docId, pages)
+          : studioThumbWindow(docId, pages, { box: effectiveBox });
       liveJobs.current.add(job);
       try {
         const map = await job.done;
@@ -193,6 +207,7 @@ export function usePageThumbs() {
       docId: string,
       total: number,
       initialCount: number = THUMB_INITIAL,
+      box?: number,
     ): Promise<string[]> => {
       stop();
       const ac = new AbortController();
@@ -200,6 +215,7 @@ export function usePageThumbs() {
       const gen = genRef.current;
       docRef.current = docId;
       totalRef.current = total;
+      boxRef.current = box;
       if (!Number.isInteger(total) || total < 1) {
         setLoading(false);
         setProgress(null);

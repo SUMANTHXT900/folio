@@ -93,6 +93,34 @@ describe('usePageThumbs publishing', () => {
   });
 });
 
+describe('usePageThumbs render box (F-23)', () => {
+  it('forwards an explicit box to every window of the document', async () => {
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    await act(async () => {
+      await result.current.load('doc-box', 50, 24, 384);
+    });
+    // First wave carries the grid box; the detached background wave does too.
+    expect(mockedWindow.mock.calls[0]?.[2]).toEqual({ box: 384 });
+    await waitFor(() => expect(result.current.progress).toBeNull(), { timeout: 5000 });
+    for (const call of mockedWindow.mock.calls) {
+      expect(call[2]).toEqual({ box: 384 });
+    }
+    unmount();
+  });
+
+  it('omits the box argument entirely at list tier (default path unchanged)', async () => {
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    await act(async () => {
+      await result.current.load('doc-list', 10, 10);
+    });
+    await waitFor(() => expect(result.current.progress).toBeNull(), { timeout: 5000 });
+    for (const call of mockedWindow.mock.calls) {
+      expect(call.length).toBe(2);
+    }
+    unmount();
+  });
+});
+
 describe('usePageThumbs eviction invalidation', () => {
   it('blanks the array when the service evicts the current document', async () => {
     const { result, unmount } = renderHook(() => usePageThumbs());

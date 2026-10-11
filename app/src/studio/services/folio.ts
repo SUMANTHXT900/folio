@@ -933,6 +933,29 @@ export function thumbListBox(): number {
 }
 
 /**
+ * Display-derived pick-grid box (F-23): Split tiles are ~111 CSS px wide
+ * on phones (3 columns) and ~180 CSS px on desktop (5 columns), far above
+ * the 64 CSS px the list tier assumes. A list-tier backing store (96–192)
+ * upscales 2–2.5× into those tiles and worse into the preview dialog, so
+ * the pick grid renders from a 192 CSS px base instead (≈1.1× worst case
+ * at 3× DPR after the 400 cap). Same-DPR DPR cap and clamp window as the
+ * list tier; transient memory stays bounded (24 windows, canvases released
+ * on encode).
+ */
+export function thumbGridBox(): number {
+  let dpr = 1;
+  try {
+    const v = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+      dpr = Math.min(v, 3);
+    }
+  } catch {
+    // Non-DOM (unit tests): fall through at 1×.
+  }
+  return Math.min(400, Math.max(192, Math.round(192 * dpr)));
+}
+
+/**
  * Renders a window of thumbnails with bounded concurrency (engine
  * concurrency 2) and resolves page→objectURL in input order. Canvases
  * are released as their URLs are encoded; windows stay small (the hook

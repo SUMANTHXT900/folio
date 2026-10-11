@@ -55,6 +55,7 @@ const { pdfFilesMock, pageThumbsMock } = vi.hoisted(() => ({
     fillAll: vi.fn(),
     loading: false,
     progress: null as { done: number; total: number } | null,
+    renderPreview: vi.fn(),
   },
 }));
 
@@ -105,6 +106,10 @@ beforeEach(() => {
   pageThumbsMock.thumbs = [];
   pageThumbsMock.loading = false;
   pageThumbsMock.progress = null;
+  pageThumbsMock.renderPreview.mockReturnValue({
+    done: Promise.resolve('hi-res'),
+    cancel: vi.fn(),
+  });
   pageThumbsMock.load.mockResolvedValue(['t1', 't2', 't3', 't4']);
 });
 
@@ -295,5 +300,45 @@ describe('SplitTool completion handoff', () => {
     await screen.findByText('Enter at least one page or range');
     expect(runMock).not.toHaveBeenCalled();
     expect(screen.queryByTestId('continue-card')).toBeNull();
+  });
+});
+
+describe('SplitTool thumbnail sharpness (F-23)', () => {
+  beforeEach(() => {
+    pdfFilesMock.files = [{ ...DOC }];
+    pageThumbsMock.thumbs = ['t1', 't2', 't3', 't4'];
+  });
+
+  it('loads the pick grid at grid tier, not the small list default', async () => {
+    const { thumbGridBox } = await import('../services/folio');
+    render(<SplitTool />);
+    await waitFor(() => expect(pageThumbsMock.load).toHaveBeenCalled());
+    const box = pageThumbsMock.load.mock.calls[0]?.[3] as number | undefined;
+    expect(box).toBe(thumbGridBox());
+    expect(box).toBeGreaterThan(128);
+  });
+
+  it('preview dialog renders the full-res render with the grid thumb as fallback', async () => {
+    render(<SplitTool />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview Page 1' }));
+    await waitFor(() => expect(pageThumbsMock.renderPreview).toHaveBeenCalledWith('s1', 1));
+    // Full-res URL replaces the small thumb once it resolves.
+    expect(await screen.findByAltText('Page 1 (full resolution)')).toBeTruthy();
+  });
+
+  it('preview keeps the grid thumb with a rendering note while full-res loads', async () => {
+    let resolveHiRes!: (url: string) => void;
+    pageThumbsMock.renderPreview.mockReturnValue({
+      done: new Promise<string>((resolve) => {
+        resolveHiRes = resolve;
+      }),
+      cancel: vi.fn(),
+    });
+    render(<SplitTool />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview Page 1' }));
+    await waitFor(() => expect(pageThumbsMock.renderPreview).toHaveBeenCalled());
+    expect(screen.getByText('Rendering full-resolution view…')).toBeTruthy();
+    resolveHiRes('hi-1');
+    expect(await screen.findByAltText('Page 1 (full resolution)')).toBeTruthy();
   });
 });

@@ -17,8 +17,47 @@ import {
   studioDownload,
   studioShare,
   studioStripExt,
+  thumbGridBox,
+  thumbListBox,
   toStudioError,
 } from './folio';
+
+describe('thumb boxes (F-23)', () => {
+  const realDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+
+  function stubDpr(value: unknown) {
+    Object.defineProperty(window, 'devicePixelRatio', {
+      value,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  afterEach(() => {
+    if (realDpr) Object.defineProperty(window, 'devicePixelRatio', realDpr);
+  });
+
+  it('list box stays 64px-based (96–192)', () => {
+    stubDpr(1);
+    expect(thumbListBox()).toBe(96);
+    stubDpr(2);
+    expect(thumbListBox()).toBe(128);
+  });
+
+  it('grid box renders from a 192px base (192–400) so pick tiles never upscale 2×', () => {
+    stubDpr(1);
+    expect(thumbGridBox()).toBe(192);
+    stubDpr(2);
+    expect(thumbGridBox()).toBe(384);
+    stubDpr(3);
+    expect(thumbGridBox()).toBe(400);
+  });
+
+  it('grid box falls back safely without a usable DPR', () => {
+    stubDpr(Number.NaN);
+    expect(thumbGridBox()).toBe(192);
+  });
+});
 
 describe('toStudioError', () => {
   it('maps known codes to human messages and preserves the code', () => {

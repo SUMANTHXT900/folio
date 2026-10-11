@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.10.3 split sharpness',
+    date: '2026-10-11',
+    notes: [
+      'Split pick grid renders at a grid tier (192px base × DPR) instead of the small list tier.',
+      'Split preview borrows the full-res render with the grid thumb as fallback; tile images load eagerly.',
+    ],
+  },
+  {
     build: 'v1.10.2 update simplification',
     date: '2026-10-11',
     notes: [

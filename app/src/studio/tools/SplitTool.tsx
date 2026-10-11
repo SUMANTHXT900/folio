@@ -20,6 +20,7 @@ import {
   consumePendingTransfer,
   getStudioBytes,
   closeStudioDoc,
+  thumbGridBox,
   type StudioDoc,
   type StudioOutput,
   type StudioJob,
@@ -59,7 +60,7 @@ const ThumbTile = memo(function ThumbTile({
           <img
             src={src}
             alt={`Page ${index + 1}`}
-            loading="lazy"
+            loading="eager"
             decoding="async"
             className="w-full aspect-[3/4] object-cover bg-white hover:opacity-90 transition-opacity"
           />
@@ -106,7 +107,7 @@ export default function SplitTool() {
     setError,
   } = usePdfFiles();
   const file = files[0] ?? null;
-  const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
+  const { thumbs, load, fillAll, loading, progress, renderPreview } = usePageThumbs();
   const [count, setCount] = useState(0);
   const [keep, setKeep] = useState<boolean[]>([]);
   const [mode, setMode] = useState<'pick' | 'ranges'>('pick');
@@ -119,6 +120,34 @@ export default function SplitTool() {
   } | null>(null);
   const [opError, setOpError] = useState<unknown>(null);
   const [preview, setPreview] = useState<number | null>(null);
+  // Full-res preview URL per 1-based page number (F-23): the pick-grid
+  // thumbs render at grid tier (~grid box), sharp in tiles but far too
+  // small for the preview dialog — the dialog borrows the full-res render
+  // (RearrangeTool parity) with the grid thumb as the loading fallback.
+  // Service-owned borrows: never revoke, just drop the entry (the service
+  // purges on close/evict).
+  const [hiRes, setHiRes] = useState<Record<number, string>>({});
+  const hiResRef = useRef(hiRes);
+  hiResRef.current = hiRes;
+  useEffect(() => {
+    if (preview === null || !file) return;
+    const pageNum = preview + 1;
+    if (hiResRef.current[pageNum]) return;
+    const job = renderPreview(file.id, pageNum);
+    let alive = true;
+    (async () => {
+      try {
+        const url = await job.done;
+        if (alive) setHiRes((prev) => ({ ...prev, [pageNum]: url }));
+      } catch {
+        /* keep thumb fallback */
+      }
+    })();
+    return () => {
+      alive = false;
+      job.cancel();
+    };
+  }, [preview, file, renderPreview]);
   const [showAll, setShowAll] = useState(false);
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
@@ -172,6 +201,7 @@ export default function SplitTool() {
   useEffect(() => {
     setResult(null);
     setShowAll(false);
+    setHiRes({});
     if (!file) {
       setKeep([]);
       setCount(0);
@@ -180,7 +210,9 @@ export default function SplitTool() {
     let cancelled = false;
     (async () => {
       try {
-        const t = await load(file.id, file.pageCount, PAGE_LIMIT);
+        // Pick-grid tier (F-23): tiles display far above list size, so the
+        // window box is grid-derived — never the 64px-based list default.
+        const t = await load(file.id, file.pageCount, PAGE_LIMIT, thumbGridBox());
         if (cancelled) return;
         setCount(t.length);
         setKeep(new Array(t.length).fill(true));
@@ -562,10 +594,22 @@ export default function SplitTool() {
                   </button>
                 </div>
                 <img
-                  src={thumbs[preview]}
-                  alt={`Page ${preview + 1} full preview`}
-                  className="w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]"
+                  src={hiRes[preview + 1] ?? thumbs[preview]}
+                  alt={
+                    hiRes[preview + 1]
+                      ? `Page ${preview + 1} (full resolution)`
+                      : `Page ${preview + 1}`
+                  }
+                  className={
+                    'w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]' +
+                    (hiRes[preview + 1] ? '' : ' opacity-80')
+                  }
                 />
+                {!hiRes[preview + 1] && (
+                  <p className="mt-2 text-center text-xs text-paper-100/80">
+                    Rendering full-resolution view…
+                  </p>
+                )}
               </motion.div>
             </motion.div>,
             document.body,

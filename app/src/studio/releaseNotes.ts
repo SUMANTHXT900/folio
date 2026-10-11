@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.10.3 release',
+    date: '2026-10-11',
+    notes: [
+      'Split page thumbnails and previews are sharp now — no more blurry pages when picking.',
+    ],
+  },
+  {
     build: 'v1.10.2 release',
     date: '2026-10-11',
     notes: [
