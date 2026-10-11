@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — Update rebuild integration + dev deploy (b24f6dc, bundle index-BV4cXAU0.js)
+
+- **Integration.** Zero reconciliations — working tree byte-identical on entry (single timed reload path confirmed: `fireReloadOnce` latch + `applyLatched` + guard comment; proof copy agrees bare-log vs v-prefixed-card via leading-v strip; banner anchors `#app-updates` + `#build-channel` exist; no second reload listener, no auto-apply, D23-literal test green). Prettier already clean, no `--write` needed.
+- **Verification (observed).** `tsc` 0 errors; eslint 0 findings (8 files); prettier clean; scoped vitest 63/63 (manager 37, banner 8, card 18); studio smoke 409/409 across 32 files; `npm run build` green (precache 44 entries / 7836.78 KiB; `dist/_headers` present, identical to source). E2E deferred (manager local-on-localhost by design).
+- **Commit + deploy.** `b24f6dc` (13 files, +1231/−28) pushed `dev` → `origin/dev` (6f24aba..b24f6dc). `wrangler pages deploy dist --branch dev` → `https://709ba69c.folio-pdf.pages.dev` (alias `dev.folio-pdf.pages.dev`, `_headers` uploaded). Live verified: `/` 200 serving `/assets/index-BV4cXAU0.js` (matches local build); `/sw.js` 200 with `cache-control: no-store`; `/` serves edge-default `max-age=0, must-revalidate` (the `/index.html` rule does not cover `/` — known R5 limit, recorded). Production (`main`) untouched.
+- **Docs sync.** D49 status, F-13 follow-up, and STATUS scoped bullet flipped from lane-reported to integration-verified in the same pass.
+- **Remaining.** Real-profile live-probe of the waiting→confirm→apply→proof path on the next deploy (two builds on the alias); canonical E2E needs an SW-capable two-build host.
+
 ## 2026-10-11 — Update-flow rebuild docs record (D49; lanes R1–R5 in flight, no source touched)
 
 - **Objective.** Record the update confirm-then-apply rebuild while five lanes run in parallel (R1 manager, R2 card, R3 banner, R4 notes, R5 headers). Docs lane only: exclusive ownership of `DECISIONS.md`, `STATUS.md`, `BUGS.md`, `WORKLOG.md` — no source file touched, no `CHANGELOG.md` version entry (no release).
