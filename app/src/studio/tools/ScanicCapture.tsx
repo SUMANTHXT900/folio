@@ -102,7 +102,9 @@ import type { ScanicCorners } from './scan/index';
 import {
   DEFAULT_DETECTOR,
   ML_ASSET_BASE_URL as POLICY_ML_ASSET_BASE_URL,
+  resolveDetectionWorkerCount,
 } from './scan/detectorPolicy';
+import { runReviewDetectionQueue } from './scan/reviewDetection';
 import { ScanicClient, ScanicClientError } from './scan/scanicClient';
 import ScanicReview from './ScanicReview';
 
@@ -546,10 +548,15 @@ interface QueueEntry {
   photoUrl: string;
   imageWidth: number;
   imageHeight: number;
-  /** Detection baseline in image-space pixels; null while detecting/failed. */
+  /** Detection baseline in image-space pixels; null while queued/detecting/failed. */
   corners: ScanicCorners | null;
   warpedUrl: string | null;
-  status: 'detecting' | 'ready';
+  /**
+   * Queue-only lifecycle: `queued` parks the untouched original with its
+   * photo thumb (shutter never decodes, never touches a worker);
+   * `detecting` runs deferred in review; `ready` settles the verdict.
+   */
+  status: 'queued' | 'detecting' | 'ready';
   /**
    * Render verdict only (no pending — every queued page is implicitly
    * accepted): `warped` uses the warped JPEG when available else the
@@ -762,6 +769,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const scanClientRef = useRef<ScanicClient | null>(null);
   const warpClientRef = useRef<ScanicClient | null>(null);
   /**
+   * Review-drain detect pool (N clients, one per lane — separate from the
+   * single `scanClientRef` fallback that Re-detect uses). Terminated on
+   * drain completion, drain cancel, discard, and unmount.
+   */
+  const detectPoolRef = useRef<ScanicClient[]>([]);
+  /** Review-drain generation: cancel bumps it so stale continuations drop. */
+  const drainGenRef = useRef(0);
+  /**
+   * Entries a drain already picked up: `goToReview` starts detection once
+   * per queued entry, so a second call (StrictMode/remount double-run)
+   * never double-detects. Cleared on every cancel/discard-all.
+   */
+  const drainStartedRef = useRef(new Set<number>());
+  /**
    * Per-entry warp generation: Apply spam bumps the seq and terminates the
    * in-flight warp; stale continuations (wrong seq, or `cancelled`) drop
    * silently so only the latest quad's warp can commit.
@@ -784,15 +805,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       // their continuations drop on the mountedRef check.
       scanClientRef.current?.terminate();
       scanClientRef.current = null;
+      for (const client of detectPoolRef.current) {
+        try {
+          client.terminate();
+        } catch {
+          // Termination is best-effort; the reference is dropped regardless.
+        }
+      }
+      detectPoolRef.current = [];
       warpClientRef.current?.terminate();
       warpClientRef.current = null;
     };
   }, []);
 
   /**
-   * Lazily-created owned scan worker client for detection. Created on first
-   * capture (never at scanner open), reused for every entry, terminated on
-   * unmount above.
+   * Lazily-created owned scan worker client for single detection (Re-detect
+   * fallback). Created on first use (never at scanner open, never on the
+   * shutter path), reused, terminated on unmount above. The review drain
+   * owns its own pool (`detectPoolRef`) instead.
    */
   const getScanClient = useCallback((): ScanicClient => {
     if (scanClientRef.current === null) scanClientRef.current = new ScanicClient();
@@ -944,8 +974,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
 
   /**
-   * Enqueues an untouched original File for detection. Returns the queue
-   * position (worker-hook seam: same name, same shape as `./scan/index`).
+   * Enqueues an untouched original File WITHOUT any detection work. The
+   * entry parks `queued` with its photo thumb — no decode, no worker, no
+   * `detectEntry` call — so the shutter (manual, auto, file fallback) stays
+   * instant. ML detection is deferred to the review drain. Returns the
+   * queue position (worker-hook seam: same name, same shape as
+   * `./scan/index`).
    */
   const enqueueCapture = useCallback(
     (file: File): number => {
@@ -968,17 +1002,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           imageHeight: 0,
           corners: null,
           warpedUrl: null,
-          status: 'detecting' as const,
+          status: 'queued' as const,
           decision: 'warped' as const,
           note: null,
         },
       ];
       entriesRef.current = next;
       setEntries(next);
-      void detectEntry(id);
       return position;
     },
-    [detectEntry, trackUrl],
+    [trackUrl],
   );
 
   const redetectEntry = useCallback(
@@ -1549,10 +1582,173 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   /* ---------------- review verdicts (implicit accept, toggle only) ---------------- */
 
-  const goToReview = useCallback((index?: number) => {
-    setReviewIndex(index ?? 0);
-    setPhase('review');
+  /* ---------------- deferred review drain (ML runs here, never on shutter) ---------------- */
+
+  /**
+   * Terminates the review-drain pool and invalidates its generation so every
+   * in-flight continuation drops. Also clears the once-per-entry guard so a
+   * later review re-drains whatever is still queued.
+   */
+  const cancelDrainPool = useCallback(() => {
+    drainGenRef.current += 1;
+    const pool = detectPoolRef.current;
+    detectPoolRef.current = [];
+    drainStartedRef.current.clear();
+    for (const client of pool) {
+      try {
+        client.terminate();
+      } catch {
+        // Termination is best-effort; the reference is dropped regardless.
+      }
+    }
   }, []);
+
+  /**
+   * Deferred ML detection for every queued entry, fanned out over a pool of
+   * `resolveDetectionWorkerCount({ pageCount })` clients (floor K=2,
+   * adaptive) via `runReviewDetectionQueue` round-robin. Each entry decodes
+   * a fresh full-resolution ImageData COPY of its original (single-use —
+   * the worker neuters it; nothing decoded is cached) and settles `ready`
+   * with corners, or `ready` full-frame with the honest note on a miss or
+   * any failure (never throws to the UI). Idempotent per entry via
+   * `drainStartedRef` (StrictMode/remount-safe); a no-op when nothing is
+   * queued.
+   */
+  const startReviewDrain = useCallback(async () => {
+    const pending = entriesRef.current.filter(
+      (e) => e.status === 'queued' && !drainStartedRef.current.has(e.id),
+    );
+    if (pending.length === 0) return;
+    for (const e of pending) drainStartedRef.current.add(e.id);
+    const gen = drainGenRef.current + 1;
+    drainGenRef.current = gen;
+    const workerCount = resolveDetectionWorkerCount({ pageCount: entriesRef.current.length });
+    const pool: ScanicClient[] = [];
+    for (let i = 0; i < workerCount; i += 1) pool.push(new ScanicClient());
+    detectPoolRef.current = pool;
+    const FULL_FRAME_NOTE =
+      'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.';
+    try {
+      await runReviewDetectionQueue(pending, {
+        workerCount: pool.length,
+        isCancelled: () => drainGenRef.current !== gen || !mountedRef.current,
+        process: async (entry, workerIndex) => {
+          if (drainGenRef.current !== gen || !mountedRef.current) return;
+          if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entry.id
+                ? { ...e, status: 'detecting' as const, note: 'Loading on-device ML detector…' }
+                : e,
+            ),
+          );
+          let image: ImageData;
+          try {
+            image = await decodeFileToImageData(entry.original);
+          } catch {
+            if (drainGenRef.current !== gen || !mountedRef.current) return;
+            if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? {
+                      ...e,
+                      imageWidth: 0,
+                      imageHeight: 0,
+                      status: 'ready' as const,
+                      note: 'Could not decode this image — the full frame will be used.',
+                    }
+                  : e,
+              ),
+            );
+            return;
+          }
+          if (drainGenRef.current !== gen || !mountedRef.current) return;
+          if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+          const w = image.width;
+          const h = image.height;
+          setEntries((prev) =>
+            prev.map((e) => (e.id === entry.id ? { ...e, imageWidth: w, imageHeight: h } : e)),
+          );
+          try {
+            // ML-only (D46): a null quad means the ML found no page, and the
+            // entry settles croppable full-frame below. No guessed crops, ever.
+            const result = await pool[workerIndex % pool.length].detect(image, DEFAULT_DETECTOR);
+            if (drainGenRef.current !== gen || !mountedRef.current) return;
+            if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+            if (result.corners !== null) {
+              setEntries((prev) =>
+                prev.map((e) =>
+                  e.id === entry.id
+                    ? { ...e, status: 'ready' as const, corners: result.corners, note: null }
+                    : e,
+                ),
+              );
+              return;
+            }
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_NOTE }
+                  : e,
+              ),
+            );
+          } catch {
+            // Worker crash/unavailable/cancel-raced: degrade to full-frame,
+            // honestly labelled. A cancelled generation drops above instead.
+            if (drainGenRef.current !== gen || !mountedRef.current) return;
+            if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_NOTE }
+                  : e,
+              ),
+            );
+          }
+        },
+      });
+    } catch {
+      // Cancelled drain (review cancel/discard/unmount): continuations
+      // already drop on the generation guard; nothing to settle.
+    }
+    // This generation settled: free the pool workers (a later drain builds
+    // a fresh pool; a superseding generation already replaced the ref).
+    if (drainGenRef.current === gen) {
+      if (detectPoolRef.current === pool) detectPoolRef.current = [];
+      for (const client of pool) {
+        try {
+          client.terminate();
+        } catch {
+          // Best-effort only.
+        }
+      }
+    }
+  }, []);
+
+  /**
+   * Preparing-overlay Cancel: stops the drain (pool terminated, generation
+   * invalidated), rolls interrupted `detecting` entries back to `queued`,
+   * and returns to the camera. A later review re-drains them.
+   */
+  const cancelPreparing = useCallback(() => {
+    cancelDrainPool();
+    const next = entriesRef.current.map((e) =>
+      e.status === 'detecting' ? { ...e, status: 'queued' as const, note: null } : e,
+    );
+    entriesRef.current = next;
+    setEntries(next);
+    setPhase('camera');
+  }, [cancelDrainPool]);
+
+  const goToReview = useCallback(
+    (index?: number) => {
+      setReviewIndex(index ?? 0);
+      setPhase('review');
+      void startReviewDrain();
+    },
+    [startReviewDrain],
+  );
 
   /**
    * `Use original` toggle: flips the current page's render verdict between
@@ -1641,6 +1837,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   const discardEntry = useCallback(
     (id: number) => {
+      // A discard during the review drain stops it (pool terminated,
+      // generation invalidated) so no continuation can settle a removed
+      // page; interrupted survivors roll back to `queued` and re-drain.
+      cancelDrainPool();
+      drainStartedRef.current.delete(id);
       const target = entriesRef.current.find((e) => e.id === id);
       if (target) {
         revokeUrl(target.photoUrl);
@@ -1651,7 +1852,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         eagerAttemptRef.current.delete(id);
         visitedIdsRef.current.delete(id);
       }
-      const next = entriesRef.current.filter((e) => e.id !== id);
+      const removed = entriesRef.current.filter((e) => e.id !== id);
+      const next = removed.map((e) =>
+        e.status === 'detecting' ? { ...e, status: 'queued' as const, note: null } : e,
+      );
       entriesRef.current = next;
       setEntries(next);
       setTimeout(() => {
@@ -1659,15 +1863,18 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (next.length === 0) setPhase('camera');
         else setReviewIndex((i) => Math.min(i, next.length - 1));
       }, 0);
+      if (next.some((e) => e.status === 'queued')) void startReviewDrain();
     },
-    [revokeUrl],
+    [revokeUrl, cancelDrainPool, startReviewDrain],
   );
 
   /**
    * Discard-all from the review batch bar: drops EVERYTHING back to the
-   * camera, confirm-free. Revokes every queued URL so no blob leaks.
+   * camera, confirm-free. Revokes every queued URL so no blob leaks, and
+   * stops the review drain (pool terminated) so preparing clears.
    */
   const discardAll = useCallback(() => {
+    cancelDrainPool();
     for (const entry of entriesRef.current) {
       revokeUrl(entry.photoUrl);
       revokeUrl(entry.warpedUrl);
@@ -1681,7 +1888,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     setEntries([]);
     setReviewIndex(0);
     setPhase('camera');
-  }, [revokeUrl]);
+  }, [revokeUrl, cancelDrainPool]);
 
   /**
    * EAGER warp: the review single canvas needs a `warpedUrl` the moment a
@@ -1772,23 +1979,39 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? cameraFailureMessage(camErrorKind)
           : null;
 
-  const anyDetecting = queue.some((e) => e.status === 'detecting');
+  const anyDetecting = phase === 'review' && queue.some((e) => e.status === 'detecting');
   const lastQueued = queue.length === 0 ? null : queue[queue.length - 1];
 
-  // Minimum dwell for the working status: detection often settles in ~200ms
-  // (warm ML session), faster than anyone can read — without a dwell the
-  // "Scanning… hold steady" pill flashes past unreadably, and fast eyes (or
-  // E2E) only ever see the idle text. The dwell keeps the working state
-  // visible briefly AFTER the last settle; it never delays any action.
+  /**
+   * Preparing progress (review phase only): done = `ready` entries, total =
+   * queue length. While any entry is still `queued`/`detecting`, the review
+   * shows the blocking `[data-review-preparing]` overlay and the
+   * filmstrip/pager/Next stay disabled.
+   */
+  const preparingTotal = queue.length;
+  const preparingDone = queue.filter((e) => e.status === 'ready').length;
+  const preparing = phase === 'review' && queue.length > 0 && preparingDone < preparingTotal;
+
+  // Minimum dwell for the working status, review-phase only. The shutter is
+  // queue-only (camera-phase entries sit `queued` with no worker work), so
+  // the camera pill stays idle (`Point at the page` / `Starting camera…`)
+  // and this dwell never fires for camera-phase queued items: only a fully
+  // settled review drain (`every ready`) arms it, and leaving review clears
+  // it. It never delays any action.
   const scanDwellUntilRef = useRef(0);
   const [, setDwellTick] = useState(0);
   useEffect(() => {
+    if (phase !== 'review') {
+      scanDwellUntilRef.current = 0;
+      return;
+    }
     // Empty queue (fresh open, discard-all): idle, never dwelling.
     if (queue.length === 0) {
       scanDwellUntilRef.current = 0;
       return;
     }
-    if (queue.some((e) => e.status === 'detecting')) return;
+    // Any page not yet ready (queued or detecting): no dwell yet.
+    if (queue.some((e) => e.status !== 'ready')) return;
     scanDwellUntilRef.current = Date.now() + SCAN_STATUS_DWELL_MS;
     // Repaint NOW: refs don't render by themselves, and with nothing else
     // scheduled the pill would freeze on the settle-time text (idle) for the
@@ -1798,7 +2021,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (mountedRef.current) setDwellTick((t) => t + 1);
     }, SCAN_STATUS_DWELL_MS + 50);
     return () => window.clearTimeout(id);
-  }, [queue]);
+  }, [queue, phase]);
 
   const finderStatus =
     camState === 'requesting'
@@ -2289,7 +2512,27 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       )}
 
       {phase === 'review' && current !== null && (
-        <div data-scan-queue className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        <div data-scan-queue className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          {preparing && (
+            <div
+              data-review-preparing
+              role="status"
+              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-paper-50/95 p-6 text-center dark:bg-ink-900/95"
+            >
+              <span aria-hidden className="h-3 w-3 animate-pulse rounded-full bg-brass-400" />
+              <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+                {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
+              </p>
+              <button
+                type="button"
+                data-review-preparing-cancel
+                onClick={cancelPreparing}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
           {cardError !== null && (
             <p role="alert" className="text-xs text-red-600 dark:text-red-400">
               {cardError}
@@ -2301,7 +2544,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-page-prev
               aria-label="Go to previous page"
-              disabled={safeIndex <= 0}
+              disabled={safeIndex <= 0 || preparing}
               onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
@@ -2311,7 +2554,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-page-next
               aria-label="Go to next page"
-              disabled={safeIndex >= queue.length - 1}
+              disabled={safeIndex >= queue.length - 1 || preparing}
               onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
@@ -2325,7 +2568,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             imageHeight={current.imageHeight}
             corners={current.corners}
             warpedUrl={current.warpedUrl}
-            detecting={current.status === 'detecting'}
+            detecting={current.status !== 'ready'}
             note={current.note}
             pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
             progressLabel={`${visitedCount} of ${queue.length} viewed`}
@@ -2354,6 +2597,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 data-film-thumb
                 aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
                 aria-current={i === safeIndex}
+                disabled={preparing}
                 onClick={() => setReviewIndex(i)}
                 className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
                   i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
@@ -2375,6 +2619,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-scan-add
               aria-label="Back to camera"
+              disabled={preparing}
               onClick={() => setPhase('camera')}
               className="inline-flex h-14 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
             >
@@ -2396,7 +2641,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </button>
             <button
               type="button"
-              disabled={queue.length === 0}
+              disabled={queue.length === 0 || preparing}
               onClick={() => setPhase('done')}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >

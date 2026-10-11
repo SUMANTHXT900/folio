@@ -9,20 +9,21 @@ import {
   Spinner,
   Card,
   Progress,
-  ResultMeta,
   ErrorBlock,
 } from '../components/ui';
-import { DownloadCard } from '../components/DownloadCard';
+import ContinueCard from '../components/ContinueCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
   runStudioOperation,
-  formatDurationMs,
-  studioShareAvailable,
+  consumePendingTransfer,
+  getStudioBytes,
+  closeStudioDoc,
+  type StudioDoc,
+  type StudioOutput,
   type StudioJob,
 } from '../services/folio';
-import { formatBytes } from '../components/ui';
 
 const PAGE_LIMIT = 24;
 
@@ -147,12 +148,34 @@ const DragRow = memo(function DragRow({
 });
 
 export default function RearrangeTool() {
-  const { files, addFiles, remove, error: filesError, busy, setBusy, setError } = usePdfFiles();
+  const {
+    files,
+    setFiles,
+    addFiles,
+    remove,
+    error: filesError,
+    busy,
+    setBusy,
+    setError,
+  } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress, renderPreview } = usePageThumbs();
   const [order, setOrder] = useState<number[]>([]);
-  const [result, setResult] = useState<{ name: string; blob: Blob } | null>(null);
-  const [meta, setMeta] = useState<string[]>([]);
+  const [result, setResult] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
+    durationMs: number;
+  } | null>(null);
+  const [continuedFrom, setContinuedFrom] = useState<{
+    producedBy: string;
+    sourceName: string;
+  } | null>(null);
+  // Pending-transfer claim: same back-out-release discipline as MergeTool
+  // (single doc here — extras are ignored, never uploaded, never in state).
+  const claimedRef = useRef<StudioDoc[]>([]);
+  const ranRef = useRef(false);
+  const mountGenRef = useRef(0);
   const [opError, setOpError] = useState<unknown>(null);
   const [viewer, setViewer] = useState<number | null>(null);
   const [hiRes, setHiRes] = useState<Record<number, string>>({});
@@ -193,6 +216,33 @@ export default function RearrangeTool() {
   // service purges its keys on close/evict, so no caller-side revoke here.
   const [showAll, setShowAll] = useState(false);
 
+  // Pending-transfer intake (mount once): the handed-off doc becomes the
+  // single input by reference — verified live, never re-uploaded.
+  useEffect(() => {
+    mountGenRef.current += 1;
+    const gen = mountGenRef.current;
+    const pending = consumePendingTransfer();
+    if (pending !== null) {
+      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
+      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
+      if (firstDoc !== undefined) {
+        claimedRef.current = [firstDoc];
+        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
+        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
+      }
+    }
+    return () => {
+      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
+      const claimed = claimedRef.current;
+      window.setTimeout(() => {
+        if (mountGenRef.current !== gen) return;
+        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
+        if (ranRef.current) return;
+        for (const d of claimed) void closeStudioDoc(d.id);
+      }, 0);
+    };
+  }, [setFiles]);
+
   useEffect(() => {
     setResult(null);
     setShowAll(false);
@@ -231,11 +281,11 @@ export default function RearrangeTool() {
 
   const handleRearrange = useCallback(async () => {
     if (!file) return;
+    ranRef.current = true;
     setBusy(true);
     setError(null);
     setOpError(null);
     setResult(null);
-    setMeta([]);
     setFraction(null);
     setStage(null);
     try {
@@ -254,18 +304,17 @@ export default function RearrangeTool() {
       const out = await job.done;
       jobRef.current = null;
       const first = out.outputs[0];
+      if (first === undefined) throw new Error('Rearrange produced no output.');
+      // Existing naming, unchanged: `<base>-rearranged.pdf`. It doubles as
+      // the handoff `sourceName`, and labels the single output so the
+      // ContinueCard download branch and the handed-off record name the file
+      // exactly as the old DownloadCard did (Images parity).
+      const sourceName = smartOutputName('rearrange', [file.name]);
       setResult({
-        name: smartOutputName('rearrange', [file.name]),
-        blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+        outputs: [{ ...first, name: sourceName }],
+        sourceName,
+        durationMs: out.durationMs,
       });
-      const summary = out.summary;
-      setMeta([
-        'pageCount' in summary
-          ? `${summary.pageCount} pages`
-          : `${first.pageCount ?? order.length} pages`,
-        `${formatBytes(first.byteLength)}`,
-        `Completed in ${formatDurationMs(out.durationMs)}`,
-      ]);
     } catch (e) {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
@@ -305,6 +354,10 @@ export default function RearrangeTool() {
     setViewer(pos);
   }, []);
 
+  const handleBackToEdit = useCallback(() => {
+    setResult(null);
+  }, []);
+
   return (
     <div className="py-6">
       <ToolHeading
@@ -325,10 +378,18 @@ export default function RearrangeTool() {
 
       {file && (
         <div className="space-y-5">
+          {continuedFrom && (
+            <p className="text-xs text-brass-600 dark:text-brass-300 bg-brass-400/[0.07] rounded-xl px-4 py-2.5 border border-brass-500/25">
+              Continued from{' '}
+              {continuedFrom.producedBy.charAt(0).toUpperCase() + continuedFrom.producedBy.slice(1)}{' '}
+              — {continuedFrom.sourceName} is loaded below by reference (not re-uploaded).
+            </p>
+          )}
           <FileChip
             name={file.name}
             size={file.sizeBytes}
             onRemove={() => {
+              claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
               remove(file.id);
               setResult(null);
             }}
@@ -414,14 +475,13 @@ export default function RearrangeTool() {
           )}
 
           {result && (
-            <>
-              <DownloadCard
-                blob={result.blob}
-                suggestedName={result.name}
-                shareable={studioShareAvailable()}
-              />
-              <ResultMeta lines={meta} />
-            </>
+            <ContinueCard
+              outputs={result.outputs}
+              sourceName={result.sourceName}
+              producedBy="rearrange"
+              onBackToEdit={handleBackToEdit}
+              durationMs={result.durationMs}
+            />
           )}
         </div>
       )}

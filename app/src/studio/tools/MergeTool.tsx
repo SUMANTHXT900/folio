@@ -6,17 +6,19 @@ import {
   Button,
   StageLine,
   Progress,
-  ResultMeta,
   ErrorBlock,
   formatBytes,
 } from '../components/ui';
-import { DownloadCard } from '../components/DownloadCard';
+import ContinueCard from '../components/ContinueCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import {
   runStudioOperation,
-  formatDurationMs,
-  studioShareAvailable,
+  consumePendingTransfer,
+  getStudioBytes,
+  closeStudioDoc,
+  type StudioDoc,
+  type StudioOutput,
   type StudioJob,
 } from '../services/folio';
 
@@ -144,28 +146,91 @@ const MergeRow = memo(function MergeRow({
   );
 });
 
+/* ------------------------------------------------------------------ */
+/* Cross-tool handoff (D-TOOLS-1): the shared `ContinueCard` + service  */
+/* pending-transfer slot (`services/folio.ts`) own the completion and   */
+/* staging side; this tool only consumes on mount (effect below) and    */
+/* passes its raw engine outputs through. Naming stays at the existing  */
+/* `smartOutputName` call site, unchanged.                              */
+/* ------------------------------------------------------------------ */
+
 export default function MergeTool() {
   const { files, setFiles, addFiles, remove, clear, notice } = usePdfFiles();
   const [working, setWorking] = useState(false);
-  const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
-  const [meta, setMeta] = useState<Array<string | null>>([]);
+  const [done, setDone] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
+    durationMs: number;
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [stage, setStage] = useState<string | null>(null);
   const [fraction, setFraction] = useState<number | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
+  const [continuedFrom, setContinuedFrom] = useState<{
+    producedBy: string;
+    sourceName: string;
+  } | null>(null);
+  // Pending-transfer claim: docs handed off by another tool, referenced (never
+  // copied) into this mount's inputs. Released on unmount only when the user
+  // backs out without running (`ranRef`); `mountGenRef` + deferred release
+  // keep React StrictMode's fake unmount/remount from destroying the claim.
+  const claimedRef = useRef<StudioDoc[]>([]);
+  const ranRef = useRef(false);
+  const mountGenRef = useRef(0);
 
   const handleRemove = useCallback(
     (id: string) => {
+      claimedRef.current = claimedRef.current.filter((d) => d.id !== id);
       remove(id);
     },
     [remove],
   );
 
+  const handleClear = useCallback(() => {
+    claimedRef.current = [];
+    setContinuedFrom(null);
+    clear();
+  }, [clear]);
+
+  // Pending-transfer intake (mount once): a handed-off doc lands as the first
+  // input by reference — no re-upload, no bytes in state, only the handle is
+  // verified live (`getStudioBytes` existence check, result discarded).
+  useEffect(() => {
+    mountGenRef.current += 1;
+    const gen = mountGenRef.current;
+    const pending = consumePendingTransfer();
+    if (pending !== null) {
+      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
+      if (live.length > 0) {
+        claimedRef.current = live;
+        setFiles((prev) => {
+          const seen = new Set(prev.map((f) => f.id));
+          return [...live.filter((d) => !seen.has(d.id)), ...prev];
+        });
+        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
+      }
+    }
+    return () => {
+      // Back-out release, deferred one task: StrictMode's fake unmount is
+      // always superseded by a remount (generation check) before the timer
+      // fires, so only a real unmount releases the un-run claim (P5-1:
+      // `closeStudioDoc` frees bytes + render docs + thumb URLs).
+      const claimed = claimedRef.current;
+      window.setTimeout(() => {
+        if (mountGenRef.current !== gen) return;
+        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
+        if (ranRef.current) return;
+        for (const d of claimed) void closeStudioDoc(d.id);
+      }, 0);
+    };
+  }, [setFiles]);
+
   const onMerge = async () => {
     if (files.length < 2) return;
+    ranRef.current = true;
     setWorking(true);
     setDone(null);
-    setMeta([]);
     setError(null);
     setFraction(null);
     try {
@@ -184,28 +249,20 @@ export default function MergeTool() {
       const result = await job.done;
       jobRef.current = null;
       const out = result.outputs[0];
-      const name = smartOutputName(
+      if (out === undefined) throw new Error('Merge produced no output.');
+      // Existing naming, unchanged: the smart `merge` default from the input
+      // names. It doubles as the handoff `sourceName`, and labels the single
+      // output so the ContinueCard download branch and the handed-off record
+      // name the file exactly as the old DownloadCard did (Images parity).
+      const sourceName = smartOutputName(
         'merge',
         files.map((f) => f.name),
       );
       setDone({
-        name,
-        blob: new Blob([out.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+        outputs: [{ ...out, name: sourceName }],
+        sourceName,
+        durationMs: result.durationMs,
       });
-      const summary = result.summary;
-      setMeta([
-        'inputDocumentCount' in summary
-          ? `${summary.inputDocumentCount} document${summary.inputDocumentCount === 1 ? '' : 's'}`
-          : null,
-        'inputPageCount' in summary && typeof summary.inputPageCount === 'number'
-          ? `${summary.inputPageCount} input page${summary.inputPageCount === 1 ? '' : 's'}`
-          : null,
-        'outputPageCount' in summary && typeof summary.outputPageCount === 'number'
-          ? `${summary.outputPageCount} output page${summary.outputPageCount === 1 ? '' : 's'}`
-          : `${out.pageCount ?? 0} pages`,
-        `${formatBytes(out.byteLength)}`,
-        `Completed in ${formatDurationMs(result.durationMs)}`,
-      ]);
     } catch (e: unknown) {
       const code = e instanceof Error ? (e as { code?: string }).code : undefined;
       if (code === 'CANCELLED') {
@@ -228,6 +285,10 @@ export default function MergeTool() {
       // The job settles the UI via onMerge's catch/finally.
     }
   };
+
+  const handleBackToEdit = useCallback(() => {
+    setDone(null);
+  }, []);
 
   // Cancel the running job when the user navigates away
   useEffect(
@@ -263,12 +324,20 @@ export default function MergeTool() {
                 : `${files.length} files selected — ready to merge`}
             </p>
             <button
-              onClick={clear}
+              onClick={handleClear}
               className="text-xs text-ink-400 hover:text-red-500 dark:text-ink-300 transition-colors px-2 py-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30"
             >
               Clear all
             </button>
           </div>
+
+          {continuedFrom && (
+            <p className="mb-3 text-xs text-brass-600 dark:text-brass-300 bg-brass-400/[0.07] rounded-xl px-4 py-2.5 border border-brass-500/25">
+              Continued from{' '}
+              {continuedFrom.producedBy.charAt(0).toUpperCase() + continuedFrom.producedBy.slice(1)}{' '}
+              — {continuedFrom.sourceName} is loaded below by reference (not re-uploaded).
+            </p>
+          )}
 
           {/* Stable id values: framer-motion diffs values by identity —
               object values break reorder after any state refresh that
@@ -373,14 +442,13 @@ export default function MergeTool() {
 
           {error !== null && <ErrorBlock error={error} />}
           {done && (
-            <>
-              <DownloadCard
-                blob={done.blob}
-                suggestedName={done.name}
-                shareable={studioShareAvailable()}
-              />
-              <ResultMeta lines={meta} />
-            </>
+            <ContinueCard
+              outputs={done.outputs}
+              sourceName={done.sourceName}
+              producedBy="merge"
+              onBackToEdit={handleBackToEdit}
+              durationMs={done.durationMs}
+            />
           )}
         </>
       )}

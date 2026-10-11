@@ -21,9 +21,11 @@ export {
   defaultDetector,
   detectorForAttempt,
   mlDetectorWarmState,
+  resolveDetectionWorkerCount,
   warmMlDetector,
 } from './detectorPolicy';
-export type { MlWarmState } from './detectorPolicy';
+export type { DetectionWorkerOptions, MlWarmState } from './detectorPolicy';
+export { runReviewDetectionQueue } from './reviewDetection';
 export {
   SCANIC_CORNER_KEYS,
   SCANIC_WORKER_PROTOCOL_VERSION,

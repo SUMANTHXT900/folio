@@ -97,6 +97,18 @@ async function injectAndReview(...files: File[]) {
   const cta = await findQ('[data-review-cta]');
   fireEvent.click(cta);
   await findQ('[data-scan-queue]');
+  // The review drain is deferred ML: wait until every page settles `ready`
+  // (the blocking preparing overlay clears) before interacting.
+  await waitFor(() => {
+    expect(document.querySelector('[data-review-preparing]')).toBeNull();
+  });
+}
+
+/** Waits until the review preparing overlay clears (all pages `ready`). */
+async function waitForPrepared(): Promise<void> {
+  await waitFor(() => {
+    expect(document.querySelector('[data-review-preparing]')).toBeNull();
+  });
 }
 
 /** Live-camera double: resolves getUserMedia with a stoppable fake stream. */
@@ -672,29 +684,118 @@ describe('capture mode + gallery cluster', () => {
     expect(screen.getByText('Page 2 of 2')).toBeTruthy();
   });
 
-  it('shows Scanning… hold steady while a capture is being detected', async () => {
+  it('keeps the shutter instant and queue-only: no worker call, no Scanning pill', async () => {
     mockLiveCamera();
-    // Never-resolving detection keeps the entry in `detecting`.
-    mockDetect.mockReturnValue(new Promise(() => {}));
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     expect(q('[data-finder-status]').textContent).toBe('Point at the page');
     injectFiles(photo('a.jpg', [9]));
-    await waitFor(() => {
-      expect(q('[data-finder-status]').textContent).toBe('Scanning… hold steady');
-    });
+    await findQ('[data-review-cta]');
+    // The entry parks `queued` with its photo thumb: never-resolving ML
+    // would hang here under per-capture detection, but the shutter path
+    // never calls the worker — the pill stays idle.
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(mockDetect).not.toHaveBeenCalled();
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    // Queued thumbs show the photo immediately with no … overlay.
+    const strip = q('[data-scan-strip]');
+    expect(strip.querySelector('img')).not.toBeNull();
+    expect(strip.textContent).not.toContain('…');
   });
 
-  it('dwells the working pill briefly after instant detection (readable, not a flash)', async () => {
+  it('never dwells the working pill in the camera phase (queue-only shutter)', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
-    // Default mock settles detection in milliseconds: sleep past the settle
-    // but inside the 800ms dwell, then the pill must STILL read working —
-    // without the dwell it would already read idle.
+    // Default mock settles detection in milliseconds — but detection no
+    // longer runs on the camera phase, so past the old 800ms dwell window
+    // the pill must STILL read idle.
     injectFiles(photo('a.jpg', [9]));
     await new Promise((r) => setTimeout(r, 400));
-    expect(q('[data-finder-status]').textContent).toBe('Scanning… hold steady');
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+  });
+});
+
+describe('deferred review drain', () => {
+  // Worker-count + lane-fanout policy lives in scan/ (detectorPolicy.test.ts
+  // + reviewDetection.test.ts); the drain integration below pins the UI half.
+
+  it('starts deferred ML on review with preparing progress, then settles ready', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    // Slow the worker just enough that the preparing overlay is observable:
+    // the drain itself is fully async (decode + detect per entry).
+    mockDetect.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                success: true,
+                corners: detectedCorners(),
+                confidence: 0.9,
+                detector: 'ml',
+              }),
+            150,
+          ),
+        ),
+    );
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
+    // Shutter-equivalent enqueue: instant, no worker call yet.
+    const cta = await findQ('[data-review-cta]');
+    expect(cta.textContent).toBe('View 2 pages');
+    expect(mockDetect).not.toHaveBeenCalled();
+    fireEvent.click(cta);
+    await findQ('[data-scan-queue]');
+    // Deferred drain: the blocking overlay carries done/of/total progress…
+    const preparing = await findQ('[data-review-preparing]');
+    expect(preparing.getAttribute('role')).toBe('status');
+    expect(preparing.textContent).toMatch(/Preparing pages… \d+ of 2/);
+    // …pager and Next stay disabled while preparing…
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+    // …then every page settles ready through the ML detector, once each.
+    await waitForPrepared();
+    expect(mockDetect).toHaveBeenCalledTimes(2);
+    for (const call of mockDetect.mock.calls) {
+      expect(call[1]).toBe('ml');
+    }
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(false);
+    expect((await findQ('[data-crop-result-img]')).tagName.toLowerCase()).toBe('img');
+  });
+
+  it('cancels the drain back to the camera with the queue intact', async () => {
+    mockDetect.mockReturnValue(new Promise(() => {}));
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [9]), photo('b.jpg', [8]));
+    const cta = await findQ('[data-review-cta]');
+    fireEvent.click(cta);
+    await findQ('[data-review-preparing]');
+    expect(q('[data-review-preparing]').textContent).toMatch(/Preparing pages… \d+ of 2/);
+    fireEvent.click(q('[data-review-preparing-cancel]'));
+    // Cancel lands back on the camera phase with the queue intact…
+    await waitFor(() => {
+      expect(document.querySelector('[data-scan-queue]')).toBeNull();
+    });
+    expect(q('[data-review-cta]').textContent).toBe('View 2 pages');
+    expect(q('[data-scan-strip]').querySelectorAll('img').length).toBe(2);
+    // …and re-entering review re-drains the interrupted pages.
+    fireEvent.click(q('[data-review-cta]'));
+    await findQ('[data-review-preparing]');
+    expect(mockDetect.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('enters review exactly once per entry under a double CTA tap', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]));
+    const cta = await findQ('[data-review-cta]');
+    fireEvent.click(cta);
+    fireEvent.click(cta);
+    await waitForPrepared();
+    expect(mockDetect).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -914,6 +1015,7 @@ describe('original-blob capture (ImageCapture)', () => {
     // Original bytes flow downstream byte-identical.
     fireEvent.click(cta);
     await findQ('[data-scan-queue]');
+    await waitForPrepared();
     fireEvent.click(screen.getByText('Use original', { exact: true }));
     fireEvent.click(screen.getByText('Next', { exact: true }));
     await screen.findByText('All pages ready');

@@ -610,3 +610,26 @@ export function DoneBanner({
     </motion.div>
   );
 }
+
+/* ContinueCard motion tokens (G-UX-RESEARCH, exact — additive only; no
+   existing style, token, or component above is touched).
+   - Step transitions: keyed motion.div under AnimatePresence mode="wait",
+     initial {opacity: 0, x: 16} → animate {1, 0} → exit {0, -16},
+     duration 0.26, ease [0.22, 1, 0.36, 1].
+   - Picker rows: tweened (duration 0.22, capped stagger 0.16s) — never
+     springs. Springs live only on Button hover/tap (see `Button` above).
+   - Progress `scaleX` is untouched (stays compositor-only).
+   - `useReducedMotion` → duration 0.01 crossfade (opacity only), no
+     stagger, static labels (busy/status text is never animated). */
+export const CONTINUE_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+export const CONTINUE_STEP_DURATION = 0.26;
+export const CONTINUE_STEP_X = 16;
+export const CONTINUE_ROW_DURATION = 0.22;
+export const CONTINUE_STAGGER_STEP = 0.04;
+export const CONTINUE_STAGGER_CAP = 0.16;
+export const CONTINUE_REDUCED_DURATION = 0.01;
+
+/** Picker-row stagger delay, capped so long part lists never cascade. */
+export function continueStaggerDelay(index: number): number {
+  return Math.min(index * CONTINUE_STAGGER_STEP, CONTINUE_STAGGER_CAP);
+}

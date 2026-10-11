@@ -331,6 +331,161 @@ async function waitForResultImg(page, timeoutMs = 30000) {
   );
 }
 
+async function waitForStripThumbs(page, count, timeoutMs = 30000) {
+  await page.waitForFunction(
+    (expected) => {
+      try {
+        const s = document.querySelector('[data-scan-strip]');
+        if (!s) return false;
+        return s.querySelectorAll('button').length >= expected;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: timeoutMs },
+    count,
+  );
+}
+
+// Queue-only camera idle read: strip count + no preparing overlay + no
+// per-thumb `…` detecting badge (the badge rendered only when an entry's
+// status was 'detecting'; queue-only entries sit 'queued') + idle finder
+// text. Single evaluate = the L-12 measure step (callers dispatch, then
+// waitForFunction the strip post-condition, then call this).
+async function readCameraIdle(page) {
+  return page.evaluate(() => {
+    try {
+      const preparing = document.querySelector('[data-review-preparing]');
+      const pill = document.querySelector('[data-finder-status]');
+      const text = pill?.textContent?.trim() ?? '';
+      const strip = document.querySelector('[data-scan-strip]');
+      const thumbs = strip === null ? -1 : strip.querySelectorAll('button').length;
+      const badge =
+        strip === null
+          ? false
+          : [...strip.querySelectorAll('button')].some((b) => (b.textContent ?? '').includes('…'));
+      return {
+        stripThumbs: thumbs,
+        noPreparing: preparing === null,
+        noDetectingBadge: badge === false,
+        finderText: text.slice(0, 80),
+        idle: /Point at the page|Starting camera/i.test(text),
+        notScanning: !/hold steady|scanning/i.test(text),
+      };
+    } catch {
+      return null;
+    }
+  });
+}
+
+// Deferred-ML preparing overlay: total predicates per L-11 (never
+// dereference a possibly-null find — every query is null-guarded).
+// Polling is an explicit 250ms timer, not rAF: under ORT cold-load the
+// headless renderer starves rAF-driven polling (same lesson as the old
+// hold-steady wait this flow replaces).
+async function waitForPreparingGone(page, timeoutMs = 90000) {
+  try {
+    await page.waitForFunction(
+      () => {
+        try {
+          return document.querySelector('[data-review-preparing]') === null;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: timeoutMs, polling: 250 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readPreparingDetail(page) {
+  return page.evaluate(() => {
+    try {
+      const prep = document.querySelector('[data-review-preparing]');
+      if (!prep) return null;
+      const text = prep.textContent ?? '';
+      const cancel = document.querySelector('[data-review-preparing-cancel]');
+      return {
+        role: prep.getAttribute('role') ?? null,
+        text: text.slice(0, 120),
+        progress: /Preparing pages/i.test(text) && /of \d+/.test(text),
+        cancelPresent: cancel !== null,
+      };
+    } catch {
+      return null;
+    }
+  });
+}
+
+// Review entry through the deferred-ML preparing overlay. Waits for the
+// exact CTA control in its phase (L-16), clicks it in one evaluate,
+// waitForFunctions the race (preparing visible OR queue already ready —
+// round-trips on processed entries skip ML, so the queue can win), reads
+// the overlay detail while visible, then waits for its disappearance.
+// Callers keep their existing queue/hero waits (they resolve immediately
+// once the overlay is gone). Gallery [data-scan-gallery] shares goToReview,
+// so this CTA path proves both entries' preparing flow; the gallery hook
+// itself is asserted (present/enabled/label) without a second navigation.
+async function clickCTAAndAwaitReview(page, expectedCount) {
+  try {
+    await page.waitForFunction(
+      () => {
+        try {
+          return document.querySelector('[data-review-cta]') !== null;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 30000 },
+    );
+  } catch {
+    return { clicked: false, preparingSeen: false, preparingGone: false, preparingDetail: null };
+  }
+  await page.evaluate(() => {
+    try {
+      document.querySelector('[data-review-cta]')?.click();
+    } catch {
+      /* noop */
+    }
+  });
+  try {
+    await page.waitForFunction(
+      (expected) => {
+        try {
+          if (document.querySelector('[data-review-preparing]') !== null) return true;
+          const q = document.querySelector('[data-scan-queue]');
+          if (!q) return false;
+          return new RegExp(`of ${expected}\\b`).test(q.textContent ?? '');
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 60000, polling: 250 },
+      expectedCount,
+    );
+  } catch {
+    return { clicked: true, preparingSeen: false, preparingGone: false, preparingDetail: null };
+  }
+  let preparingSeen = false;
+  try {
+    preparingSeen = await page.evaluate(() => {
+      try {
+        return document.querySelector('[data-review-preparing]') !== null;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    preparingSeen = false;
+  }
+  const preparingDetail = preparingSeen ? await readPreparingDetail(page) : null;
+  const preparingGone = await waitForPreparingGone(page, preparingSeen ? 90000 : 5000);
+  return { clicked: true, preparingSeen, preparingGone, preparingDetail };
+}
+
 // Keyboard-handle exercise: dispatch in ONE evaluate, waitForFunction the
 // post-condition, then measure in a LATER evaluate (never dispatch-then-
 // measure synchronously — React-flush timing would fake-fail the read).
@@ -653,6 +808,9 @@ async function main() {
   }
 
   // ---- Split ranges mode with an invalid range → structured error ----
+  // NOTE (v1.10.0 range clamp): rangeToList clamps endpoints to 1..pageCount,
+  // so '1-3, 999999' now succeeds instead of surfacing PAGE_OUT_OF_RANGE.
+  // Unparseable input still fails honestly before the engine is reached.
   {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'split');
@@ -663,18 +821,18 @@ async function main() {
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'By ranges')?.click();
     });
-    await page.type('input[placeholder*="1-3"]', '1-3, 999999');
+    await page.type('input[placeholder*="1-3"]', 'zzz-not-a-range');
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent === 'Extract pages')
         ?.click();
     });
     await page.waitForFunction(
-      () => /PAGE_OUT_OF_RANGE|outside the document/i.test(document.body.innerText),
+      () => /Enter at least one page or range/i.test(document.body.innerText),
       { timeout: 60000 },
     );
     const text = await bodyText(page);
-    check('split shows structured range error', /PAGE_OUT_OF_RANGE/.test(text));
+    check('split shows structured range error', /Enter at least one page or range/.test(text));
     if (consoleErrors.length > 0)
       console.log(`[section-errors] ${consoleErrors.join(' | ').slice(0, 500)}`);
     await page.close();
@@ -1049,6 +1207,17 @@ async function main() {
     await page.waitForFunction(
       () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 8,
       { timeout: 120000 },
+    );
+    // Rebuild race (L-12 family): the prior completion card clears on the
+    // pages-change effect, so the Build button may lag the 8th row by a
+    // render — wait for the button itself before clicking (a click into the
+    // still-mounted card no-ops and hangs the completion wait below).
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('button')].some((b) =>
+          b.textContent?.startsWith('Build PDF'),
+        ),
+      { timeout: 30000 },
     );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
@@ -1748,67 +1917,27 @@ async function main() {
         JSON.stringify(pillLive),
       );
       await scanCaptureOnce(page);
-      // Status pill while detecting/processing: wait for the transient pill
-      // FIRST, immediately after the click — any strip/progress wait in
-      // between burns the visible window (detection + 800ms dwell), and the
-      // wait then starts post-expiry and reads idle (L-16 family).
-      // NOTE: polls the pill's textContent directly, not body.innerText —
-      // innerText forces layout on every poll and starves under the ORT
-      // cold-load main-thread block, while the cheap query keeps polling.
-      // Polling is an explicit 250ms timer, not rAF: under ORT/WASM load the
-      // headless renderer produces frames too slowly for rAF-driven polling
-      // to land inside the ~1s visible window (two green probes vs two suite
-      // misses proved exactly that split).
-      let holdSteadyWaited = false;
-      try {
-        await page.waitForFunction(
-          () => {
-            try {
-              const pill = document.querySelector('[data-finder-status]');
-              return pill !== null && /hold steady/i.test(pill.textContent ?? '');
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 15000, polling: 250 },
-        );
-        holdSteadyWaited = true;
-      } catch {
-        holdSteadyWaited = false;
-      }
-      // The camera-phase strip is `[data-scan-strip]` (thumbs); the
-      // `[data-scan-queue]` review surface renders only after the Review CTA
-      // (phase change), so per-capture waits assert strip thumbs here and the
-      // queue wait moves below the CTA click.
-      await page.waitForFunction(
-        () => {
-          try {
-            const s = document.querySelector('[data-scan-strip]');
-            return s !== null && s.querySelectorAll('button').length >= 1;
-          } catch {
-            return false;
-          }
-        },
-        { timeout: 30000 },
-      );
-      // Status pill while detecting/processing: the capture above dispatched,
-      // now wait for the transient pill, then measure in a later evaluate.
-      const pillDetecting = await page.evaluate(() => {
-        try {
-          const els = [...document.querySelectorAll('[data-finder-status], [role="status"]')];
-          const texts = els.map((e) => e.textContent?.trim() ?? '');
-          return {
-            texts: texts.map((t) => t.slice(0, 80)),
-            anyHoldSteady: texts.some((t) => /hold steady/i.test(t)),
-          };
-        } catch {
-          return null;
-        }
-      });
+      // Queue-only shutter (deferred review-time ML): the capture enqueues
+      // instantly as 'queued' — no camera-phase detection, no dwell, no
+      // transient pill. The strip-thumb wait is the L-12 post-condition
+      // (dispatch → wait here → measure in the later evaluate below).
+      await waitForStripThumbs(page, 1);
+      // Camera-phase idle read (measure step): strip thumb present WITHOUT
+      // any detecting wait, no preparing overlay in the camera phase, no
+      // per-thumb detecting badge, finder idle (never Scanning… hold steady).
+      const cameraIdle1 = await readCameraIdle(page);
       check(
-        'scanner status pill shows Scanning… hold steady while detecting',
-        holdSteadyWaited && pillDetecting !== null && pillDetecting.anyHoldSteady === true,
-        JSON.stringify(pillDetecting),
+        'scanner capture queues instantly without detecting (strip thumb, no preparing overlay, no detecting badge)',
+        cameraIdle1 !== null &&
+          cameraIdle1.stripThumbs >= 1 &&
+          cameraIdle1.noPreparing === true &&
+          cameraIdle1.noDetectingBadge === true,
+        JSON.stringify(cameraIdle1),
+      );
+      check(
+        'scanner finder stays idle after capture (Point at the page, never Scanning… hold steady)',
+        cameraIdle1 !== null && cameraIdle1.idle === true && cameraIdle1.notScanning === true,
+        JSON.stringify(cameraIdle1),
       );
       // Gallery thumb after a capture (fails honestly when the reworked
       // capture screen omits it).
@@ -1827,32 +1956,32 @@ async function main() {
       } catch {
         /* measured below */
       }
+      // Gallery hook (no click here — it shares goToReview with the CTA, so
+      // the CTA entry below proves the preparing flow for both; a second
+      // navigation would cost a capture cycle and perturb visited counts).
       const galleryState = await page.evaluate(() => {
         try {
           const g = document.querySelector('[data-scan-gallery]');
           if (!g) return null;
-          return { thumbs: g.querySelectorAll('img,button').length };
+          return {
+            thumbs: g.querySelectorAll('img,button').length,
+            label: g.getAttribute('aria-label') ?? '',
+            enabled: g.disabled === false,
+          };
         } catch {
           return null;
         }
       });
       check(
         'scanner gallery thumb appears after a capture',
-        galleryState !== null && galleryState.thumbs >= 1,
+        galleryState !== null &&
+          galleryState.thumbs >= 1 &&
+          galleryState.enabled === true &&
+          /Open review/.test(galleryState.label),
         JSON.stringify(galleryState),
       );
       await scanCaptureOnce(page);
-      await page.waitForFunction(
-        () => {
-          try {
-            const s = document.querySelector('[data-scan-strip]');
-            return s !== null && s.querySelectorAll('button').length >= 2;
-          } catch {
-            return false;
-          }
-        },
-        { timeout: 30000 },
-      );
+      await waitForStripThumbs(page, 2);
       const queueState = await page.evaluate(() => {
         try {
           const s = document.querySelector('[data-scan-strip]');
@@ -1861,10 +1990,16 @@ async function main() {
           const live =
             v !== null && (v.readyState >= 2 || v.videoWidth > 0 || v.played !== undefined);
           const thumbs = s === null ? -1 : s.querySelectorAll('button').length;
+          const preparing = document.querySelector('[data-review-preparing]');
+          const finder = document.querySelector('[data-finder-status]')?.textContent?.trim() ?? '';
           return {
             header: `strip thumbs ${thumbs} of 2`,
             silent: alert === null,
             live,
+            noPreparing: preparing === null,
+            finder: finder.slice(0, 80),
+            idle: /Point at the page|Starting camera/i.test(finder),
+            notScanning: !/hold steady|scanning/i.test(finder),
           };
         } catch {
           return null;
@@ -1875,7 +2010,10 @@ async function main() {
         queueState !== null &&
           /of 2\b/.test(queueState.header) &&
           queueState.silent &&
-          queueState.live,
+          queueState.live &&
+          queueState.noPreparing === true &&
+          queueState.idle === true &&
+          queueState.notScanning === true,
         JSON.stringify(queueState),
       );
       // Strip docked-bottom contract: the camera-phase `[data-scan-strip]`
@@ -1962,13 +2100,22 @@ async function main() {
         ctaText === 'View 2 pages',
         ctaText,
       );
-      await page.evaluate(() => {
-        try {
-          document.querySelector('[data-review-cta]')?.click();
-        } catch {
-          /* noop */
-        }
-      });
+      // Deferred review-time ML: the CTA enters THROUGH the blocking
+      // preparing overlay (detection runs here, never in the camera phase).
+      // L-12: the helper dispatches (click) in one evaluate, waitForFunctions
+      // the race post-condition (total predicate per L-11), measures detail
+      // in a later evaluate, then waits for disappearance.
+      const reviewEntry = await clickCTAAndAwaitReview(page, 2);
+      check(
+        'scanner review preparing overlay blocks with progress + cancel (Preparing pages… i of N, role=status)',
+        reviewEntry.clicked === true &&
+          reviewEntry.preparingSeen === true &&
+          reviewEntry.preparingDetail !== null &&
+          reviewEntry.preparingDetail.role === 'status' &&
+          reviewEntry.preparingDetail.progress === true &&
+          reviewEntry.preparingDetail.cancelPresent === true,
+        JSON.stringify(reviewEntry.preparingDetail),
+      );
       await waitForResultImg(page);
       let queueReached = false;
       try {
@@ -1996,7 +2143,8 @@ async function main() {
       });
       check(
         'scanner review phase shows queue (live capture hidden)',
-        queueReached &&
+        reviewEntry.preparingGone === true &&
+          queueReached &&
           queuePhase !== null &&
           queuePhase.queuePresent &&
           queuePhase.of2 &&
@@ -2083,13 +2231,10 @@ async function main() {
           addReturned = false;
         }
         if (addReturned) {
-          await page.evaluate(() => {
-            try {
-              document.querySelector('[data-review-cta]')?.click();
-            } catch {
-              /* noop */
-            }
-          });
+          // Processed entries skip ML: the helper's race resolves via the
+          // ready queue (no appearance wait), then the existing waits below
+          // re-assert review readiness for the round-trip check.
+          await clickCTAAndAwaitReview(page, 2);
           try {
             await page.waitForFunction(
               () => {
@@ -2832,36 +2977,13 @@ async function main() {
       // (page 2 current, 1 accepted) and every downstream check still holds.
       if (emptiedToCamera) {
         await scanCaptureOnce(page);
-        await page.waitForFunction(
-          () => {
-            try {
-              const s = document.querySelector('[data-scan-strip]');
-              return s !== null && s.querySelectorAll('button').length >= 1;
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 30000 },
-        );
+        await waitForStripThumbs(page, 1);
         await scanCaptureOnce(page);
-        await page.waitForFunction(
-          () => {
-            try {
-              const s = document.querySelector('[data-scan-strip]');
-              return s !== null && s.querySelectorAll('button').length >= 2;
-            } catch {
-              return false;
-            }
-          },
-          { timeout: 30000 },
-        );
-        await page.evaluate(() => {
-          try {
-            document.querySelector('[data-review-cta]')?.click();
-          } catch {
-            /* noop */
-          }
-        });
+        await waitForStripThumbs(page, 2);
+        // Fresh queue → unprocessed → the preparing overlay must run again
+        // (same deferred flow as the main entry; readiness is gated by the
+        // adjust/Apply checks below, so no extra check here).
+        await clickCTAAndAwaitReview(page, 2);
         await waitForResultImg(page);
         await waitForQueue(page, 2, 30000);
       }
@@ -3907,13 +4029,8 @@ async function main() {
         } catch {
           /* measured via the review wait below */
         }
-        await page.evaluate(() => {
-          try {
-            document.querySelector('[data-review-cta]')?.click();
-          } catch {
-            /* noop */
-          }
-        });
+        // Processed entries skip ML (race resolves via the ready queue).
+        await clickCTAAndAwaitReview(page, 2);
         let roundTripped = false;
         try {
           await page.waitForFunction(

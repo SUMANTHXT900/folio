@@ -269,6 +269,145 @@ export async function closeStudioDoc(id: string): Promise<void> {
   binaries.delete(id);
 }
 
+/* ---------- cross-tool handoff (zero-copy pending transfer) ---------- */
+
+/**
+ * One pending cross-tool handoff: lightweight doc handles plus the
+ * verbatim source name for downstream `smartOutputName` chaining.
+ *
+ * Only handles cross the boundary — never bytes, never base64 (D5).
+ * `docs` are already registered in the module `binaries` map (via
+ * `adoptOutputsAsDocs`); the consumer owns them after `consume` and
+ * closes each via `closeStudioDoc` when done (P5-1: close cancels thumb
+ * work, revokes thumb/preview URLs, closes the render document, then
+ * frees bytes — in that order).
+ */
+export interface PendingTransfer {
+  id: string;
+  docs: StudioDoc[];
+  /**
+   * Original input name, stored VERBATIM (no sanitize, no suffix
+   * stacking like `x-rearranged-split`): the next tool chains its
+   * `smartOutputName` from this, never from an adopted output name.
+   */
+  sourceName: string;
+  producedBy: import('../StudioApp').ToolId | string;
+  at: number;
+}
+
+/**
+ * Adopts engine outputs as studio documents: each output's bytes move
+ * into the module-level `binaries` map BY REFERENCE (no slice, no copy,
+ * no base64) under a fresh studio id, then register through the existing
+ * `openStudioBytes` intake — so the render side still takes its defensive
+ * copy internally (L-2) while the store keeps the original. Returns
+ * lightweight `StudioDoc` handles only; no bytes enter React state.
+ *
+ * Output order and names are preserved exactly: `sourceName` is accepted
+ * for call-site symmetry with `setPendingTransfer` but is never applied
+ * to the adopted names (no stacking) — thread it verbatim into
+ * `setPendingTransfer` for downstream `smartOutputName` chaining.
+ *
+ * Ownership transfers to the returned docs: callers must drop their
+ * `StudioOutput` references after a successful adopt. On failure, every
+ * partially-adopted doc is closed again (no leaked bytes, render docs,
+ * or URLs); structured `StudioError`s — including `CANCELLED` — rethrow
+ * with code + operation intact, never swallowed or rewrapped.
+ */
+export async function adoptOutputsAsDocs(
+  outputs: StudioOutput[],
+  sourceName: string,
+): Promise<StudioDoc[]> {
+  if (outputs.length === 0) {
+    throw toStudioError(
+      {
+        code: 'INVALID_INPUT',
+        message: 'engine produced no outputs to adopt',
+        details: `source=${sourceName}`,
+      },
+      'pdf.inspect',
+    );
+  }
+  const docs: StudioDoc[] = [];
+  try {
+    for (const output of outputs) {
+      docs.push(await openStudioBytes(output.name, output.bytes));
+    }
+  } catch (error) {
+    for (const doc of docs) {
+      await closeStudioDoc(doc.id).catch(() => undefined);
+    }
+    if ((error as { code?: string } | null | undefined)?.code === 'CANCELLED') {
+      throw error;
+    }
+    if (error instanceof Error && 'code' in error && 'operation' in error) {
+      throw error;
+    }
+    throw toStudioError(error instanceof Error ? { message: error.message } : {}, 'pdf.inspect');
+  }
+  return docs;
+}
+
+let transferCounter = 0;
+let pendingTransfer: PendingTransfer | null = null;
+
+/**
+ * Stages adopted docs as the single pending cross-tool transfer,
+ * replacing any previous one. The `docs` array is copied so later caller
+ * mutations cannot reshape the slot; `sourceName` is stored verbatim for
+ * downstream `smartOutputName` chaining (never stacked). Doc bytes stay
+ * owned in the `binaries` map — this only stages handles, so the caller
+ * (or the consumer after `consumePendingTransfer`) still closes each doc
+ * via `closeStudioDoc`. Returns the transfer id.
+ */
+export function setPendingTransfer(
+  docs: StudioDoc[],
+  sourceName: string,
+  producedBy: import('../StudioApp').ToolId | string,
+): string {
+  transferCounter += 1;
+  const id = `transfer-${transferCounter}`;
+  pendingTransfer = { id, docs: [...docs], sourceName, producedBy, at: Date.now() };
+  return id;
+}
+
+/**
+ * Takes the pending transfer, clearing the slot (single-consume: the
+ * next call returns null until a new `setPendingTransfer`). Ownership of
+ * the docs moves to the caller, which closes each via `closeStudioDoc`.
+ */
+export function consumePendingTransfer(): PendingTransfer | null {
+  const transfer = pendingTransfer;
+  pendingTransfer = null;
+  return transfer;
+}
+
+/** Drops the pending transfer without taking it (docs stay caller-owned). */
+export function clearPendingTransfer(): void {
+  pendingTransfer = null;
+}
+
+/**
+ * Reads the pending transfer without consuming it (tests/diagnostics).
+ * Returns a shallow copy — mutating the copy cannot reshape the slot.
+ */
+export function peekPendingTransfer(): PendingTransfer | null {
+  if (pendingTransfer === null) {
+    return null;
+  }
+  return { ...pendingTransfer, docs: [...pendingTransfer.docs] };
+}
+
+/** Test-only view of the studio binary store (adopt/close leak checks). */
+export const __studioBinariesForTests = {
+  size(): number {
+    return binaries.size;
+  },
+  has(id: string): boolean {
+    return binaries.has(id);
+  },
+};
+
 export interface StudioRunOptions {
   onProgress?: (progress: StudioProgress) => void;
 }
@@ -1379,6 +1518,7 @@ export async function __resetStudioForTests(): Promise<void> {
   }
   renderDocIds.clear();
   binaries.clear();
+  pendingTransfer = null;
   adapter = null;
   renders = null;
   thumbs = null;

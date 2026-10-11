@@ -1,22 +1,13 @@
 import { useRef, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  ToolHeading,
-  Button,
-  Card,
-  Progress,
-  ResultMeta,
-  ErrorBlock,
-  formatBytes,
-} from '../components/ui';
-import { DownloadCard } from '../components/DownloadCard';
+import { ToolHeading, Button, Card, Progress, ErrorBlock } from '../components/ui';
+import { ContinueCard } from '../components/ContinueCard';
 import { smartOutputName } from '../components/downloadNaming';
 import {
   releaseStagedBytes,
-  formatDurationMs,
   stageStudioBytes,
-  studioShareAvailable,
   type StudioJob,
+  type StudioOutput,
 } from '../services/folio';
 import { buildImagesPdf, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
@@ -104,6 +95,20 @@ export function preStageShardEstimate(
 }
 
 /**
+ * Maps the single completed build output to the handoff item.
+ *
+ * The engine output travels by reference (bytes, byteLength, pageCount
+ * untouched — the sharded path stays byte-identical for small batches and
+ * ordered for large ones); only the app-side label is set to the smart
+ * `images` name, so the ContinueCard download branch and the handed-off
+ * record name the file exactly as the old DownloadCard did. Exported for
+ * unit tests.
+ */
+export function toPdfOutput(first: StudioOutput, sourceName: string): StudioOutput {
+  return { ...first, name: sourceName };
+}
+
+/**
  * Images → PDF page assembly: uploads join one ordered page collection
  * (preview, reorder, remove, rotate), then build through the Folio engine
  * (`pdf.images_to_pdf`, one page per image, in listed order). Image bytes
@@ -113,14 +118,26 @@ export function preStageShardEstimate(
  * pre-named `scan-NNN.jpg` in capture order (`source: 'camera'`) and join
  * the same collection via `addFiles` — handles only, no normalization, so
  * the gallery upload path stays byte-identical.
+ *
+ * Images is a continue SOURCE only, never a target: a completed build
+ * renders `ContinueCard` (download branch keeps the existing smart `images`
+ * naming; the continue branch adopts the single PDF output into the
+ * pending-transfer handoff for PDF tools and navigates). No
+ * pending-transfer consume logic lives here — PDF bytes cannot enter the
+ * image page collection without rasterization, which is out of scope, so
+ * any pending transfer is ignored and left for PDF tools.
  */
 export default function ImagesTool() {
   const { pages, importFiles, move, remove, rotate, clear, reorder, addFiles } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [working, setWorking] = useState(false);
-  const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
-  const [meta, setMeta] = useState<string[]>([]);
+  const [done, setDone] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
+    durationMs: number;
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   // Single progress object (staging + engine share it): one state update
   // per progress tick instead of two staggered setter passes. Fraction is
@@ -185,17 +202,18 @@ export default function ImagesTool() {
     void addUploads(files).catch(setError);
   };
 
-  // A completed PDF is stale the moment the collection or page-size
+  // A completed build is stale the moment the collection or page-size
   // policy changes (import/remove/reorder/rotate/clear) — but ONLY when a
   // completed build exists. Guarded by `completedBuildRef` so the effect
   // is a no-op during assembly and can never clear a fresh run: clearing
-  // the completion card brings Build PDF back AND releases the previous
-  // output Blob (P2).
+  // the completion card brings Build PDF back. The output bytes need no
+  // teardown here — they were never staged (input staged ids were released
+  // in onBuild's finally; the single output travels by reference in `done`
+  // and is collected with state).
   useEffect(() => {
     if (!completedBuildRef.current) return;
     completedBuildRef.current = false;
     setDone(null);
-    setMeta([]);
   }, [pages, pageSize]);
 
   const onBuild = async () => {
@@ -204,7 +222,6 @@ export default function ImagesTool() {
     setWorking(true);
     setError(null);
     setDone(null);
-    setMeta([]);
     setProgress(null);
     const staged: string[] = [];
     const stagedSizes: number[] = [];
@@ -247,32 +264,24 @@ export default function ImagesTool() {
       const out = await job.done;
       jobRef.current = null;
       const first = out.outputs[0];
-      const name = smartOutputName(
+      // Existing naming policy, unchanged: the smart `images` default from
+      // the collection (`<page>.pdf` / `<first>-plus<N-1>-pages.pdf`). It
+      // doubles as the handoff `sourceName`, and labels the single output
+      // (see `toPdfOutput`) so the ContinueCard download branch saves with
+      // exactly this name.
+      const sourceName = smartOutputName(
         'images',
         pages.map((p) => p.name),
       );
-      // ONE Blob for download, re-download, and share (P2): the
-      // engine output bytes are not retained afterwards, and no second
-      // Blob is built. DownloadCard owns its object URL (revoked on
-      // replace/unmount); no auto-download fires — the card's anchor
-      // is the trigger. The Blob stays only while this completion card
-      // is displayed — required for save-again/share; cleared on
-      // rebuild, clear, unmount.
-      const blob = new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' });
-      setDone({ name, blob });
+      // Source-only handoff item: the single PDF from `images_to_pdf`
+      // (single-worker or sharded — both resolve one ordered PDF here).
+      // No Blob is minted and no bytes are staged or retained: the output
+      // travels by reference in `done`, the download object-URL lifecycle
+      // belongs to ContinueCard, and ContinueCard stages bytes only on an
+      // explicit continue tap (adopt + setPending + navigate).
+      const pdfOutput = toPdfOutput(first, sourceName);
+      setDone({ outputs: [pdfOutput], sourceName, durationMs: out.durationMs });
       completedBuildRef.current = true;
-      const summary = out.summary;
-      const imageCount =
-        summary !== undefined && 'imageCount' in summary && typeof summary.imageCount === 'number'
-          ? summary.imageCount
-          : pages.length;
-      const pageCount =
-        summary !== undefined && 'pageCount' in summary ? summary.pageCount : imageCount;
-      setMeta([
-        `${imageCount} image${imageCount === 1 ? '' : 's'} → ${pageCount}-page PDF`,
-        `${formatBytes(first.byteLength)}`,
-        `Completed in ${formatDurationMs(out.durationMs)}`,
-      ]);
     } catch (e) {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
@@ -294,6 +303,21 @@ export default function ImagesTool() {
     } catch {
       // The job settles the UI via onBuild's catch/finally.
     }
+  };
+
+  // Back-to-edit from the completion card: dismisses the card and brings
+  // Build PDF back WITHOUT touching the page collection — pages, order,
+  // rotations, and preview URLs stay live (editing again invalidates via
+  // the [pages, pageSize] effect as before). No staged claims remain here
+  // (input staged ids were released in onBuild's finally; the output was
+  // never staged), and — critically — nothing is revoked: revocation stays
+  // exclusively in the useImagePages lifecycle (remove/clear/unmount,
+  // outside setPages updaters), so back-to-edit can never double-revoke.
+  // A successful continue handoff unmounts this tool via navigation, which
+  // runs the same hook unmount sweep (no leaked preview URLs).
+  const backToEdit = () => {
+    completedBuildRef.current = false;
+    setDone(null);
   };
 
   return (
@@ -406,14 +430,13 @@ export default function ImagesTool() {
 
           {error !== null && <ErrorBlock error={error} />}
           {done && (
-            <>
-              <DownloadCard
-                blob={done.blob}
-                suggestedName={done.name}
-                shareable={studioShareAvailable()}
-              />
-              <ResultMeta lines={meta} />
-            </>
+            <ContinueCard
+              outputs={done.outputs}
+              sourceName={done.sourceName}
+              producedBy="images"
+              onBackToEdit={backToEdit}
+              durationMs={done.durationMs}
+            />
           )}
         </div>
       )}

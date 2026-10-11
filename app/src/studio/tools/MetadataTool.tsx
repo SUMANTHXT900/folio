@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import {
   ToolHeading,
   DropZone,
@@ -7,19 +7,19 @@ import {
   Spinner,
   Card,
   Progress,
-  ResultMeta,
   ErrorBlock,
-  formatBytes,
 } from '../components/ui';
-import { DownloadCard } from '../components/DownloadCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
+import ContinueCard from '../components/ContinueCard';
 import {
   closeStudioDoc,
   openStudioBytes,
   runStudioOperation,
-  formatDurationMs,
-  studioShareAvailable,
+  consumePendingTransfer,
+  getStudioBytes,
+  type StudioDoc,
+  type StudioOutput,
   type StudioJob,
 } from '../services/folio';
 import type { DocumentMetadataData, PdfDateData } from '../../types/engine';
@@ -76,13 +76,17 @@ type DateKey = (typeof DATE_FIELDS)[number]['key'];
  * custom keys (both unsupported by the engine, by design).
  */
 export default function MetadataTool() {
-  const { files, setFiles, addFiles } = usePdfFiles();
+  const { files, setFiles, addFiles, remove } = usePdfFiles();
   const file = files[0] ?? null;
   const [meta, setMeta] = useState<DocumentMetadataData | null>(null);
   const [reading, setReading] = useState(false);
   const [working, setWorking] = useState(false);
-  const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
-  const [doneMeta, setDoneMeta] = useState<Array<string | null>>([]);
+  const [done, setDone] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
+    durationMs: number;
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
@@ -100,11 +104,55 @@ export default function MetadataTool() {
     modificationDate: '',
   });
   const jobRef = useRef<StudioJob | null>(null);
+  const [continuedFrom, setContinuedFrom] = useState<{
+    producedBy: string;
+    sourceName: string;
+  } | null>(null);
+  // Pending-transfer claim: same back-out-release discipline as
+  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
+  // uploaded, never in state).
+  const claimedRef = useRef<StudioDoc[]>([]);
+  const ranRef = useRef(false);
+  const mountGenRef = useRef(0);
+
+  // Pending-transfer intake (mount once): the handed-off doc becomes the
+  // single input by reference — verified live, never re-uploaded.
+  useEffect(() => {
+    mountGenRef.current += 1;
+    const gen = mountGenRef.current;
+    const pending = consumePendingTransfer();
+    if (pending !== null) {
+      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
+      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
+      if (firstDoc !== undefined) {
+        claimedRef.current = [firstDoc];
+        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
+        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
+      }
+    }
+    return () => {
+      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
+      const claimed = claimedRef.current;
+      window.setTimeout(() => {
+        if (mountGenRef.current !== gen) return;
+        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
+        if (ranRef.current) return;
+        for (const d of claimed) void closeStudioDoc(d.id);
+      }, 0);
+    };
+  }, [setFiles]);
+
+  // Cancel the running job when the user navigates away.
+  useEffect(
+    () => () => {
+      void jobRef.current?.cancel();
+    },
+    [],
+  );
 
   useEffect(() => {
     setMeta(null);
     setDone(null);
-    setDoneMeta([]);
     setError(null);
     if (!file) return;
     let cancelled = false;
@@ -134,13 +182,28 @@ export default function MetadataTool() {
 
   const onSave = async () => {
     if (!file) return;
+    ranRef.current = true;
     setWorking(true);
     setError(null);
     setDone(null);
-    setDoneMeta([]);
     setFraction(null);
     setStage(null);
     try {
+      // The engine rejects setting "" (L3) — a field with only blank
+      // input and no Clear tick is almost certainly a removal attempt,
+      // so reject it here with Clear guidance instead of silently
+      // leaving it unchanged. Untouched fields stay "" and are skipped
+      // below (leave-unchanged patch semantics, OPERATIONS.md).
+      for (const { key, label } of TEXT_FIELDS) {
+        if (!clears[key] && texts[key] !== '' && texts[key].trim() === '') {
+          throw new Error(`"${label}" is blank — tick Clear to remove it, or leave it unchanged.`);
+        }
+      }
+      for (const { key, label } of DATE_FIELDS) {
+        if (!clears[key] && dates[key] !== '' && dates[key].trim() === '') {
+          throw new Error(`"${label}" is blank — tick Clear to remove it, or leave it unchanged.`);
+        }
+      }
       const patch: Record<string, { op: 'set' | 'clear'; value?: unknown }> = {};
       for (const { key } of TEXT_FIELDS) {
         if (clears[key]) {
@@ -189,17 +252,13 @@ export default function MetadataTool() {
       const out = await job.done;
       jobRef.current = null;
       const first = out.outputs[0];
+      if (first === undefined) throw new Error('Metadata produced no output.');
       const name = smartOutputName('metadata', [file.name]);
       setDone({
-        name,
-        blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+        sourceName: file.name,
+        outputs: [{ ...first, name }],
+        durationMs: out.durationMs,
       });
-      const summary = out.summary;
-      setDoneMeta([
-        summary !== undefined && 'pageCount' in summary ? `${summary.pageCount} pages` : null,
-        `${formatBytes(first.byteLength)}`,
-        `Completed in ${formatDurationMs(out.durationMs)}`,
-      ]);
       // Refresh the displayed properties from the written output.
       const temp = await openStudioBytes(`reread:${name}`, first.bytes);
       try {
@@ -233,6 +292,10 @@ export default function MetadataTool() {
       // The job settles the UI via onSave's catch/finally.
     }
   };
+
+  const handleBackToEdit = useCallback(() => {
+    setDone(null);
+  }, []);
 
   const rows: Array<[string, string]> = meta
     ? [
@@ -270,13 +333,22 @@ export default function MetadataTool() {
 
       {file && (
         <div className="space-y-5">
+          {continuedFrom && (
+            <p className="text-xs text-brass-600 dark:text-brass-300 bg-brass-400/[0.07] rounded-xl px-4 py-2.5 border border-brass-500/25">
+              Continued from{' '}
+              {continuedFrom.producedBy.charAt(0).toUpperCase() + continuedFrom.producedBy.slice(1)}{' '}
+              — {continuedFrom.sourceName} is loaded below by reference (not re-uploaded).
+            </p>
+          )}
           <FileChip
             name={file.name}
             size={file.sizeBytes}
             onRemove={() => {
-              setFiles([]);
+              // P5-1 class: removal goes through `remove` (frees bytes,
+              // the rendering document, and URLs) — never a bare state reset.
+              claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
+              remove(file.id);
               setDone(null);
-              setDoneMeta([]);
               setMeta(null);
             }}
           />
@@ -316,8 +388,8 @@ export default function MetadataTool() {
               Edit properties
             </p>
             <p className="text-xs text-ink-400 dark:text-ink-300 mb-3">
-              Blank means leave unchanged. Dates use{' '}
-              <span className="font-mono">YYYY-MM-DD HH:MM:SS +HHMM</span>.
+              Blank means leave unchanged. To remove a value, tick Clear — empty values can’t be
+              saved. Dates use <span className="font-mono">YYYY-MM-DD HH:MM:SS +HHMM</span>.
             </p>
             <div className="space-y-2">
               {TEXT_FIELDS.map(({ key, label }) => (
@@ -396,14 +468,13 @@ export default function MetadataTool() {
 
           {error !== null && <ErrorBlock error={error} />}
           {done && (
-            <>
-              <DownloadCard
-                blob={done.blob}
-                suggestedName={done.name}
-                shareable={studioShareAvailable()}
-              />
-              <ResultMeta lines={doneMeta} />
-            </>
+            <ContinueCard
+              outputs={done.outputs}
+              sourceName={done.sourceName}
+              producedBy="metadata"
+              onBackToEdit={handleBackToEdit}
+              durationMs={done.durationMs}
+            />
           )}
         </div>
       )}

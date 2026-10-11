@@ -3,8 +3,16 @@
  * decode one at a time, so large batches don't look stalled.
  */
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import ImagesTool from './ImagesTool';
+
+// Sibling-owned ContinueCard (see ImagesTool.test.ts): mocked to the
+// frozen contract so this suite never depends on the sibling lane's file.
+vi.mock('../components/ContinueCard', () => ({
+  ContinueCard: (_props: Record<string, unknown>) =>
+    createElement('div', { 'data-continue-card': 'true' }),
+}));
 
 afterEach(() => {
   cleanup();

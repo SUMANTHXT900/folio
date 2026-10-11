@@ -4,6 +4,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-22 — Shutter-tap freeze (scan capture jank)
+
+- **Status.** Fix implemented (D47 deferred review-time detection); field confirmation pending on the user's phone. **Area.** Scanner (`ScanicCapture.tsx` shutter path). **Severity.** High (user-reported blocker: tap lagged, then recovered).
+- **Symptoms.** Every capture tap showed `Scanning… hold steady`, froze briefly, then came back.
+- **Root cause.** Per-tap `takePhoto` (max-res) + main-thread full-res decode (`decodeFileToImageData`) + immediate ML `detect` + 800ms dwell, serialized on one `ScanicClient` worker.
+- **Fix direction.** D47: shutter parks File + thumb as `queued` (no decode, no worker, idle finder); `goToReview` drains via K-lane pool with blocking `data-review-preparing` overlay; miss = full frame (D46 rule kept).
+- **Verification.** Scoped suites green (capture 69 incl. queue-only + drain + cancel pins; ScanicReview 35 untouched); full E2E green (see WORKLOG). Field feel still to be confirmed on device.
+
 ### F-21 — Intermittent white-page detection misses (scanner)
 
 - **Status.** Superseded by D33 (custom pipeline deleted 2026-10-04; field validation no longer applies to it). History preserved below. D34 replaces the pipeline with the scanic integration — the field gate re-arms on scanic (see D34 note below). **Area.** Scanner (`scan/src/detect.rs`, `scan/src/geometry.rs`, capture UX). **Severity.** High (target 70–80% hit rate not met on the core white-page-on-dark-background scene).

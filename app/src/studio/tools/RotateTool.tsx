@@ -6,22 +6,23 @@ import {
   Button,
   Spinner,
   Progress,
-  ResultMeta,
   ErrorBlock,
 } from '../components/ui';
-import { DownloadCard } from '../components/DownloadCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
+import ContinueCard from '../components/ContinueCard';
 import {
+  consumePendingTransfer,
+  getStudioBytes,
+  closeStudioDoc,
   releaseStagedBytes,
   runStudioOperation,
   stageStudioBytes,
-  formatDurationMs,
-  studioShareAvailable,
+  type StudioDoc,
+  type StudioOutput,
   type StudioJob,
 } from '../services/folio';
-import { formatBytes } from '../components/ui';
 
 const ICON = (
   <svg
@@ -106,9 +107,46 @@ const RotateTile = memo(function RotateTile({
 });
 
 export default function RotateTool() {
-  const { files, addFiles, remove } = usePdfFiles();
+  const { files, addFiles, remove, setFiles } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
+  const [continuedFrom, setContinuedFrom] = useState<{
+    producedBy: string;
+    sourceName: string;
+  } | null>(null);
+  // Pending-transfer claim: same back-out-release discipline as
+  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
+  // uploaded, never in state).
+  const claimedRef = useRef<StudioDoc[]>([]);
+  const ranRef = useRef(false);
+  const mountGenRef = useRef(0);
+
+  // Pending-transfer intake (mount once): the handed-off doc becomes the
+  // single input by reference — verified live, never re-uploaded.
+  useEffect(() => {
+    mountGenRef.current += 1;
+    const gen = mountGenRef.current;
+    const pending = consumePendingTransfer();
+    if (pending !== null) {
+      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
+      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
+      if (firstDoc !== undefined) {
+        claimedRef.current = [firstDoc];
+        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
+        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
+      }
+    }
+    return () => {
+      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
+      const claimed = claimedRef.current;
+      window.setTimeout(() => {
+        if (mountGenRef.current !== gen) return;
+        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
+        if (ranRef.current) return;
+        for (const d of claimed) void closeStudioDoc(d.id);
+      }, 0);
+    };
+  }, [setFiles]);
 
   useEffect(() => {
     if (!file) return;
@@ -137,8 +175,14 @@ export default function RotateTool() {
   const [rot, setRot] = useState<Record<number, number>>({});
   const [allRot, setAllRot] = useState(0);
   const [working, setWorking] = useState(false);
-  const [done, setDone] = useState<{ name: string; blob: Blob } | null>(null);
-  const [meta, setMeta] = useState<string[]>([]);
+  const [done, setDone] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` (summed across chained runs; 0 for the no-op path) — display-only (D4). */
+    durationMs: number;
+    /** No-op success (0°/empty selection): the output references the input bytes. */
+    isNoop: boolean;
+  } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [showAll, setShowAll] = useState(false);
   const [fraction, setFraction] = useState<number | null>(null);
@@ -162,16 +206,14 @@ export default function RotateTool() {
 
   const onDownload = async () => {
     if (!file) return;
+    ranRef.current = true;
     setWorking(true);
     setError(null);
     setDone(null);
-    setMeta([]);
     setFraction(null);
     setStage(null);
     let currentTemp: string | null = null;
     let totalDurationMs = 0;
-    let lastPageCount: number | null = null;
-    let lastByteLength = 0;
     try {
       // Fold pending global turns into the per-page map (preview parity).
       const final: Record<number, number> = { ...rot };
@@ -182,6 +224,9 @@ export default function RotateTool() {
       }
       // The engine rotates one angle per call: group pages by turns and
       // chain up to three runs over intermediate in-memory documents.
+      // Relative quarter-turn normalization lives here: per-page spins
+      // fold modulo 4 (`spinOne`/`spinAll`), so only 90/180/270 groups
+      // ever reach the engine.
       const groups = [1, 2, 3]
         .map((turns) => ({
           angleDeg: turns * 90,
@@ -190,6 +235,22 @@ export default function RotateTool() {
             .map(([idx]) => Number(idx) + 1),
         }))
         .filter((group) => group.pages.length > 0);
+      if (groups.length === 0) {
+        // No-op success (engine contract: empty selection and 0° are
+        // valid): the output references the input bytes — no worker
+        // round-trip, no copy. It doubles as the handoff item, labelled
+        // with the existing smart `rotate` name.
+        const bytes = getStudioBytes(file.id);
+        if (bytes === undefined) throw new Error('document is no longer open');
+        const name = smartOutputName('rotate', [file.name]);
+        setDone({
+          sourceName: file.name,
+          outputs: [{ name, bytes, byteLength: bytes.byteLength, pageCount: file.pageCount }],
+          durationMs: 0,
+          isNoop: true,
+        });
+        return;
+      }
       let currentId = file.id;
       for (let gi = 0; gi < groups.length; gi += 1) {
         const group = groups[gi];
@@ -232,9 +293,8 @@ export default function RotateTool() {
           throw wrapped;
         }
         const first = out.outputs[0];
+        if (first === undefined) throw new Error('Rotate produced no output.');
         totalDurationMs += out.durationMs;
-        lastPageCount = first.pageCount;
-        lastByteLength = first.byteLength;
         if (gi < groups.length - 1) {
           // Frontend-only chaining: stage the intermediate bytes WITHOUT a
           // PDF.js render-load (`openStudioBytes` would parse + count pages
@@ -250,19 +310,11 @@ export default function RotateTool() {
         } else {
           const name = smartOutputName('rotate', [file.name]);
           setDone({
-            name,
-            blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+            sourceName: file.name,
+            outputs: [{ ...first, name }],
+            durationMs: totalDurationMs,
+            isNoop: false,
           });
-          const summary = out.summary;
-          const pages =
-            summary !== undefined && 'pageCount' in summary
-              ? summary.pageCount
-              : (lastPageCount ?? file.pageCount);
-          setMeta([
-            `${pages} pages`,
-            `${formatBytes(lastByteLength)}`,
-            `Completed in ${formatDurationMs(totalDurationMs)}`,
-          ]);
         }
       }
       jobRef.current = null;
@@ -292,6 +344,10 @@ export default function RotateTool() {
     }
   };
 
+  const handleBackToEdit = useCallback(() => {
+    setDone(null);
+  }, []);
+
   // Cancel the running job when the user navigates away
   useEffect(
     () => () => {
@@ -317,6 +373,13 @@ export default function RotateTool() {
         />
       ) : (
         <>
+          {continuedFrom && (
+            <p className="mb-4 text-xs text-brass-600 dark:text-brass-300 bg-brass-400/[0.07] rounded-xl px-4 py-2.5 border border-brass-500/25">
+              Continued from{' '}
+              {continuedFrom.producedBy.charAt(0).toUpperCase() + continuedFrom.producedBy.slice(1)}{' '}
+              — {continuedFrom.sourceName} is loaded below by reference (not re-uploaded).
+            </p>
+          )}
           <div className="mb-6 flex flex-wrap items-center gap-3">
             <div className="flex-none">
               <FileChip
@@ -325,6 +388,7 @@ export default function RotateTool() {
                 onRemove={() => {
                   setRot({});
                   setAllRot(0);
+                  claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
                   remove(file.id);
                 }}
               />
@@ -448,12 +512,18 @@ export default function RotateTool() {
             ))}
           {done && (
             <div className="mt-6">
-              <DownloadCard
-                blob={done.blob}
-                suggestedName={done.name}
-                shareable={studioShareAvailable()}
+              <ContinueCard
+                outputs={done.outputs}
+                sourceName={done.sourceName}
+                producedBy="rotate"
+                onBackToEdit={handleBackToEdit}
+                durationMs={done.durationMs}
               />
-              <ResultMeta lines={meta} />
+              {done.isNoop && (
+                <p className="mt-2 text-xs text-ink-400 dark:text-ink-300">
+                  No pages rotated — the output matches the input.
+                </p>
+              )}
             </div>
           )}
           {error !== null && <ErrorBlock error={error} />}

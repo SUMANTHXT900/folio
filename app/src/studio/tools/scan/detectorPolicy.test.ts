@@ -127,3 +127,54 @@ describe('warmMlDetector', () => {
     expect(scanicMock.scan).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('resolveDetectionWorkerCount', () => {
+  it('exposes the MIN/MAX worker bounds and thresholds', async () => {
+    const policy = await loadPolicy();
+    expect(policy.MIN_DETECTION_WORKERS).toBe(1);
+    expect(policy.MAX_DETECTION_WORKERS).toBe(3);
+    expect(policy.MANY_CORE_DETECTION_THRESHOLD).toBe(8);
+    expect(policy.LOW_MEMORY_GB_THRESHOLD).toBe(2);
+  });
+
+  it('collapses to 1 worker on low memory even with many cores', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8, deviceMemory: 1 })).toBe(1);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 12, deviceMemory: 2 })).toBe(
+      1,
+    );
+  });
+
+  it('collapses to 1 worker for a single page', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8, pageCount: 1 })).toBe(1);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 4, pageCount: 1 })).toBe(1);
+  });
+
+  it('resolves 2 workers on mid-range CPUs', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 4 })).toBe(2);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 4, deviceMemory: 4 })).toBe(2);
+  });
+
+  it('resolves 3 workers on many-core CPUs', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8 })).toBe(3);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 12 })).toBe(3);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 16, deviceMemory: 8 })).toBe(
+      3,
+    );
+  });
+
+  it('falls back to the CPU rule when device memory is unknown', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8 })).toBe(3);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 4 })).toBe(2);
+  });
+
+  it('collapses to 1 worker on low-CPU devices', async () => {
+    const policy = await loadPolicy();
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 2 })).toBe(1);
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 1 })).toBe(1);
+  });
+});

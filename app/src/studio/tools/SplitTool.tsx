@@ -9,20 +9,21 @@ import {
   Spinner,
   Card,
   Progress,
-  ResultMeta,
   ErrorBlock,
 } from '../components/ui';
-import { DownloadCard, MultiDownloadCard } from '../components/DownloadCard';
+import ContinueCard from '../components/ContinueCard';
 import { smartSplitPartName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
   runStudioOperation,
-  formatDurationMs,
-  studioShareAvailable,
+  consumePendingTransfer,
+  getStudioBytes,
+  closeStudioDoc,
+  type StudioDoc,
+  type StudioOutput,
   type StudioJob,
 } from '../services/folio';
-import { formatBytes } from '../components/ui';
 
 const PAGE_LIMIT = 24;
 
@@ -94,25 +95,79 @@ function parseRanges(text: string): [number, number][] {
 }
 
 export default function SplitTool() {
-  const { files, addFiles, remove, error: filesError, busy, setBusy, setError } = usePdfFiles();
+  const {
+    files,
+    addFiles,
+    remove,
+    setFiles,
+    error: filesError,
+    busy,
+    setBusy,
+    setError,
+  } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
   const [count, setCount] = useState(0);
   const [keep, setKeep] = useState<boolean[]>([]);
   const [mode, setMode] = useState<'pick' | 'ranges'>('pick');
   const [ranges, setRanges] = useState('');
-  const [result, setResult] = useState<
-    | { name: string; blob: Blob }
-    | { parts: Array<{ key: string; blob: Blob; suggestedName: string }> }
-    | null
-  >(null);
-  const [meta, setMeta] = useState<Array<string | null>>([]);
+  const [result, setResult] = useState<{
+    outputs: StudioOutput[];
+    sourceName: string;
+    /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
+    durationMs: number;
+  } | null>(null);
   const [opError, setOpError] = useState<unknown>(null);
   const [preview, setPreview] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
+  const [continuedFrom, setContinuedFrom] = useState<{
+    producedBy: string;
+    sourceName: string;
+  } | null>(null);
+  // Pending-transfer claim: same back-out-release discipline as
+  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
+  // uploaded, never in state).
+  const claimedRef = useRef<StudioDoc[]>([]);
+  const ranRef = useRef(false);
+  const mountGenRef = useRef(0);
+
+  // Pending-transfer intake (mount once): the handed-off doc becomes the
+  // single input by reference — verified live, never re-uploaded.
+  useEffect(() => {
+    mountGenRef.current += 1;
+    const gen = mountGenRef.current;
+    const pending = consumePendingTransfer();
+    if (pending !== null) {
+      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
+      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
+      if (firstDoc !== undefined) {
+        claimedRef.current = [firstDoc];
+        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
+        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
+      }
+    }
+    return () => {
+      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
+      const claimed = claimedRef.current;
+      window.setTimeout(() => {
+        if (mountGenRef.current !== gen) return;
+        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
+        if (ranRef.current) return;
+        for (const d of claimed) void closeStudioDoc(d.id);
+      }, 0);
+    };
+  }, [setFiles]);
+
+  // Cancel the running job when the user navigates away.
+  useEffect(
+    () => () => {
+      void jobRef.current?.cancel();
+    },
+    [],
+  );
 
   useEffect(() => {
     setResult(null);
@@ -160,11 +215,11 @@ export default function SplitTool() {
 
   async function handleCreate() {
     if (!file) return;
+    ranRef.current = true;
     setBusy(true);
     setError(null);
     setOpError(null);
     setResult(null);
-    setMeta([]);
     setFraction(null);
     setStage(null);
     try {
@@ -186,18 +241,18 @@ export default function SplitTool() {
         const out = await job.done;
         jobRef.current = null;
         const first = out.outputs[0];
+        if (first === undefined) throw new Error('Split produced no output.');
+        // Raw engine output by reference, labelled with the existing
+        // smart part name — it doubles as the handoff `sourceName` feed:
+        // `sourceName` stays the verbatim input name so the next tool
+        // chains its smart name from the original, never stacked.
         setResult({
-          name: smartSplitPartName(file.name, kept[0], kept[kept.length - 1]),
-          blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+          sourceName: file.name,
+          outputs: [
+            { ...first, name: smartSplitPartName(file.name, kept[0], kept[kept.length - 1]) },
+          ],
+          durationMs: out.durationMs,
         });
-        const summary = out.summary;
-        setMeta([
-          'pageCount' in summary
-            ? `${summary.pageCount} page${summary.pageCount === 1 ? '' : 's'}`
-            : null,
-          `${formatBytes(first.byteLength)}`,
-          `Completed in ${formatDurationMs(out.durationMs)}`,
-        ]);
       } else {
         const parsed = parseRanges(ranges);
         if (parsed.length === 0) throw new Error('Enter at least one page or range');
@@ -223,38 +278,24 @@ export default function SplitTool() {
         jobRef.current = job;
         const out = await job.done;
         jobRef.current = null;
-        const summary = out.summary;
-        const partCounts =
-          summary !== undefined && 'parts' in summary
-            ? summary.parts.map((part, i) => `Part ${i + 1} — ${part.pageCount} pages`)
-            : [];
         if (out.outputs.length === 1) {
           const first = out.outputs[0];
-          const [a, b] = ranged[0].range;
+          if (first === undefined) throw new Error('Split produced no output.');
+          const [a, b] = ranged[0]?.range ?? [1, 1];
           setResult({
-            name: smartSplitPartName(file.name, a, b),
-            blob: new Blob([first.bytes as unknown as BlobPart], { type: 'application/pdf' }),
+            sourceName: file.name,
+            outputs: [{ ...first, name: smartSplitPartName(file.name, a, b) }],
+            durationMs: out.durationMs,
           });
-          setMeta([
-            ...partCounts,
-            `${formatBytes(first.byteLength)}`,
-            `Completed in ${formatDurationMs(out.durationMs)}`,
-          ]);
         } else {
-          const parts = out.outputs.map((o, i) => {
-            const [a, b] = ranged[Math.min(i, ranged.length - 1)].range;
-            return {
-              key: String(i),
-              blob: new Blob([o.bytes as unknown as BlobPart], { type: 'application/pdf' }),
-              suggestedName: smartSplitPartName(file.name, a, b),
-            };
+          // Atomicity preserved: this single `pdf.split` call commits all
+          // parts together — outputs surface only after every part
+          // succeeds, never partially.
+          const parts: StudioOutput[] = out.outputs.map((o, i) => {
+            const [a, b] = ranged[Math.min(i, ranged.length - 1)]?.range ?? [1, 1];
+            return { ...o, name: smartSplitPartName(file.name, a, b) };
           });
-          setResult({ parts });
-          setMeta([
-            ...partCounts,
-            `${out.outputs.length} files ready — name them, then download`,
-            `Completed in ${formatDurationMs(out.durationMs)}`,
-          ]);
+          setResult({ sourceName: file.name, outputs: parts, durationMs: out.durationMs });
         }
       }
     } catch (e) {
@@ -280,6 +321,10 @@ export default function SplitTool() {
     }
   };
 
+  const handleBackToEdit = useCallback(() => {
+    setResult(null);
+  }, []);
+
   return (
     <div className="py-6">
       <ToolHeading
@@ -300,10 +345,18 @@ export default function SplitTool() {
 
       {file && (
         <div className="space-y-5">
+          {continuedFrom && (
+            <p className="text-xs text-brass-600 dark:text-brass-300 bg-brass-400/[0.07] rounded-xl px-4 py-2.5 border border-brass-500/25">
+              Continued from{' '}
+              {continuedFrom.producedBy.charAt(0).toUpperCase() + continuedFrom.producedBy.slice(1)}{' '}
+              — {continuedFrom.sourceName} is loaded below by reference (not re-uploaded).
+            </p>
+          )}
           <FileChip
             name={file.name}
             size={file.sizeBytes}
             onRemove={() => {
+              claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
               remove(file.id);
               setResult(null);
             }}
@@ -451,22 +504,14 @@ export default function SplitTool() {
             </div>
           )}
 
-          {result && 'blob' in result && (
-            <>
-              <DownloadCard
-                blob={result.blob}
-                suggestedName={result.name}
-                shareable={studioShareAvailable()}
-              />
-              <ResultMeta lines={meta} />
-            </>
-          )}
-
-          {result && 'parts' in result && (
-            <>
-              <MultiDownloadCard parts={result.parts} shareable={studioShareAvailable()} />
-              <ResultMeta lines={meta} />
-            </>
+          {result && (
+            <ContinueCard
+              outputs={result.outputs}
+              sourceName={result.sourceName}
+              producedBy="split"
+              onBackToEdit={handleBackToEdit}
+              durationMs={result.durationMs}
+            />
           )}
         </div>
       )}

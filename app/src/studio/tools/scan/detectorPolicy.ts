@@ -122,3 +122,78 @@ export function detectorForAttempt(_preferMl?: boolean, _mlReady?: boolean): Sca
 export function defaultDetector(): ScanicDetectorKind {
   return 'ml';
 }
+
+/**
+ * Deferred review-time detection fan-out (D47, P3 shape mirroring
+ * `imageSharding.ts`): shutter stays queue-only; detection runs later over
+ * the queued pages across K parallel lanes.
+ *
+ * - `MIN_DETECTION_WORKERS` (1) is the floor: single-page reviews and
+ *   low-memory/low-CPU devices stay serial.
+ * - `MAX_DETECTION_WORKERS` (3) is the ceiling: detection is ML-bound, so
+ *   more lanes add contention without throughput (same P3 rationale as
+ *   sharding: K = clamp, device-aware).
+ * - `MANY_CORE_DETECTION_THRESHOLD` (8): `hardwareConcurrency >= 8` → 3
+ *   lanes, otherwise 2 — byte-for-byte the `imageSharding.ts` CPU rule.
+ * - `LOW_MEMORY_GB_THRESHOLD` (2): `deviceMemory <= 2` → 1 lane.
+ *   `deviceMemory` is the bucketed Client Hints value
+ *   (0.25/0.5/1/2/4/8); absent → ignored, CPU rule decides.
+ * - `LOW_CPU_COUNT_THRESHOLD` (2): `hardwareConcurrency <= 2` → 1 lane.
+ *
+ * Pure: no DOM and no React. Live `navigator` values are read only when the
+ * corresponding `opts` field is omitted, guarded for SSR/node (no navigator).
+ */
+export const MIN_DETECTION_WORKERS = 1;
+export const MAX_DETECTION_WORKERS = 3;
+export const MANY_CORE_DETECTION_THRESHOLD = 8;
+export const LOW_MEMORY_GB_THRESHOLD = 2;
+export const LOW_CPU_COUNT_THRESHOLD = 2;
+
+export interface DetectionWorkerOptions {
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  pageCount?: number;
+}
+
+function readLiveHardwareConcurrency(): number | undefined {
+  try {
+    const value = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : undefined;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readLiveDeviceMemory(): number | undefined {
+  try {
+    const value =
+      typeof navigator !== 'undefined'
+        ? (navigator as unknown as { deviceMemory?: unknown }).deviceMemory
+        : undefined;
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pure policy: how many parallel detection lanes for a review-time run.
+ * Clamped to `MIN_DETECTION_WORKERS..MAX_DETECTION_WORKERS`. Exported for
+ * unit tests and review-time scheduling.
+ */
+export function resolveDetectionWorkerCount(opts?: DetectionWorkerOptions): number {
+  if (opts?.pageCount !== undefined && opts.pageCount <= 1) return MIN_DETECTION_WORKERS;
+  const deviceMemory = opts?.deviceMemory ?? readLiveDeviceMemory();
+  if (deviceMemory !== undefined && deviceMemory <= LOW_MEMORY_GB_THRESHOLD) {
+    return MIN_DETECTION_WORKERS;
+  }
+  const concurrency = opts?.hardwareConcurrency ?? readLiveHardwareConcurrency();
+  if (concurrency !== undefined && concurrency <= LOW_CPU_COUNT_THRESHOLD) {
+    return MIN_DETECTION_WORKERS;
+  }
+  const workers =
+    concurrency !== undefined && concurrency >= MANY_CORE_DETECTION_THRESHOLD
+      ? MAX_DETECTION_WORKERS
+      : MIN_DETECTION_WORKERS + 1;
+  return Math.min(MAX_DETECTION_WORKERS, Math.max(MIN_DETECTION_WORKERS, workers));
+}

@@ -7,9 +7,19 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ImagesTool, { preStageShardEstimate, stageImagePages } from './ImagesTool';
+import ImagesTool, { preStageShardEstimate, stageImagePages, toPdfOutput } from './ImagesTool';
 import { createPage } from './imagePages';
 import type { ImageRenderer } from './imagePrepare';
+import type { StudioOutput } from '../services/folio';
+
+// ContinueCard is sibling-owned (shared handoff card under
+// `../components/`, alongside DownloadCard): mocked here to the frozen
+// contract props so these suites verify the Images source-only wiring
+// without depending on the sibling lane's file.
+vi.mock('../components/ContinueCard', () => ({
+  ContinueCard: (_props: Record<string, unknown>) =>
+    createElement('div', { 'data-continue-card': 'true' }),
+}));
 
 function stubRenderer(): ImageRenderer {
   return {
@@ -126,6 +136,22 @@ describe('preStageShardEstimate', () => {
     const estimate = preStageShardEstimate(pages);
     expect(estimate.totalBytes).toBe(3);
     expect(estimate.totalPixels).toBe(2500 * 1875 + 800 * 600);
+  });
+});
+
+describe('toPdfOutput', () => {
+  it('labels the single output with the smart source name without touching bytes', () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const first: StudioOutput = { name: 'output-1.pdf', bytes, byteLength: 3, pageCount: 2 };
+    const out = toPdfOutput(first, 'a-plus1-pages.pdf');
+    // Existing download naming travels on the handoff item verbatim.
+    expect(out.name).toBe('a-plus1-pages.pdf');
+    // Everything else passes through by reference — no copy, no re-encode.
+    expect(out.bytes).toBe(bytes);
+    expect(out.byteLength).toBe(3);
+    expect(out.pageCount).toBe(2);
+    // The engine output itself is untouched.
+    expect(first.name).toBe('output-1.pdf');
   });
 });
 
