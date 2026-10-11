@@ -2,6 +2,22 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — v1.11.0 ML + viewfinder Phase 1 deploy (D51, bundle index-B0Z1BiE2.js)
+
+- **Freshness rule followed.** Version 1.10.3 → 1.11.0, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.11.0 entry.
+- **Work.** ML core (session verified optimal, retained warm client + pool, pending-count lanes, spans/confidence/EXIF-probe instrumentation) + viewfinder surgical refactor (4 modules, non-blocking review, labels, safe-area, motion guards) + integration wiring (drain/Re-detect onto retained API, telemetry hookup).
+- **Verification (observed).** tsc 0 errors; 198/198 across 10 scan+capture+review suites; build green (44 entries / 7837.51 KiB, `dist/_headers` present). E2E deferred.
+- **Deploy.** `dev` alias live-verified below. Production (`main`) stays v1.10.3 until you say so.
+- **Remaining.** Phase 2 measured levers (resolution A/B, threshold sweep, pre-downscale) after field data; canonical E2E laptop-side.
+
+## 2026-10-11 — ML + viewfinder Phase 1 docs record (D51; ML-CORE + VF-BUILD lanes in flight, no source touched)
+
+- **Objective.** Record the ML + viewfinder Phase-1 (no-regret) slice while two build lanes run in parallel (ML-CORE in `scan/`, VF-BUILD in `ScanicCapture`/`ScanicReview`). Docs lane only: exclusive ownership of the six docs; no source file touched, no version bump, no release entry.
+- **Inputs.** Four lane-reported analysis inputs (U-style, contents per the lanes; none observed in this docs pass — no findings invented here). Pre-record reads verified in-tree: `AGENTS.md` update rule (no invented history, no contradictions); D33 thread/COOP-COEP baseline + fourth-round rejection; D46 ML-only miss rule; D47 queue-only + K-lane drain + preparing overlay; F-22 freeze shape; F-21 stacked-miss history; L-26 render-tier discipline; WORKLOG head; PERFORMANCE register + P5 record. During this pass the ML-CORE/VF-BUILD lane files were in flight in the working tree — presence read at most, behavior not verified here.
+- **Work recorded (all lane-reported per the Phase-1 brief; none verified here).** ML-CORE: session options, retained warm client across drains, K-lane pending-count hygiene, stage spans + recorded confidence + read-only EXIF probe (observe-only). VF-BUILD: viewfinder 4-module surgical refactor with non-blocking review (D47 overlay semantics kept). Deferred with reasons in D51: resolution A/B (needs spans + EXIF), threshold gating (needs confidence + miss corpus), pre-downscale (needs decode-vs-inference spans), bounded capture (needs phone-tier latency), WebGPU/WebGL rejection (brief-cited 27 MB cap + deprecation evidence, details unverified here), threads/COOP-COEP preserved per D33. Decisions entry: new D51 in `docs/DECISIONS.md` (next number after D50, verified by tail read). Bugs entries: F-22 follow-up (drain instrumentation + retained client vs freeze), F-21 note (miss-corpus + threshold/resolution re-armed as measured Phase 2, not a fourth blind round). Lessons: L-27 (wasm-first for sub-1M-param models) + L-28 (threshold calibration over blind rounds; L-26 referenced, not duplicated). Performance: Phase-1 register (#18–#24) + measurement order (spans → EXIF probe → 800-vs-full A/B → miss corpus). Status: scoped current-work bullet; validated baselines untouched.
+- **Verification as observed.** None executed here beyond docs hygiene (docs lane; no suite run, no source touched — no counts claimed). `prettier --check` on the six docs; re-read for contradictions (STATUS/ROADMAP/README/About agree on what exists; baselines untouched; no release entry).
+- **Remaining.** Lane-reported implementation + scoped verification (ML-CORE/VF-BUILD lanes); canonical E2E explicitly deferred (laptop-side); field gates before any claim: phone-tier latency, threshold-sweep photos, viewfinder feel; measured Phase 2 gated on Phase-1 instrumentation.
+
 ## 2026-10-11 — Production promotion to v1.10.3 (git `main` + Cloudflare prod)
 
 - **Git.** `main` fast-forwarded to `dev` (`d98dcee..805cd7b`, ff-only, no force) and pushed `main` → `origin/main`. `dev` and `main` in sync at `805cd7b`.

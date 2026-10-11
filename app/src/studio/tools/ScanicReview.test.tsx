@@ -59,6 +59,9 @@ function mockAdjustRect(container: HTMLElement) {
   if (!adjust) throw new Error('missing [data-crop-adjust]');
   adjust.getBoundingClientRect = () =>
     ({ left: 0, top: 0, width: W, height: H, right: W, bottom: H, x: 0, y: 0 }) as DOMRect;
+  // The overlay is gated on the measured rect: flush the measurement effect
+  // so handles render before the next assertion.
+  fireEvent(window, new Event('resize'));
   return adjust;
 }
 
@@ -90,6 +93,7 @@ describe('ScanicReview', () => {
     expect(container.querySelector('[data-crop-result] polygon')).toBeNull();
 
     enterAdjust();
+    mockAdjustRect(container);
     const adjust = container.querySelector('[data-crop-adjust]');
     expect(adjust).not.toBeNull();
     expect(adjust?.querySelector('polygon')?.getAttribute('points')).toBe(
@@ -108,6 +112,7 @@ describe('ScanicReview', () => {
     rerender(<ScanicReview {...baseProps({ corners: next })} />);
     expect(container.querySelector('[data-crop-adjust]')).toBeNull();
     enterAdjust();
+    mockAdjustRect(container);
     expect(container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points')).toBe(
       '20,25 90,10 90,90 10,90',
     );
@@ -116,6 +121,7 @@ describe('ScanicReview', () => {
   it('renders 8 handles in adjust mode: 4 corners + 4 rigid-edge midpoints', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    mockAdjustRect(container);
     const adjust = container.querySelector('[data-crop-adjust]');
     expect(adjust).not.toBeNull();
     expect(adjust?.querySelectorAll('[data-crop-handle]').length).toBe(4);
@@ -189,6 +195,7 @@ describe('ScanicReview', () => {
   it('midpoint keyboard nudge translates the whole edge rigidly', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    mockAdjustRect(container);
     const midLeft = document.querySelector('[data-crop-handle-mid="left"]') as HTMLElement;
     fireEvent.keyDown(midLeft, { key: 'ArrowRight' });
     expect(container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points')).toBe(
@@ -303,8 +310,9 @@ describe('ScanicReview', () => {
   });
 
   it('moves a handle with arrow keys and reports the delta via aria-valuenow', () => {
-    render(<ScanicReview {...baseProps()} />);
+    const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    mockAdjustRect(container);
     const tl = document.querySelector('[data-crop-handle="tl"]');
     expect(tl?.getAttribute('role')).toBe('slider');
     expect(tl?.getAttribute('aria-valuenow')).toBe('10');
@@ -329,8 +337,9 @@ describe('ScanicReview', () => {
   });
 
   it('Reset to auto reseeds from the corners prop and is disabled when corners are null', () => {
-    const { rerender } = render(<ScanicReview {...baseProps()} />);
+    const { container, rerender } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    mockAdjustRect(container);
     const reset = screen.getByRole('button', { name: 'Reset to auto' });
     expect(reset.hasAttribute('disabled')).toBe(false);
     const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
@@ -510,6 +519,7 @@ describe('ScanicReview handles + loupe', () => {
   it('handles use thin dotted brass-ring small circles with a center micro-dot (44px hit preserved)', () => {
     const { container } = render(<ScanicReview {...baseProps()} />);
     enterAdjust();
+    mockAdjustRect(container);
     // Single-line outline: thin dotted 1.5–2px brass.
     const outline = container.querySelector(
       '[data-crop-adjust] polygon',
@@ -722,5 +732,47 @@ describe('ScanicReview adjust-next', () => {
     expect(container.querySelector('[data-crop-adjust] polygon')?.getAttribute('points')).toBe(
       before,
     );
+  });
+
+  it('auto-keeps a dirty draft on Next page (never silently drops)', () => {
+    const props = baseProps({ onNextPage: vi.fn() });
+    const { container } = render(<ScanicReview {...props} />);
+    enterAdjust();
+    mockAdjustRect(container);
+    // Dirty the draft one pixel right (pristine = seeded corners).
+    const tl = document.querySelector('[data-crop-handle="tl"]') as HTMLElement;
+    fireEvent.keyDown(tl, { key: 'ArrowRight' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    // Dirty: the draft is kept first (same emission as Apply), then navigate.
+    expect(props.onAdjustApply).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(props.onAdjustApply).mock.calls[0][0].topLeft).toEqual({ x: 11, y: 10 });
+    expect(props.onNextPage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ScanicReview overlay gating + scroll ownership', () => {
+  it('gates the adjust overlay on the measured rect (no %-fallback handles)', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    enterAdjust();
+    // Unmeasured: the adjust frame renders (photo for measurement) but no
+    // overlay SVG and no handles anywhere — never %-positioned on bars.
+    expect(container.querySelector('[data-crop-adjust]')).not.toBeNull();
+    expect(container.querySelector('[data-crop-adjust] svg')).toBeNull();
+    expect(container.querySelectorAll('[data-crop-handle]').length).toBe(0);
+    expect(container.querySelectorAll('[data-crop-handle-mid]').length).toBe(0);
+    // Measured: the full 8-handle overlay appears.
+    mockAdjustRect(container);
+    expect(container.querySelector('[data-crop-adjust] svg')).not.toBeNull();
+    expect(container.querySelectorAll('[data-crop-handle]').length).toBe(4);
+    expect(container.querySelectorAll('[data-crop-handle-mid]').length).toBe(4);
+  });
+
+  it('owns no nested scroll container (the parent queue is the single scroller)', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    const root = container.firstElementChild as HTMLElement | null;
+    expect(root).not.toBeNull();
+    expect(root?.className).not.toMatch('overflow-y-auto');
+    expect(root?.className).not.toMatch('overflow-auto');
+    expect(root?.className).not.toMatch('max-h-');
   });
 });

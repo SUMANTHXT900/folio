@@ -6,7 +6,7 @@
  * injected, so no scanic/ML stack is involved.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { runReviewDetectionQueue } from './reviewDetection';
+import { createReviewSpanCollector, runReviewDetectionQueue } from './reviewDetection';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -111,5 +111,67 @@ describe('runReviewDetectionQueue', () => {
     await runReviewDetectionQueue([], { workerCount: 3, process, onProgress });
     expect(process).not.toHaveBeenCalled();
     expect(onProgress).not.toHaveBeenCalled();
+  });
+});
+
+describe('runReviewDetectionQueue item spans (measure-only)', () => {
+  it('reports one span per started item with lane + non-negative wall time', async () => {
+    const collector = createReviewSpanCollector<number>();
+    await runReviewDetectionQueue([1, 2, 3, 4], {
+      workerCount: 2,
+      process: async () => {
+        await delay(5);
+      },
+      onItemSpan: collector.onItemSpan,
+    });
+    expect(collector.spans).toHaveLength(4);
+    expect([...collector.spans.map((span) => span.item)].sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4,
+    ]);
+    for (const span of collector.spans) {
+      expect(span.workerIndex).toBeGreaterThanOrEqual(0);
+      expect(span.workerIndex).toBeLessThan(2);
+      expect(span.spanMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('reports spans for failed items too (measurement covers the failure)', async () => {
+    const collector = createReviewSpanCollector<number>();
+    await expect(
+      runReviewDetectionQueue([1, 2], {
+        workerCount: 1,
+        process: async (item) => {
+          if (item === 2) throw new Error('detect boom');
+        },
+        onItemSpan: collector.onItemSpan,
+      }),
+    ).rejects.toThrow('detect boom');
+    // Lane is serial: item 1 settled (span), item 2 started and failed (span).
+    expect(collector.spans.map((span) => span.item)).toEqual([1, 2]);
+  });
+
+  it('reports no spans for items never started (already cancelled)', async () => {
+    const collector = createReviewSpanCollector<number>();
+    const process = vi.fn(async () => undefined);
+    await expect(
+      runReviewDetectionQueue([1, 2, 3], {
+        workerCount: 2,
+        process,
+        isCancelled: () => true,
+        onItemSpan: collector.onItemSpan,
+      }),
+    ).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(collector.spans).toHaveLength(0);
+  });
+
+  it('works without onItemSpan (additive opt, existing callers untouched)', async () => {
+    const seen: number[] = [];
+    await runReviewDetectionQueue([1, 2], {
+      workerCount: 2,
+      process: async (item) => {
+        seen.push(item);
+      },
+    });
+    expect([...seen].sort((a, b) => a - b)).toEqual([1, 2]);
   });
 });

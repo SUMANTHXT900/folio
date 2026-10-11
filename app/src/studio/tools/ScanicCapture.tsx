@@ -15,6 +15,24 @@
  * session at startup). The DOM contract below is byte-for-byte the same as
  * the old inline runtime, so unit + E2E selectors keep holding.
  *
+ * Retained-client seam (ML-CORE landed): `getRetainedDetectClient()` owns the
+ * mount-lifetime detect client (warm ORT session reused across drains +
+ * Re-detect); `acquireDetectionPool()` staffs each drain's K lanes with lane
+ * 0 = retained, `detectionLaneClient()` indexes lanes directly (no modulo),
+ * and `releaseOwned()` frees pool-owned lanes only (never the retained lane
+ * — unmount alone calls `releaseRetainedDetectClient()`). Detection results
+ * carry `instrumentation`; dev-only `console.debug` telemetry logs it plus
+ * the read-only EXIF probe and per-item queue spans (measure-only, no
+ * behavior).
+ *
+ * Viewfinder modules (surgical refactor, pipeline untouched —
+ * takePhoto→queue→drain→warp→commit is byte-identical in behavior):
+ * `FinderChrome` (variant `overlay|docked`, one implementation),
+ * `Finder` (video + ticks + one quiet status pill), `ShutterCluster`
+ * (single strip + mode pill + shutter + gallery count badge + reserved CTA
+ * slot), `ReviewShell` (non-blocking preparing banner; ready pages stay
+ * interactive — viewing-is-verdict).
+ *
  * Preview vs detection: the <video> preview pixels are NEVER the detection
  * input — detection runs on the captured still through scanic's own internal
  * downscale (the worker scales to detection size itself). Preview
@@ -48,9 +66,9 @@
  * 720x1280 front); landscape screens request landscape max (1920x1080 with
  * a `width: { min: 1280 }` floor). No portrait crop is ever forced on a
  * landscape sensor. The preview is full-bleed `object-cover` (no forced
- * ratio anywhere); the live stream aspect from `track.getSettings()` is
- * reflected onto the video box so a 1440p landscape webcam never renders
- * as a blurry zoomed crop.
+ * ratio anywhere, no `aspectRatio` styling on the video — the cover layer
+ * crops, never stretches, so a 1440p landscape webcam never renders as a
+ * blurry zoomed crop).
  *
  * E2E DATA CONTRACT (do not rename):
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
@@ -70,6 +88,10 @@
  *   + `[data-film-thumb]` (numbered, tap jumps) + `[data-scan-add]` (back
  *   to camera), batch bar `[data-batch-bar]` (`Discard scans` ghost /
  *   `Next` primary, gated on >=1 page).
+ * - Additive (VF-BUILD, E2E-safe): gallery `[data-gallery-count]` visible
+ *   count badge, mirror `[data-mirror-note]` inline back-camera reason,
+ *   non-blocking `[data-review-preparing]` slim banner (same text + role —
+ *   pager/filmstrip/Add/Next stay enabled while it shows).
  * - Queue button labels are EXACT: "Adjust corners", "Apply",
  *   "Use original" (toggle warped <-> original), "Discard", "Reset to auto",
  *   "Build PDF", "Back to camera", "Re-detect", "Previous page",
@@ -104,8 +126,18 @@ import {
   ML_ASSET_BASE_URL as POLICY_ML_ASSET_BASE_URL,
   resolveDetectionWorkerCount,
 } from './scan/detectorPolicy';
-import { runReviewDetectionQueue } from './scan/reviewDetection';
-import { ScanicClient, ScanicClientError } from './scan/scanicClient';
+import { runReviewDetectionQueue, createReviewSpanCollector } from './scan/reviewDetection';
+import {
+  ScanicClient,
+  ScanicClientError,
+  acquireDetectionPool,
+  detectionLaneClient,
+  getRetainedDetectClient,
+  releaseRetainedDetectClient,
+  type DetectionPool,
+} from './scan/scanicClient';
+import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
+import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
@@ -451,11 +483,18 @@ export const AUTO_CAPTURE_TICK_MS = 300;
 /** Minimum spacing between two auto shutter fires (static frames included). */
 export const AUTO_CAPTURE_COOLDOWN_MS = 1500;
 /**
- * Minimum time the "Scanning… hold steady" pill stays visible after the last
- * detection settles. Detection often resolves in ~200ms — faster than anyone
- * can read — so without a dwell the working state flashes past unreadably.
+ * Retired: the camera-phase `Scanning…` dwell is gone (the shutter is
+ * queue-only, so the finder never works — the review preparing banner owns
+ * the busy voice). Kept exported for import compatibility; nothing reads it.
  */
 export const SCAN_STATUS_DWELL_MS = 800;
+
+/**
+ * Captured-flash window: after each queue-only shutter park the quiet finder
+ * pill flashes `Captured — keep shooting` for this long (actionable voice,
+ * then back to quiet). Repaints via state tick; never blocks any action.
+ */
+export const CAPTURE_FLASH_MS = 900;
 
 /**
  * Sum of absolute differences between two equal-length grayscale frames.
@@ -686,6 +725,218 @@ function imageDataToJpeg(image: ImageData, quality = 0.9): Promise<Blob | null> 
 }
 
 /* ------------------------------------------------------------------ */
+/* FinderChrome (variant overlay|docked): ONE top-bar implementation   */
+/* ------------------------------------------------------------------ */
+
+type FinderChromeVariant = 'overlay' | 'docked';
+
+interface FinderChromeProps {
+  variant: FinderChromeVariant;
+  onExit: () => void;
+  torchSupported: boolean;
+  torchOn: boolean;
+  onToggleTorch: () => void;
+  torchNote: string | null;
+  facing: 'environment' | 'user';
+  mirrored: boolean;
+  onToggleMirror: () => void;
+  onFlip: () => void;
+  cameras: Array<{ deviceId: string; label: string }>;
+  selectedDeviceId: string | null;
+  onPickCamera: (deviceId: string | null) => void;
+  deviceFallbackNote: string | null;
+  suggestedDeviceId: string | null;
+  onChooseSuggested: (deviceId: string) => void;
+}
+
+/**
+ * The single top-bar implementation for both chrome variants — close,
+ * title, flash, flip, mirror, and the camera select render in BOTH, with
+ * identical hooks and labels; only the container/button skin changes by
+ * variant. Every interactive control carries `pointer-events-auto` so the
+ * overlay scrim (pass-through by design) can never swallow a tap (L-24 —
+ * pinned by the hit-test suite). The mirror toggle's back-camera reason is
+ * INLINE text (`[data-mirror-note]`), never tooltip-only.
+ */
+function FinderChrome({
+  variant,
+  onExit,
+  torchSupported,
+  torchOn,
+  onToggleTorch,
+  torchNote,
+  facing,
+  mirrored,
+  onToggleMirror,
+  onFlip,
+  cameras,
+  selectedDeviceId,
+  onPickCamera,
+  deviceFallbackNote,
+  suggestedDeviceId,
+  onChooseSuggested,
+}: FinderChromeProps) {
+  const overlay = variant === 'overlay';
+  const chromeButton = overlay
+    ? 'pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80'
+    : 'pointer-events-auto inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-300 px-2 py-1 text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700';
+  const notePill = overlay
+    ? 'max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur'
+    : 'max-w-full truncate text-center text-[11px] text-ink-500 dark:text-ink-300';
+  return (
+    <div
+      data-scanner-topbar
+      className={
+        overlay
+          ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col gap-1 px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]'
+          : 'flex shrink-0 flex-col gap-1 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] dark:border-ink-700/70 dark:bg-ink-900/95'
+      }
+    >
+      {overlay && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink-950/60 to-transparent"
+        />
+      )}
+      <div
+        className={
+          overlay ? 'relative flex w-full items-center gap-1' : 'flex w-full items-center gap-1'
+        }
+      >
+        <button type="button" aria-label="Close scanner" onClick={onExit} className={chromeButton}>
+          <span aria-hidden className="text-sm leading-none">
+            ✕
+          </span>
+          <span className="text-[10px] font-medium leading-none">Close</span>
+        </button>
+        <p
+          className={
+            overlay
+              ? 'relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow'
+              : 'min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100'
+          }
+        >
+          Scan documents
+        </p>
+        {torchSupported ? (
+          <button
+            type="button"
+            aria-label="Toggle torch"
+            aria-pressed={torchOn}
+            onClick={onToggleTorch}
+            className={chromeButton}
+          >
+            <span aria-hidden className="text-sm leading-none">
+              {torchOn ? '🔦' : '💡'}
+            </span>
+            <span className="text-[10px] font-medium leading-none">Flash</span>
+          </button>
+        ) : (
+          <span aria-hidden className="min-h-[44px] min-w-[44px]" />
+        )}
+        <button type="button" aria-label="Switch camera" onClick={onFlip} className={chromeButton}>
+          <span aria-hidden className="text-sm leading-none">
+            ⇄
+          </span>
+          <span className="text-[10px] font-medium leading-none">Flip</span>
+        </button>
+        <button
+          type="button"
+          data-mirror-toggle
+          aria-pressed={mirrored}
+          aria-label="Mirror front-camera preview"
+          title={
+            facing !== 'user'
+              ? 'Mirror applies to the front camera only'
+              : mirrored
+                ? 'Front preview mirrored (captures stay unmirrored)'
+                : 'Front preview unmirrored'
+          }
+          disabled={facing !== 'user'}
+          onClick={onToggleMirror}
+          className={`${chromeButton} disabled:cursor-not-allowed disabled:opacity-40`}
+        >
+          <span aria-hidden className="text-sm leading-none">
+            {mirrored ? '◐' : '◑'}
+          </span>
+          <span className="text-[10px] font-medium leading-none">Mirror</span>
+        </button>
+      </div>
+      <div
+        data-camera-select-row
+        className={
+          overlay
+            ? 'pointer-events-auto relative flex w-full flex-col items-center justify-center gap-1'
+            : 'pointer-events-auto flex w-full flex-col items-center justify-center gap-1'
+        }
+      >
+        <select
+          data-camera-select
+          aria-label="Choose camera"
+          value={selectedDeviceId ?? ''}
+          onChange={(e) => {
+            const id = e.target.value === '' ? null : e.target.value;
+            onPickCamera(id);
+          }}
+          className={
+            overlay
+              ? 'camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]'
+              : 'camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-300 bg-paper-50 px-2 py-1 text-xs text-ink-700 transition-colors hover:bg-paper-200 min-h-[44px] dark:border-ink-700 dark:bg-ink-800 dark:text-paper-100 dark:hover:bg-ink-700'
+          }
+        >
+          <option value="">Default camera</option>
+          {cameras.map((c, i) => (
+            <option key={c.deviceId} value={c.deviceId}>
+              {cameraDisplayName(c, i)}
+            </option>
+          ))}
+        </select>
+        {facing !== 'user' && (
+          <p data-mirror-note role="note" className={notePill}>
+            Mirror applies to the front camera only
+          </p>
+        )}
+        {deviceFallbackNote !== null && (
+          <p data-camera-fallback-note role="status" className={notePill}>
+            {deviceFallbackNote}
+          </p>
+        )}
+        {suggestedDeviceId !== null && (
+          <div
+            data-camera-suggest
+            role="status"
+            className={
+              overlay
+                ? 'pointer-events-auto flex max-w-full items-center gap-2 rounded-full bg-ink-950/60 px-3 py-1 text-[11px] text-paper-100 backdrop-blur'
+                : 'pointer-events-auto flex max-w-full items-center gap-2 rounded-full border border-paper-300 px-3 py-1 text-[11px] text-ink-700 dark:border-ink-700 dark:text-paper-100'
+            }
+          >
+            <span>Sharper camera found — switch</span>
+            <button
+              type="button"
+              aria-label="Switch to sharper camera"
+              onClick={() => onChooseSuggested(suggestedDeviceId)}
+              className={
+                overlay
+                  ? 'inline-flex min-h-[44px] items-center justify-center rounded-full bg-paper-50 px-3 text-[11px] font-semibold text-ink-900'
+                  : 'inline-flex min-h-[44px] items-center justify-center rounded-full bg-ink-900 px-3 text-[11px] font-semibold text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+              }
+            >
+              Switch
+            </button>
+          </div>
+        )}
+        {torchNote !== null && torchSupported && (
+          <p data-torch-note role="status" className={notePill}>
+            {torchNote}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* ScanicCapture                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -710,8 +961,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
   /** One-tap upgrade when a probed back camera is clearly sharper (>25%). Never auto-switches. */
   const [suggestedDeviceId, setSuggestedDeviceId] = useState<string | null>(null);
-  /** Live stream aspect (`W / H`) read from `track.getSettings()` — honest preview, never forced. */
-  const [liveAspect, setLiveAspect] = useState<string | null>(null);
   const [mirrored, setMirrored] = useState(true);
   const [torchOn, setTorchOn] = useState(false);
   /** Honest flash note for transient torch failures (toggle stays mounted). */
@@ -759,21 +1008,22 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   /**
-   * Scan worker clients (one per mount, terminated on unmount). Detection and
-   * warps use SEPARATE clients so an Apply-time warp cancel (terminate on the
-   * warp client) can never nuke another entry's in-flight detection.
-   * Warp pixels are always decoded fresh from the original File — no decoded
-   * element/image cache is retained past any operation (the old `imageElsRef`
-   * is gone: nothing outlives detection+warp).
+   * Scan worker clients: detection runs on the mount-lifetime retained client
+   * (warm ORT session, released on unmount only) plus per-drain pool-owned
+   * lanes; warps use a SEPARATE owned client so an Apply-time warp cancel
+   * (terminate on the warp client) can never nuke another entry's in-flight
+   * detection. Warp pixels are always decoded fresh from the original File —
+   * no decoded element/image cache is retained past any operation (the old
+   * `imageElsRef` is gone: nothing outlives detection+warp).
    */
-  const scanClientRef = useRef<ScanicClient | null>(null);
   const warpClientRef = useRef<ScanicClient | null>(null);
   /**
-   * Review-drain detect pool (N clients, one per lane — separate from the
-   * single `scanClientRef` fallback that Re-detect uses). Terminated on
-   * drain completion, drain cancel, discard, and unmount.
+   * Review-drain detect pool (retained lane 0 + owned lanes — see
+   * `acquireDetectionPool`). `releaseOwned()` frees owned lanes on drain
+   * completion, drain cancel, discard, and unmount; the retained lane
+   * survives until `releaseRetainedDetectClient()` on unmount below.
    */
-  const detectPoolRef = useRef<ScanicClient[]>([]);
+  const detectPoolRef = useRef<DetectionPool | null>(null);
   /** Review-drain generation: cancel bumps it so stale continuations drop. */
   const drainGenRef = useRef(0);
   /**
@@ -794,6 +1044,21 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const objectUrlsRef = useRef(new Set<string>());
   /** Last shutter time (manual or auto) — the auto cooldown gates on this. */
   const lastFireRef = useRef<number | null>(null);
+  /**
+   * Captured-flash: the quiet finder pill flashes `Captured — keep shooting`
+   * for CAPTURE_FLASH_MS after each queue-only shutter park, then returns to
+   * quiet. Refs never render alone — the tick state repaints on set and on
+   * expiry. Never blocks any action.
+   */
+  const captureFlashUntilRef = useRef(0);
+  const [, setFlashTick] = useState(0);
+  const flashCaptured = useCallback(() => {
+    captureFlashUntilRef.current = Date.now() + CAPTURE_FLASH_MS;
+    setFlashTick((t) => t + 1);
+    window.setTimeout(() => {
+      if (mountedRef.current) setFlashTick((t) => t + 1);
+    }, CAPTURE_FLASH_MS + 50);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -801,33 +1066,29 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       mountedRef.current = false;
       for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
       objectUrlsRef.current.clear();
-      // Owned workers die with the mount: in-flight requests reject and
-      // their continuations drop on the mountedRef check.
-      scanClientRef.current?.terminate();
-      scanClientRef.current = null;
-      for (const client of detectPoolRef.current) {
-        try {
-          client.terminate();
-        } catch {
-          // Termination is best-effort; the reference is dropped regardless.
-        }
+      // Owned drain lanes die with the mount; the retained lane survives
+      // until the explicit release below (never terminated by a drain).
+      // In-flight requests reject and their continuations drop on the
+      // mountedRef check.
+      try {
+        detectPoolRef.current?.releaseOwned();
+      } catch {
+        // Release is best-effort; the reference is dropped regardless.
       }
-      detectPoolRef.current = [];
+      detectPoolRef.current = null;
+      releaseRetainedDetectClient();
       warpClientRef.current?.terminate();
       warpClientRef.current = null;
     };
   }, []);
 
   /**
-   * Lazily-created owned scan worker client for single detection (Re-detect
-   * fallback). Created on first use (never at scanner open, never on the
-   * shutter path), reused, terminated on unmount above. The review drain
-   * owns its own pool (`detectPoolRef`) instead.
+   * Mount-lifetime retained detect client for single detection (Re-detect).
+   * Warm ORT session reused across drains; released on unmount above — never
+   * on drain cancel. The review drain owns its own pool (`detectPoolRef`)
+   * whose lane 0 is this same client instead.
    */
-  const getScanClient = useCallback((): ScanicClient => {
-    if (scanClientRef.current === null) scanClientRef.current = new ScanicClient();
-    return scanClientRef.current;
-  }, []);
+  const getScanClient = useCallback((): ScanicClient => getRetainedDetectClient(), []);
 
   /**
    * Lazily-created owned scan worker client for warps. Separate from
@@ -879,98 +1140,54 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /* ---------------- detection (ML only, worker) ---------------- */
 
   /**
-   * Worker detection for one queued entry. Decodes a full-resolution
-   * ImageData COPY of the original (the worker transfers/neuters it, so the
-   * copy is single-use) and sends it to the scan worker for ML detection.
-   * A null quad means the ML found no page: croppable full-frame.
-   * Entries, corners, notes, and statuses are byte-identical to the old
-   * inline runtime — only the execution thread changed.
+   * Full-frame miss note (shared by the review drain and the single-entry
+   * Re-detect path below — one string, one settle semantic).
    */
-  const detectEntry = useCallback(
-    async (id: number) => {
-      const record = entriesRef.current.find((e) => e.id === id);
-      if (!record) return;
-      let image: ImageData;
-      try {
-        image = await decodeFileToImageData(record.original);
-      } catch {
-        if (!mountedRef.current) return;
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === id
-              ? {
-                  ...e,
-                  imageWidth: 0,
-                  imageHeight: 0,
-                  status: 'ready' as const,
-                  note: 'Could not decode this image — the full frame will be used.',
-                }
-              : e,
-          ),
-        );
-        return;
-      }
-      if (!mountedRef.current) return;
-      const w = image.width;
-      const h = image.height;
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.id === id
-            ? { ...e, imageWidth: w, imageHeight: h, note: 'Loading on-device ML detector…' }
-            : e,
-        ),
-      );
-      try {
-        // ML-only (D46): a null quad means the ML found no page, and the
-        // entry settles croppable full-frame below. No guessed crops, ever.
-        const result = await getScanClient().detect(image, DEFAULT_DETECTOR);
-        if (!mountedRef.current) return;
-        if (result.corners !== null) {
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === id
-                ? {
-                    ...e,
-                    status: 'ready' as const,
-                    corners: result.corners,
-                    note: null,
-                  }
-                : e,
-            ),
-          );
-          return;
-        }
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === id
-              ? {
-                  ...e,
-                  status: 'ready' as const,
-                  corners: null,
-                  note: 'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.',
-                }
-              : e,
-          ),
-        );
-      } catch {
-        // Worker crash/unavailable: degrade to full-frame, honestly labelled.
-        // An ML miss inside the worker lands here the same way.
-        if (!mountedRef.current) return;
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === id
-              ? {
-                  ...e,
-                  status: 'ready' as const,
-                  corners: null,
-                  note: 'Auto-detect failed on this image — the full frame will be used.',
-                }
-              : e,
-          ),
+  const FULL_FRAME_MISS_NOTE =
+    'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.';
+
+  /**
+   * Dev-only detection telemetry (never UI): detector + confidence + input
+   * dims plus the ML lane's `instrumentation {decodeMs, transferBytes,
+   * ortLoadMs, sessionCreateMs, inferenceMs, confidence, inputWidth,
+   * inputHeight, modelInputSize}`, the read-only EXIF probe, and the
+   * per-item queue wall span. Measure-only: `extra` never changes detection
+   * behavior, never gates thresholds, never touches resolution/decode.
+   */
+  const logDetectTelemetryDev = useCallback(
+    (
+      dims: { w: number; h: number },
+      result: { confidence: number | null; detector: string } & {
+        instrumentation?: ScanicDetectInstrumentation | undefined;
+      },
+      extra?: {
+        decodeMs?: number | null;
+        exif?: ExifProbeResult | null;
+        spanMs?: number | null;
+      },
+    ) => {
+      if (import.meta.env.DEV) {
+        const inst = result.instrumentation;
+        const instPart =
+          inst !== undefined && inst !== null
+            ? ` decodeMs=${inst.decodeMs} transferBytes=${inst.transferBytes} ortLoadMs=${inst.ortLoadMs} sessionCreateMs=${inst.sessionCreateMs} inferenceMs=${inst.inferenceMs} modelInputSize=${inst.modelInputSize}`
+            : ' instrumentation=missing';
+        const decodePart =
+          extra?.decodeMs !== undefined && extra?.decodeMs !== null
+            ? ` decodeWallMs=${extra.decodeMs}`
+            : '';
+        const exifPart =
+          extra?.exif !== undefined && extra?.exif !== null
+            ? ` exifOrientation=${extra.exif.orientation} hasExif=${extra.exif.hasExif}`
+            : '';
+        const spanPart =
+          extra?.spanMs !== undefined && extra?.spanMs !== null ? ` spanMs=${extra.spanMs}` : '';
+        console.debug(
+          `[scan-detect] detector=${result.detector} confidence=${result.confidence} input=${dims.w}x${dims.h}${instPart}${decodePart}${exifPart}${spanPart}`,
         );
       }
     },
-    [getScanClient],
+    [],
   );
 
   /**
@@ -1009,11 +1226,23 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       ];
       entriesRef.current = next;
       setEntries(next);
+      // Queue-only shutter: no decode, no worker, no finder busy state — but
+      // the pill flashes once (actionable voice) so the tap reads as kept.
+      flashCaptured();
       return position;
     },
-    [trackUrl],
+    [trackUrl, flashCaptured],
   );
 
+  /**
+   * Single-entry (Re-detect) path — the old `detectEntry` folded in here so
+   * one settle semantic serves both callers: decode a fresh full-res copy,
+   * run ML-only `detect` on the retained client, settle `ready` (corners
+   * or honest full-frame). Statuses and notes are byte-identical to the old
+   * path; the canonical fan-out stays `startReviewDrain` below. The EXIF
+   * probe rides alongside decode as read-only evidence (never gates, never
+   * touches decode); instrumentation + probe ride the dev telemetry path.
+   */
   const redetectEntry = useCallback(
     async (entry: QueueEntry) => {
       setRedetecting(true);
@@ -1026,12 +1255,106 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         ),
       );
       try {
-        await detectEntry(entry.id);
+        let image: ImageData;
+        let decodeMs: number | null = null;
+        let exif: ExifProbeResult | null = null;
+        try {
+          const decodeStart =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+              ? performance.now()
+              : Date.now();
+          image = await decodeFileToImageData(entry.original);
+          const decodeEnd =
+            typeof performance !== 'undefined' && typeof performance.now === 'function'
+              ? performance.now()
+              : Date.now();
+          decodeMs = decodeEnd - decodeStart;
+          try {
+            exif = await probeExifOrientation(entry.original);
+          } catch {
+            exif = null;
+          }
+        } catch {
+          if (!mountedRef.current) return;
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entry.id
+                ? {
+                    ...e,
+                    imageWidth: 0,
+                    imageHeight: 0,
+                    status: 'ready' as const,
+                    note: 'Could not decode this image — the full frame will be used.',
+                  }
+                : e,
+            ),
+          );
+          return;
+        }
+        if (!mountedRef.current) return;
+        const w = image.width;
+        const h = image.height;
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entry.id
+              ? { ...e, imageWidth: w, imageHeight: h, note: 'Loading on-device ML detector…' }
+              : e,
+          ),
+        );
+        try {
+          // ML-only (D46): a null quad means the ML found no page, and the
+          // entry settles croppable full-frame below. No guessed crops, ever.
+          const result = await getScanClient().detect(
+            image,
+            DEFAULT_DETECTOR,
+            decodeMs !== null ? { decodeMs } : undefined,
+          );
+          logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
+          if (!mountedRef.current) return;
+          if (result.corners !== null) {
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.id === entry.id
+                  ? {
+                      ...e,
+                      status: 'ready' as const,
+                      corners: result.corners,
+                      note: null,
+                    }
+                  : e,
+              ),
+            );
+            return;
+          }
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entry.id
+                ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
+                : e,
+            ),
+          );
+        } catch {
+          // Worker crash/unavailable: degrade to full-frame, honestly labelled.
+          // An ML miss inside the worker lands here the same way.
+          if (!mountedRef.current) return;
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entry.id
+                ? {
+                    ...e,
+                    status: 'ready' as const,
+                    corners: null,
+                    note: 'Auto-detect failed on this image — the full frame will be used.',
+                  }
+                : e,
+            ),
+          );
+        }
       } finally {
         if (mountedRef.current) setRedetecting(false);
       }
     },
-    [detectEntry],
+    [getScanClient, logDetectTelemetryDev],
   );
 
   /* ---------------- camera session ---------------- */
@@ -1085,7 +1408,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     let cancelled = false;
     let stream: MediaStream | null = null;
     setCamState('requesting');
-    setLiveAspect(null);
     (async () => {
       // Orientation-honest ideals, chosen once per session start (never a
       // forced portrait crop on a landscape sensor — see
@@ -1170,22 +1492,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         } catch {
           // Unsupported on this browser/device — fixed focus still scans.
         }
-        // Honest preview aspect: read the LIVE stream settings (actual
-        // sensor mode), never a hardcoded ratio — the full-bleed
-        // `object-cover` layer crops, never stretches, so a landscape
-        // webcam renders landscape instead of a blurry zoomed portrait crop.
+        // Facing reconcile: read the LIVE stream settings (actual sensor
+        // mode) for `facingMode` when exposed (labelless OEM ids defeat
+        // label-sniffing on pick); the label regex on pick stays as the
+        // fallback when facingMode is unexposed. The preview itself is
+        // full-bleed `object-cover` with no ratio styling anywhere — the
+        // layer crops, never stretches, so a landscape webcam renders
+        // landscape instead of a blurry zoomed portrait crop.
         try {
           const settings = track?.getSettings?.() as
             { width?: number; height?: number; facingMode?: string } | undefined;
-          if (
-            !cancelled &&
-            typeof settings?.width === 'number' &&
-            typeof settings?.height === 'number' &&
-            settings.width > 0 &&
-            settings.height > 0
-          ) {
-            setLiveAspect(`${settings.width} / ${settings.height}`);
-          }
           // Reconcile facing from the live track when exposed (labelless OEM
           // ids defeat label-sniffing on pick); the label regex on pick stays
           // as the fallback when facingMode is unexposed.
@@ -1585,32 +1901,37 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /* ---------------- deferred review drain (ML runs here, never on shutter) ---------------- */
 
   /**
-   * Terminates the review-drain pool and invalidates its generation so every
-   * in-flight continuation drops. Also clears the once-per-entry guard so a
-   * later review re-drains whatever is still queued.
+   * Releases the review-drain pool's OWNED lanes and invalidates its
+   * generation so every in-flight continuation drops. The retained lane
+   * (pool lane 0) is never terminated here — only `releaseOwned()` runs.
+   * Also clears the once-per-entry guard so a later review re-drains
+   * whatever is still queued.
    */
   const cancelDrainPool = useCallback(() => {
     drainGenRef.current += 1;
     const pool = detectPoolRef.current;
-    detectPoolRef.current = [];
+    detectPoolRef.current = null;
     drainStartedRef.current.clear();
-    for (const client of pool) {
-      try {
-        client.terminate();
-      } catch {
-        // Termination is best-effort; the reference is dropped regardless.
-      }
+    try {
+      pool?.releaseOwned();
+    } catch {
+      // Release is best-effort; the reference is dropped regardless.
     }
   }, []);
 
   /**
-   * Deferred ML detection for every queued entry, fanned out over a pool of
-   * `resolveDetectionWorkerCount({ pageCount })` clients (floor K=2,
-   * adaptive) via `runReviewDetectionQueue` round-robin. Each entry decodes
-   * a fresh full-resolution ImageData COPY of its original (single-use —
-   * the worker neuters it; nothing decoded is cached) and settles `ready`
-   * with corners, or `ready` full-frame with the honest note on a miss or
-   * any failure (never throws to the UI). Idempotent per entry via
+   * Deferred ML detection for every queued entry, fanned out over
+   * `resolveDetectionWorkerCount({ pageCount: pending.length })` lanes
+   * (PENDING count — a revisit with 1 undetected page stays serial) via
+   * `runReviewDetectionQueue` stride lanes. Lanes are staffed by
+   * `acquireDetectionPool` (lane 0 = retained warm client) and indexed by
+   * `detectionLaneClient` (direct, no modulo). Each entry decodes a fresh
+   * full-resolution ImageData COPY of its original (single-use — the worker
+   * neuters it; nothing decoded is cached) and settles `ready` with corners,
+   * or `ready` full-frame with the honest note on a miss or any failure
+   * (never throws to the UI). The EXIF probe rides alongside decode as
+   * read-only evidence; instrumentation + probe + per-item spans ride the
+   * dev telemetry path (measure-only). Idempotent per entry via
    * `drainStartedRef` (StrictMode/remount-safe); a no-op when nothing is
    * queued.
    */
@@ -1622,16 +1943,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     for (const e of pending) drainStartedRef.current.add(e.id);
     const gen = drainGenRef.current + 1;
     drainGenRef.current = gen;
-    const workerCount = resolveDetectionWorkerCount({ pageCount: entriesRef.current.length });
-    const pool: ScanicClient[] = [];
-    for (let i = 0; i < workerCount; i += 1) pool.push(new ScanicClient());
+    const workerCount = resolveDetectionWorkerCount({ pageCount: pending.length });
+    const pool = acquireDetectionPool(workerCount, {});
     detectPoolRef.current = pool;
-    const FULL_FRAME_NOTE =
-      'Auto-detect found no page — the full frame will be used. Adjust corners to crop manually.';
+    const collector = createReviewSpanCollector<QueueEntry>();
     try {
       await runReviewDetectionQueue(pending, {
-        workerCount: pool.length,
+        workerCount: pool.clients.length,
         isCancelled: () => drainGenRef.current !== gen || !mountedRef.current,
+        onItemSpan: collector.onItemSpan,
         process: async (entry, workerIndex) => {
           if (drainGenRef.current !== gen || !mountedRef.current) return;
           if (!entriesRef.current.some((e) => e.id === entry.id)) return;
@@ -1643,8 +1963,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             ),
           );
           let image: ImageData;
+          let decodeMs: number | null = null;
+          let exif: ExifProbeResult | null = null;
           try {
+            const decodeStart =
+              typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : Date.now();
             image = await decodeFileToImageData(entry.original);
+            const decodeEnd =
+              typeof performance !== 'undefined' && typeof performance.now === 'function'
+                ? performance.now()
+                : Date.now();
+            decodeMs = decodeEnd - decodeStart;
+            try {
+              exif = await probeExifOrientation(entry.original);
+            } catch {
+              exif = null;
+            }
           } catch {
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
@@ -1673,7 +2009,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           try {
             // ML-only (D46): a null quad means the ML found no page, and the
             // entry settles croppable full-frame below. No guessed crops, ever.
-            const result = await pool[workerIndex % pool.length].detect(image, DEFAULT_DETECTOR);
+            const result = await detectionLaneClient(pool.clients, workerIndex).detect(
+              image,
+              DEFAULT_DETECTOR,
+              decodeMs !== null ? { decodeMs } : undefined,
+            );
+            logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
             if (result.corners !== null) {
@@ -1689,7 +2030,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entry.id
-                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_NOTE }
+                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
                   : e,
               ),
             );
@@ -1701,7 +2042,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entry.id
-                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_NOTE }
+                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
                   : e,
               ),
             );
@@ -1712,24 +2053,29 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       // Cancelled drain (review cancel/discard/unmount): continuations
       // already drop on the generation guard; nothing to settle.
     }
-    // This generation settled: free the pool workers (a later drain builds
-    // a fresh pool; a superseding generation already replaced the ref).
+    if (import.meta.env.DEV && collector.spans.length > 0) {
+      console.debug(
+        `[scan-detect] drain spans=${collector.spans.length} ` +
+          collector.spans.map((s) => `lane${s.workerIndex}:${s.spanMs.toFixed(1)}ms`).join(' '),
+      );
+    }
+    // This generation settled: release owned lanes (a later drain builds a
+    // fresh pool; a superseding generation already replaced the ref). The
+    // retained lane survives — never terminated here.
     if (drainGenRef.current === gen) {
-      if (detectPoolRef.current === pool) detectPoolRef.current = [];
-      for (const client of pool) {
-        try {
-          client.terminate();
-        } catch {
-          // Best-effort only.
-        }
+      if (detectPoolRef.current === pool) detectPoolRef.current = null;
+      try {
+        pool.releaseOwned();
+      } catch {
+        // Best-effort only.
       }
     }
-  }, []);
+  }, [logDetectTelemetryDev]);
 
   /**
-   * Preparing-overlay Cancel: stops the drain (pool terminated, generation
-   * invalidated), rolls interrupted `detecting` entries back to `queued`,
-   * and returns to the camera. A later review re-drains them.
+   * Preparing-overlay Cancel: stops the drain (owned lanes released,
+   * generation invalidated), rolls interrupted `detecting` entries back to
+   * `queued`, and returns to the camera. A later review re-drains them.
    */
   const cancelPreparing = useCallback(() => {
     cancelDrainPool();
@@ -1837,7 +2183,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   const discardEntry = useCallback(
     (id: number) => {
-      // A discard during the review drain stops it (pool terminated,
+      // A discard during the review drain stops it (owned lanes released,
       // generation invalidated) so no continuation can settle a removed
       // page; interrupted survivors roll back to `queued` and re-drain.
       cancelDrainPool();
@@ -1871,7 +2217,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /**
    * Discard-all from the review batch bar: drops EVERYTHING back to the
    * camera, confirm-free. Revokes every queued URL so no blob leaks, and
-   * stops the review drain (pool terminated) so preparing clears.
+   * stops the review drain (owned lanes released) so preparing clears.
    */
   const discardAll = useCallback(() => {
     cancelDrainPool();
@@ -1979,76 +2325,51 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           ? cameraFailureMessage(camErrorKind)
           : null;
 
-  const anyDetecting = phase === 'review' && queue.some((e) => e.status === 'detecting');
   const lastQueued = queue.length === 0 ? null : queue[queue.length - 1];
 
   /**
    * Preparing progress (review phase only): done = `ready` entries, total =
-   * queue length. While any entry is still `queued`/`detecting`, the review
-   * shows the blocking `[data-review-preparing]` overlay and the
-   * filmstrip/pager/Next stay disabled.
+   * queue length. NON-BLOCKING: ready pages stay interactive under a slim
+   * `[data-review-preparing]` banner (L-23 viewing-is-verdict) — the pager,
+   * filmstrip, Add, and Next never gate on preparing. Pending thumbs carry
+   * the … overlay until they settle `ready`; eager warp still waits for it.
    */
   const preparingTotal = queue.length;
   const preparingDone = queue.filter((e) => e.status === 'ready').length;
   const preparing = phase === 'review' && queue.length > 0 && preparingDone < preparingTotal;
 
-  // Minimum dwell for the working status, review-phase only. The shutter is
-  // queue-only (camera-phase entries sit `queued` with no worker work), so
-  // the camera pill stays idle (`Point at the page` / `Starting camera…`)
-  // and this dwell never fires for camera-phase queued items: only a fully
-  // settled review drain (`every ready`) arms it, and leaving review clears
-  // it. It never delays any action.
-  const scanDwellUntilRef = useRef(0);
-  const [, setDwellTick] = useState(0);
-  useEffect(() => {
-    if (phase !== 'review') {
-      scanDwellUntilRef.current = 0;
-      return;
-    }
-    // Empty queue (fresh open, discard-all): idle, never dwelling.
-    if (queue.length === 0) {
-      scanDwellUntilRef.current = 0;
-      return;
-    }
-    // Any page not yet ready (queued or detecting): no dwell yet.
-    if (queue.some((e) => e.status !== 'ready')) return;
-    scanDwellUntilRef.current = Date.now() + SCAN_STATUS_DWELL_MS;
-    // Repaint NOW: refs don't render by themselves, and with nothing else
-    // scheduled the pill would freeze on the settle-time text (idle) for the
-    // whole window. The trailing timeout repaints again at expiry.
-    setDwellTick((t) => t + 1);
-    const id = window.setTimeout(() => {
-      if (mountedRef.current) setDwellTick((t) => t + 1);
-    }, SCAN_STATUS_DWELL_MS + 50);
-    return () => window.clearTimeout(id);
-  }, [queue, phase]);
-
+  /**
+   * ONE status pill, quiet by default (D47 — the shutter never works in the
+   * camera phase, so the finder stays idle). Actionable voice only: the
+   * starting/paused states, the 900ms captured flash, and the Auto-mode
+   * hold-steady hint; denied/retry states come from `cameraHelp` below with
+   * the Import alternate, never a dead end. No `Scanning…` branch, no dwell:
+   * the review preparing banner owns the busy voice. (No dark-surface hint:
+   * detection is deferred to review, so the camera phase has no brightness
+   * signal — inventing one would be fake guidance.)
+   */
   const finderStatus =
     camState === 'requesting'
       ? 'Starting camera…'
       : paused
         ? 'Paused (tab hidden) — preview resumes when you return.'
-        : anyDetecting || Date.now() < scanDwellUntilRef.current
-          ? 'Scanning… hold steady'
-          : 'Point at the page';
+        : Date.now() < captureFlashUntilRef.current
+          ? 'Captured — keep shooting'
+          : mode === 'auto'
+            ? 'Hold steady over the page'
+            : 'Point at the page';
 
   // Camera-phase flag: the camera is true full-bleed (video fills the
   // fixed surface edge-to-edge, chrome floats over it); review/done keep
-  // the docked chrome. Single source for both strip variants below.
+  // the docked chrome.
   const isCamera = phase === 'camera';
-  // Session strip body — SAME thumbs/labels in both variants (floating
-  // camera filmstrip + docked review/done strip); only the container
-  // positioning differs by phase. Compact thumbs (h-14 w-11) keep 44px
-  // targets in both.
+  // ShutterCluster strip: the SINGLE session-strip container lives in the
+  // camera bottom overlay below (the review phase navigates via its own
+  // filmstrip). Compact thumbs (h-14 w-11) with 44px targets; queued thumbs
+  // show the photo immediately, detecting ones carry the … overlay.
   const stripBody =
     queue.length === 0 ? (
-      <p
-        className={
-          isCamera ? 'text-xs text-paper-100/80' : 'text-xs text-ink-400 dark:text-ink-300'
-        }
-      >
-        No pages yet — capture or add images.
-      </p>
+      <p className="text-xs text-paper-100/80">No pages yet — capture or add images.</p>
     ) : (
       queue.map((entry, i) => (
         <button
@@ -2056,11 +2377,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           type="button"
           onClick={() => goToReview(i)}
           aria-label={`Review page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
-          className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
-            current?.id === entry.id && phase === 'review'
-              ? 'border-brass-400'
-              : 'border-paper-200 dark:border-ink-700'
-          }`}
+          className="relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 border-paper-200 transition-colors dark:border-ink-700"
         >
           {entry.photoUrl ? (
             <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
@@ -2086,211 +2403,44 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     <div
       data-scanner-root
       data-detector={DEFAULT_DETECTOR}
-      className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 dark:bg-ink-900 dark:text-paper-100"
+      className="fixed inset-0 z-50 flex max-h-[100dvh] flex-col overflow-hidden bg-paper-50 text-ink-900 [--finder-clear:9rem] sm:[--finder-clear:10rem] dark:bg-ink-900 dark:text-paper-100"
     >
-      {/* Top chrome: camera phase is a slim two-row overlay (top bar +
-          compact camera-select row) floating over the full-bleed video with
-          a top scrim; review/done keep the docked solid bar. The finder
-          frame below carries top clearance for both rows so no row ever
-          overlaps the corner ticks. */}
-      <div
-        data-scanner-topbar
-        className={
-          isCamera
-            ? 'pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col gap-1 px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]'
-            : 'flex shrink-0 items-center gap-2 border-b border-paper-200/70 bg-paper-50/95 px-3 py-2 dark:border-ink-700/70 dark:bg-ink-900/95'
-        }
-      >
-        {isCamera && (
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink-950/60 to-transparent"
-          />
-        )}
-        {isCamera ? (
-          <>
-            <div className="relative flex w-full items-center gap-1">
-              <button
-                type="button"
-                aria-label="Close scanner"
-                onClick={onExit}
-                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-sm text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-              >
-                ✕
-              </button>
-              <p className="relative min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-paper-50 drop-shadow">
-                Scan documents
-              </p>
-              {torchSupported ? (
-                <button
-                  type="button"
-                  aria-label="Toggle torch"
-                  aria-pressed={torchOn}
-                  onClick={() => void toggleTorch()}
-                  className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-                >
-                  <span aria-hidden className="text-sm leading-none">
-                    {torchOn ? '🔦' : '💡'}
-                  </span>
-                  <span className="text-[10px] font-medium leading-none">Flash</span>
-                </button>
-              ) : (
-                <span aria-hidden className="min-h-[44px] min-w-[44px]" />
-              )}
-              <button
-                type="button"
-                aria-label="Switch camera"
-                onClick={() => {
-                  // Quick flip alongside the picker: clears any explicit
-                  // device pick (exact selection would otherwise ignore
-                  // facingMode) so the flip always takes effect.
-                  chooseCamera(null);
-                  setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
-                }}
-                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80"
-              >
-                <span aria-hidden className="text-sm leading-none">
-                  ⇄
-                </span>
-                <span className="text-[10px] font-medium leading-none">Flip</span>
-              </button>
-              <button
-                type="button"
-                data-mirror-toggle
-                aria-pressed={mirrored}
-                aria-label="Mirror front-camera preview"
-                title={
-                  facing !== 'user'
-                    ? 'Mirror applies to the front camera only'
-                    : mirrored
-                      ? 'Front preview mirrored (captures stay unmirrored)'
-                      : 'Front preview unmirrored'
-                }
-                disabled={facing !== 'user'}
-                onClick={() => setMirrored((v) => !v)}
-                className="pointer-events-auto relative inline-flex min-h-[44px] min-w-[44px] flex-col items-center justify-center gap-0.5 rounded-xl border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <span aria-hidden className="text-sm leading-none">
-                  {mirrored ? '◐' : '◑'}
-                </span>
-                <span className="text-[10px] font-medium leading-none">Mirror</span>
-              </button>
-            </div>
-            <div
-              data-camera-select-row
-              className="pointer-events-auto relative flex w-full flex-col items-center justify-center gap-1"
-            >
-              <select
-                data-camera-select
-                aria-label="Choose camera"
-                value={selectedDeviceId ?? ''}
-                onChange={(e) => {
-                  const id = e.target.value === '' ? null : e.target.value;
-                  // Keep the mirror semantics honest when the OS label
-                  // names a side: a picked front lens mirrors the
-                  // preview, a picked back lens never does. Unknown
-                  // labels leave the facing toggle untouched (the live
-                  // track's facingMode reconciles after start when
-                  // exposed).
-                  const picked = cameras.find((c) => c.deviceId === id);
-                  const lbl = (picked?.label ?? '').toLowerCase();
-                  if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
-                  else if (id !== null && /back|rear|environment/.test(lbl))
-                    setFacing('environment');
-                  chooseCamera(id);
-                }}
-                className="camera-select-compact pointer-events-auto inline-flex max-w-56 truncate rounded-lg border border-paper-50/20 bg-ink-950/60 px-2 py-1 text-xs text-paper-100 backdrop-blur transition-colors hover:bg-ink-950/80 min-h-[44px]"
-              >
-                <option value="">Default camera</option>
-                {cameras.map((c, i) => (
-                  <option key={c.deviceId} value={c.deviceId}>
-                    {cameraDisplayName(c, i)}
-                  </option>
-                ))}
-              </select>
-              {deviceFallbackNote !== null && (
-                <p
-                  data-camera-fallback-note
-                  role="status"
-                  className="max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur"
-                >
-                  {deviceFallbackNote}
-                </p>
-              )}
-              {suggestedDeviceId !== null && (
-                <div
-                  data-camera-suggest
-                  role="status"
-                  className="pointer-events-auto flex max-w-full items-center gap-2 rounded-full bg-ink-950/60 px-3 py-1 text-[11px] text-paper-100 backdrop-blur"
-                >
-                  <span>Sharper camera found — switch</span>
-                  <button
-                    type="button"
-                    aria-label="Switch to sharper camera"
-                    onClick={() => chooseCamera(suggestedDeviceId)}
-                    className="inline-flex min-h-[44px] items-center justify-center rounded-full bg-paper-50 px-3 text-[11px] font-semibold text-ink-900"
-                  >
-                    Switch
-                  </button>
-                </div>
-              )}
-              {torchNote !== null && torchSupported && (
-                <p
-                  data-torch-note
-                  role="status"
-                  className="max-w-full truncate rounded-full bg-ink-950/60 px-3 py-1 text-center text-[11px] text-paper-100 backdrop-blur"
-                >
-                  {torchNote}
-                </p>
-              )}
-            </div>
-          </>
-        ) : (
-          <>
-            <button
-              type="button"
-              aria-label="Close scanner"
-              onClick={onExit}
-              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
-            >
-              ✕
-            </button>
-            <p className="min-w-0 flex-1 truncate text-center font-display text-sm font-semibold tracking-tight text-ink-900 dark:text-paper-100">
-              Scan documents
-            </p>
-            {torchSupported ? (
-              <button
-                type="button"
-                aria-label="Toggle torch"
-                aria-pressed={torchOn}
-                onClick={() => void toggleTorch()}
-                className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-3 py-2 text-sm text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
-              >
-                {torchOn ? '🔦' : '💡'}
-              </button>
-            ) : (
-              <span aria-hidden className="min-h-[44px] min-w-[44px]" />
-            )}
-            {torchNote !== null && torchSupported && (
-              <p data-torch-note role="status" className="text-xs text-ink-500 dark:text-ink-300">
-                {torchNote}
-              </p>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Docked session strip for review/done — the camera phase uses the
-          floating filmstrip inside the bottom overlay instead (same thumbs
-          via stripBody above, always rendered so the slot never collapses). */}
-      {!isCamera && (
-        <div
-          data-scan-strip
-          className="flex h-20 shrink-0 items-center gap-2 overflow-x-auto border-b border-paper-200/70 bg-paper-50/95 px-4 py-2.5 dark:border-ink-700/70 dark:bg-ink-900/95"
-        >
-          {stripBody}
-        </div>
-      )}
+      <FinderChrome
+        variant={isCamera ? 'overlay' : 'docked'}
+        onExit={onExit}
+        torchSupported={torchSupported}
+        torchOn={torchOn}
+        onToggleTorch={() => void toggleTorch()}
+        torchNote={torchNote}
+        facing={facing}
+        mirrored={mirrored}
+        onToggleMirror={() => setMirrored((v) => !v)}
+        onFlip={() => {
+          // Quick flip alongside the picker: clears any explicit
+          // device pick (exact selection would otherwise ignore
+          // facingMode) so the flip always takes effect.
+          chooseCamera(null);
+          setFacing((f) => (f === 'environment' ? 'user' : 'environment'));
+        }}
+        cameras={cameras}
+        selectedDeviceId={selectedDeviceId}
+        onPickCamera={(id) => {
+          // Keep the mirror semantics honest when the OS label
+          // names a side: a picked front lens mirrors the
+          // preview, a picked back lens never does. Unknown
+          // labels leave the facing toggle untouched (the live
+          // track's facingMode reconciles after start when
+          // exposed).
+          const picked = cameras.find((c) => c.deviceId === id);
+          const lbl = (picked?.label ?? '').toLowerCase();
+          if (id !== null && /front|user|facetime|selfie/.test(lbl)) setFacing('user');
+          else if (id !== null && /back|rear|environment/.test(lbl)) setFacing('environment');
+          chooseCamera(id);
+        }}
+        deviceFallbackNote={deviceFallbackNote}
+        suggestedDeviceId={suggestedDeviceId}
+        onChooseSuggested={(id) => chooseCamera(id)}
+      />
 
       {isCamera && (
         // Full-bleed camera: the viewfinder is an absolute inset-0 layer of
@@ -2310,21 +2460,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   playsInline
                   autoPlay
                   aria-label="Camera preview"
-                  style={{
-                    ...(previewMirrored ? { transform: 'scaleX(-1)' } : {}),
-                    ...(liveAspect ? { aspectRatio: liveAspect } : {}),
-                  }}
+                  style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
                   className="absolute inset-0 h-full w-full object-cover"
                 />
                 {/* Finder guidance frame: rounded-rect overlay with corner
-                    ticks. Top clearance (pt-36/sm:pt-40) clears the slim
-                    top bar + compact camera-select row above, so no chrome
-                    row ever overlaps the ticks; the bottom scrim stays
-                    translucent so the corner ticks read through. */}
+                    ticks. Top clearance comes from `--finder-clear` (set on
+                    the scanner root, responsive via the `sm:` override) so
+                    the slim top bar + compact camera-select row never
+                    overlap the ticks — no hardcoded padding beside
+                    stacking notes. The bottom scrim stays translucent so
+                    the corner ticks read through. */}
                 <div
                   data-finder-frame
                   aria-hidden
-                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-36 sm:p-10 sm:pt-40"
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-[var(--finder-clear)] sm:p-10 sm:pt-[var(--finder-clear)]"
                 >
                   <div className="relative h-full w-full rounded-2xl">
                     <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
@@ -2334,13 +2483,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   </div>
                 </div>
                 {/* Status pill rides top-center below the slim top bar +
-                    compact select row (top-36 clears both) so the bottom
-                    overlay can never cover it. Dwell text logic
-                    (finderStatus) is unchanged. */}
+                    compact select row (`--finder-clear` clears both, same
+                    var as the frame) so the bottom overlay can never cover
+                    it. Quiet by default; actionable voice only. */}
                 <p
                   data-finder-status
                   role="status"
-                  className="absolute left-1/2 top-36 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
+                  className="absolute left-1/2 top-[var(--finder-clear)] max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-full bg-ink-950/70 px-4 py-2 text-center text-sm font-medium text-paper-50 backdrop-blur"
                 >
                   {finderStatus}
                 </p>
@@ -2358,15 +2507,27 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   >
                     {cameraHelp}
                   </p>
-                  {camState === 'denied' && (
+                  {/* Recovery is never a dead end: retry when denial may be
+                      transient, and always the Import alternate (same hidden
+                      file input as the bottom overlay) — files stay on-device. */}
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                    {camState === 'denied' && (
+                      <button
+                        type="button"
+                        onClick={() => setRetryNonce((n) => n + 1)}
+                        className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                      >
+                        Retry camera
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => setRetryNonce((n) => n + 1)}
-                      className="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
                     >
-                      Retry camera
+                      Add image files instead
                     </button>
-                  )}
+                  </div>
                 </div>
               </div>
             )}
@@ -2435,13 +2596,26 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   }
                   disabled={queue.length === 0}
                   onClick={() => goToReview(queue.length - 1)}
-                  className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-paper-50/25 bg-ink-950/60 text-paper-100 backdrop-blur transition-colors disabled:opacity-40"
+                  className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-paper-50/25 bg-ink-950/60 text-paper-100 backdrop-blur transition-colors disabled:opacity-40"
                 >
                   {lastQueued?.photoUrl ? (
-                    <img src={lastQueued.photoUrl} alt="" className="h-full w-full object-cover" />
+                    <img
+                      src={lastQueued.photoUrl}
+                      alt=""
+                      className="h-full w-full rounded-xl object-cover"
+                    />
                   ) : (
                     <span aria-hidden className="text-lg">
                       ▦
+                    </span>
+                  )}
+                  {queue.length > 0 && (
+                    <span
+                      data-gallery-count
+                      aria-hidden
+                      className="absolute -right-1.5 -top-1.5 flex h-6 min-w-6 items-center justify-center rounded-full bg-brass-400 px-1 text-[11px] font-bold tabular-nums text-ink-950"
+                    >
+                      {queue.length}
                     </span>
                   )}
                 </button>
@@ -2512,22 +2686,28 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       )}
 
       {phase === 'review' && current !== null && (
-        <div data-scan-queue className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        <div
+          data-scan-queue
+          className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]"
+        >
           {preparing && (
             <div
               data-review-preparing
               role="status"
-              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-paper-50/95 p-6 text-center dark:bg-ink-900/95"
+              className="sticky top-0 z-10 flex items-center justify-center gap-3 rounded-xl border border-brass-400/40 bg-paper-100 px-4 py-2.5 text-center dark:border-brass-400/30 dark:bg-ink-800"
             >
-              <span aria-hidden className="h-3 w-3 animate-pulse rounded-full bg-brass-400" />
-              <p className="text-sm font-medium text-ink-700 dark:text-paper-100">
+              <span
+                aria-hidden
+                className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-brass-400 motion-reduce:animate-none"
+              />
+              <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
                 {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
               </p>
               <button
                 type="button"
                 data-review-preparing-cancel
                 onClick={cancelPreparing}
-                className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
               >
                 Cancel
               </button>
@@ -2544,7 +2724,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-page-prev
               aria-label="Go to previous page"
-              disabled={safeIndex <= 0 || preparing}
+              disabled={safeIndex <= 0}
               onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
@@ -2554,7 +2734,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-page-next
               aria-label="Go to next page"
-              disabled={safeIndex >= queue.length - 1 || preparing}
+              disabled={safeIndex >= queue.length - 1}
               onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
             >
@@ -2597,7 +2777,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 data-film-thumb
                 aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
                 aria-current={i === safeIndex}
-                disabled={preparing}
                 onClick={() => setReviewIndex(i)}
                 className={`relative h-14 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
                   i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
@@ -2610,6 +2789,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     {i + 1}
                   </span>
                 )}
+                {entry.status !== 'ready' && (
+                  <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
+                    …
+                  </span>
+                )}
                 <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
                   {i + 1}
                 </span>
@@ -2619,7 +2803,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               type="button"
               data-scan-add
               aria-label="Back to camera"
-              disabled={preparing}
               onClick={() => setPhase('camera')}
               className="inline-flex h-14 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
             >
@@ -2641,7 +2824,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </button>
             <button
               type="button"
-              disabled={queue.length === 0 || preparing}
+              disabled={queue.length === 0}
               onClick={() => setPhase('done')}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >
@@ -2652,7 +2835,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       )}
 
       {phase === 'done' && (
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 text-center">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] text-center">
           <p className="font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
             {accepted.length > 0 ? 'All pages ready' : 'No pages kept'}
           </p>

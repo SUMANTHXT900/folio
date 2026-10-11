@@ -26,11 +26,12 @@
  *   recreates the worker.
  */
 
-import { DEFAULT_DETECTOR, defaultDetector } from './detectorPolicy';
+import { DEFAULT_DETECTOR, ML_MODEL_INPUT_SIZE, defaultDetector } from './detectorPolicy';
 import {
   SCANIC_WORKER_PROTOCOL_VERSION,
   validateScanicCorners,
   type ScanicCorners,
+  type ScanicDetectInstrumentation,
   type ScanicDetectionResult,
   type ScanicDetectorKind,
   type ScanicDetectRequest,
@@ -72,6 +73,19 @@ export interface ScanicClientOptions {
    * `redetect()` ignores this seam.
    */
   defaultDetector?: () => ScanicDetectorKind;
+}
+
+/**
+ * Caller-supplied measurement into `ScanicClient.detect()` (additive —
+ * existing two-argument calls are untouched).
+ */
+export interface ScanicClientDetectOptions {
+  /**
+   * Main-thread decode cost in ms for the image being detected. Reported as
+   * `instrumentation.decodeMs`; null/omitted when unknown. Log/collect
+   * only — never changes detection behavior.
+   */
+  decodeMs?: number | null;
 }
 
 export class ScanicClient {
@@ -123,8 +137,18 @@ export class ScanicClient {
    * ImageData is neutered); corners come back in FULL-RESOLUTION input
    * pixels and `confidence` is scanic's own 0–1 confidence (null when
    * unavailable).
+   *
+   * Instrumentation: the result always carries `instrumentation` (frozen
+   * field names — see `scanicProtocol.ts`). The worker produces the
+   * ORT-side fields; this client backfills the client-known ones
+   * (`transferBytes`, dims) when the worker predates instrumentation, and
+   * applies the caller-supplied `opts.decodeMs` when finite. Measure-only.
    */
-  async detect(image: ImageData, detector?: ScanicDetectorKind): Promise<ScanicDetectionResult> {
+  async detect(
+    image: ImageData,
+    detector?: ScanicDetectorKind,
+    opts?: ScanicClientDetectOptions,
+  ): Promise<ScanicDetectionResult> {
     const id = this.nextRequestId();
     const request: ScanicDetectRequest = {
       protocol: SCANIC_WORKER_PROTOCOL_VERSION,
@@ -135,6 +159,7 @@ export class ScanicClient {
       buffer: toExactBuffer(image),
       detector: detector ?? this.defaultDetector(),
     };
+    const transferBytes = request.buffer.byteLength;
     const response = await this.dispatch(request, [request.buffer]);
     if (response.kind !== 'detect-result') {
       throw new ScanicClientError(
@@ -142,7 +167,12 @@ export class ScanicClient {
         'scanic worker returned a mismatched detect response',
       );
     }
-    return response.result;
+    return withClientInstrumentation(response.result, {
+      decodeMs: opts?.decodeMs ?? null,
+      transferBytes,
+      width: image.width,
+      height: image.height,
+    });
   }
 
   /**
@@ -340,18 +370,179 @@ export class ScanicClient {
 }
 
 /**
- * Module-level shared client for `redetect()` callers that do not own a
- * client (the adjust screen's Re-detect button): the backing worker is
- * created lazily on first use and reused across calls. Same ML-forcing
- * semantics as `ScanicClient.redetect`; the image's pixel buffer transfers.
+ * Mount-lifetime retained detect client (no-regret ML pipeline, 2026-10-11).
+ *
+ * Factory name + release fn are FROZEN for the VF lane — do not rename.
+ *
+ * Created lazily on first `getRetainedDetectClient()` and reused across
+ * drains, so review revisits + Re-detect skip cold session creates (ORT
+ * runtime + model bytes + session stay warm in the retained worker). The
+ * FIRST call's `options` win (subsequent calls reuse the live client —
+ * pass the counting factory before first use in tests).
+ *
+ * Isolation rules (epoch/generation safety):
+ * - NEVER terminate the retained client on drain cancel/completion — only
+ *   `releaseRetainedDetectClient()` (mount unmount) may end it. A cancelled
+ *   drain drops its continuations cooperatively (generation guards), never
+ *   by terminating shared warmth; use `acquireDetectionPool()` so
+ *   `releaseOwned()` terminates pool-owned lanes only.
+ * - Terminate-on-unmount hygiene stays: the owner calls
+ *   `releaseRetainedDetectClient()` when the scanner unmounts (same place
+ *   owned per-mount clients are terminated today).
  */
-let sharedClient: ScanicClient | null = null;
+let retainedDetectClient: ScanicClient | null = null;
 
-export function redetect(image: ImageData): Promise<ScanicDetectionResult> {
-  if (sharedClient === null) {
-    sharedClient = new ScanicClient();
+export function getRetainedDetectClient(options: ScanicClientOptions = {}): ScanicClient {
+  if (retainedDetectClient === null) {
+    retainedDetectClient = new ScanicClient(options);
   }
-  return sharedClient.redetect(image);
+  return retainedDetectClient;
+}
+
+/**
+ * Explicit release for the retained detect client: terminate-to-cancel any
+ * in-flight work and drop the reference so the next
+ * `getRetainedDetectClient()` starts cold. Call on scanner unmount only —
+ * never on drain cancel (see `getRetainedDetectClient`).
+ */
+export function releaseRetainedDetectClient(): void {
+  const client = retainedDetectClient;
+  retainedDetectClient = null;
+  if (client !== null) {
+    try {
+      client.terminate();
+    } catch {
+      // Termination is best-effort; the reference is dropped regardless.
+    }
+  }
+}
+
+/**
+ * Module-level shared `redetect()` for callers that do not own a client
+ * (the adjust screen's Re-detect button): served by the retained client so
+ * repeat Re-detects reuse the warm session. Same ML-forcing semantics as
+ * `ScanicClient.redetect`; the image's pixel buffer transfers. The retained
+ * lifetime applies — release happens via `releaseRetainedDetectClient()`.
+ */
+export function redetect(image: ImageData): Promise<ScanicDetectionResult> {
+  return getRetainedDetectClient().redetect(image);
+}
+
+/**
+ * K-lane detection pool that prefers the retained client (no-regret ML
+ * pipeline, 2026-10-11). Pool SHAPE is unchanged: 1–3 lanes, each lane its
+ * own `ScanicClient` (own worker + ORT session — no COOP/COEP needed);
+ * only lane 0 is the shared mount-lifetime client when `preferRetained`
+ * (default true) so a revisit drain reuses one warm session instead of
+ * creating K cold ones.
+ *
+ * The caller still derives the lane count from PENDING entries via
+ * `resolveDetectionWorkerCount({ pageCount: pending.length })` — this
+ * helper only staffs the lanes, it never sizes them.
+ *
+ * Generation isolation: `releaseOwned()` terminates pool-owned lanes ONLY;
+ * the retained lane survives for revisits/Re-detect. Drain cancel therefore
+ * calls `releaseOwned()` (plus its generation bump), while unmount calls
+ * `releaseOwned()` AND `releaseRetainedDetectClient()`.
+ */
+export interface DetectionPoolOptions {
+  /** Test seam: worker factory for the retained + fresh lanes. */
+  createWorker?: () => Worker;
+  /**
+   * Default true: lane 0 is `getRetainedDetectClient()`. False: every lane
+   * is a fresh owned client (release terminates all).
+   */
+  preferRetained?: boolean;
+}
+
+export interface DetectionPool {
+  /** Lane clients in order; lane `w` is `clients[w]` (direct — no modulo). */
+  clients: ScanicClient[];
+  /** Terminates pool-owned lanes only; the retained lane (if any) survives. */
+  releaseOwned: () => void;
+}
+
+export function acquireDetectionPool(
+  workerCount: number,
+  options: DetectionPoolOptions = {},
+): DetectionPool {
+  const count = Math.max(1, Math.floor(Number.isFinite(workerCount) ? workerCount : 1));
+  const preferRetained = options.preferRetained ?? true;
+  const seams: ScanicClientOptions =
+    options.createWorker !== undefined ? { createWorker: options.createWorker } : {};
+  const clients: ScanicClient[] = [];
+  const owned: ScanicClient[] = [];
+  if (preferRetained) {
+    clients.push(getRetainedDetectClient(seams));
+  }
+  while (clients.length < count) {
+    const fresh = new ScanicClient(seams);
+    clients.push(fresh);
+    owned.push(fresh);
+  }
+  return {
+    clients,
+    releaseOwned: () => {
+      for (const client of owned) {
+        try {
+          client.terminate();
+        } catch {
+          // Termination is best-effort; the reference is dropped regardless.
+        }
+      }
+      owned.length = 0;
+    },
+  };
+}
+
+/**
+ * Lane indexer for K-lane drains (hygiene cleanup, behavior-preserving):
+ * stride-lane `workerIndex` values are always `< pool.length`, so lane `w`
+ * is `pool[w]` directly — the old `pool[w % pool.length]` modulo was
+ * vacuous and hid that invariant. Throws (never wraps) on an out-of-range
+ * index so a mis-sized pool fails loudly instead of mis-detecting.
+ */
+export function detectionLaneClient(pool: ScanicClient[], workerIndex: number): ScanicClient {
+  const client = pool[workerIndex];
+  if (client === undefined) {
+    throw new ScanicClientError(
+      'worker-unavailable',
+      `detection lane ${workerIndex} has no client (pool size ${pool.length})`,
+    );
+  }
+  return client;
+}
+
+/**
+ * Guarantees `instrumentation` on every detect result crossing this client:
+ * worker-produced fields are kept (caller-supplied finite `decodeMs` wins
+ * over the worker's null), and pre-instrumentation results (old workers,
+ * test doubles) are backfilled from client-known transfer bytes + dims.
+ * Everything unobservable from here stays null. Measure-only.
+ */
+function withClientInstrumentation(
+  result: ScanicDetectionResult,
+  known: { decodeMs: number | null; transferBytes: number; width: number; height: number },
+): ScanicDetectionResult {
+  const decodeMs =
+    typeof known.decodeMs === 'number' && Number.isFinite(known.decodeMs) ? known.decodeMs : null;
+  const existing = result.instrumentation;
+  if (existing !== undefined) {
+    if (decodeMs === null || existing.decodeMs === decodeMs) return result;
+    return { ...result, instrumentation: { ...existing, decodeMs } };
+  }
+  const instrumentation: ScanicDetectInstrumentation = {
+    decodeMs,
+    transferBytes: known.transferBytes,
+    ortLoadMs: null,
+    sessionCreateMs: null,
+    inferenceMs: null,
+    confidence: typeof result.confidence === 'number' ? result.confidence : null,
+    inputWidth: known.width,
+    inputHeight: known.height,
+    modelInputSize: ML_MODEL_INPUT_SIZE,
+  };
+  return { ...result, instrumentation };
 }
 
 /**

@@ -24,8 +24,11 @@
  * positioned STRICTLY inside the computed `object-contain` content rect
  * (`containContentRect` from frame box + natural aspect — the single source
  * of truth shared by render positioning and `clientToImage` drag mapping),
- * never full-frame %. Handle hit targets stay 44px (a11y) while the visual
- * dot scales with display size. The quad maps 1:1 to displayed pixels.
+ * never full-frame %. The overlay is GATED on the measured rect: with no
+ * content rect yet, no SVG/handles render (the old %-fallback positioned
+ * handles on black-bar pixels and drifted — L-25). Handle hit targets stay
+ * 44px (a11y) while the visual dot scales with display size. The quad maps
+ * 1:1 to displayed pixels.
  *
  * Compact action bar: primary `Apply` (adjust mode only) plus ONE
  * icon-button row (Adjust / Reset, Re-detect, Use original, Discard). Icons
@@ -77,8 +80,10 @@ export interface ScanicReviewProps {
   redetecting: boolean;
   /**
    * Optional batch navigation for adjust mode. When present, adjust mode
-   * shows a "Next page" button (`[data-adjust-next]`) beside Apply that
-   * calls this and nothing else — no warp, no verdict, no Apply.
+   * shows a "Next page" button (`[data-adjust-next]`) beside Apply with a
+   * dirty-draft guard: an un-applied draft is auto-kept (same emission as
+   * Apply) before navigating — never silently dropped. Degenerate dims
+   * skip the keep (Apply itself is disabled there).
    */
   onNextPage?(): void;
 }
@@ -636,17 +641,14 @@ export default function ScanicReview({
         }
       : undefined;
 
+  // Handle positions share the gated content rect (no %-fallback — bars are
+  // never photo pixels, so % positioning would drift off-image). Callers
+  // render only when `contentRect` exists.
   const handlePosStyle = (x: number, y: number): CSSProperties => {
-    if (contentRect !== null) {
-      return {
-        left: contentRect.left + (x / safeW) * contentRect.width,
-        top: contentRect.top + (y / safeH) * contentRect.height,
-        touchAction: 'none',
-      };
-    }
+    const rect = contentRect ?? { left: 0, top: 0, width: 0, height: 0 };
     return {
-      left: `${(x / safeW) * 100}%`,
-      top: `${(y / safeH) * 100}%`,
+      left: rect.left + (x / safeW) * rect.width,
+      top: rect.top + (y / safeH) * rect.height,
       touchAction: 'none',
     };
   };
@@ -751,8 +753,11 @@ export default function ScanicReview({
     }
   }, [photoUrl, loupeHandle, loupePX, loupePY, safeW, safeH]);
 
+  // Single scroller: the parent review queue (`[data-scan-queue]`) owns the
+  // only scroll container — this card never nests its own (no max-h, no
+  // overflow, no padding of its own; the queue's padding + safe-area apply).
   return (
-    <div className="max-h-[100dvh] space-y-3 overflow-y-auto p-4 sm:p-5">
+    <div className="space-y-3">
       <div className="flex items-center gap-2">
         <p className="flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">{pageLabel}</p>
         <p
@@ -779,233 +784,232 @@ export default function ScanicReview({
             className="block max-h-[50dvh] w-full object-contain"
             draggable={false}
           />
-          {/* Overlay always renders, even before measurement: with no content
-              rect yet it falls back to full-frame % positioning (same space
-              the % drag fallback used) and snaps exact once measured.
-              Gating it on measurement left zero-rect environments (jsdom,
-              first paint) with zero handles. */}
-          <svg
-            viewBox={`0 0 ${safeW} ${safeH}`}
-            preserveAspectRatio="none"
-            aria-hidden={false}
-            aria-label="Adjustable crop outline"
-            style={overlaySvgStyle}
-            className={
-              contentRect !== null
-                ? 'pointer-events-none absolute'
-                : 'pointer-events-none absolute inset-0 h-full w-full'
-            }
-          >
-            <path
-              d={
-                `M0 0H${safeW}V${safeH}H0Z ` +
-                `M${draft.topLeft.x} ${draft.topLeft.y}` +
-                `L${draft.topRight.x} ${draft.topRight.y}` +
-                `L${draft.bottomRight.x} ${draft.bottomRight.y}` +
-                `L${draft.bottomLeft.x} ${draft.bottomLeft.y}Z`
-              }
-              fill="rgba(23, 19, 14, 0.55)"
-              fillRule="evenodd"
-            />
-            <polygon
-              points={quadPointsAttr(draft)}
-              fill="none"
-              stroke="#c97a1f"
-              strokeWidth={1.5}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              strokeDasharray="1 4"
-              vectorEffect="non-scaling-stroke"
-            />
-          </svg>
-          <div className="absolute inset-0">
-            {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
-              const corner = HANDLE_TO_CORNER[key];
-              const point = draft[corner];
-              const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
-              const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  data-crop-handle={key}
-                  role="slider"
-                  aria-label={CORNER_LABEL[corner]}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={pctX}
-                  aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                  style={handlePosStyle(point.x, point.y)}
-                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    dragKeyRef.current = key;
-                    setGrabbed({ kind: 'corner', key });
-                    try {
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                    } catch {
-                      // jsdom / browsers without pointer capture: move
-                      // events still fire on the element while pressed.
+          {/* Gated on the measured content rect (L-25): no rect, no
+              overlay — the %-fallback is deleted, so handles can never sit
+              on black-bar pixels. The hero photo still renders underneath,
+              so measurement proceeds. */}
+          {contentRect !== null && (
+            <svg
+              viewBox={`0 0 ${safeW} ${safeH}`}
+              preserveAspectRatio="none"
+              aria-hidden={false}
+              aria-label="Adjustable crop outline"
+              style={overlaySvgStyle}
+              className="pointer-events-none absolute"
+            >
+              <path
+                d={
+                  `M0 0H${safeW}V${safeH}H0Z ` +
+                  `M${draft.topLeft.x} ${draft.topLeft.y}` +
+                  `L${draft.topRight.x} ${draft.topRight.y}` +
+                  `L${draft.bottomRight.x} ${draft.bottomRight.y}` +
+                  `L${draft.bottomLeft.x} ${draft.bottomLeft.y}Z`
+                }
+                fill="rgba(23, 19, 14, 0.55)"
+                fillRule="evenodd"
+              />
+              <polygon
+                points={quadPointsAttr(draft)}
+                fill="none"
+                stroke="#c97a1f"
+                strokeWidth={1.5}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                strokeDasharray="1 4"
+                vectorEffect="non-scaling-stroke"
+              />
+            </svg>
+          )}
+          {contentRect !== null && (
+            <div className="absolute inset-0">
+              {(Object.keys(HANDLE_TO_CORNER) as HandleKey[]).map((key) => {
+                const corner = HANDLE_TO_CORNER[key];
+                const point = draft[corner];
+                const pctX = safeW > 0 ? Math.round((point.x / safeW) * 100) : 0;
+                const pctY = safeH > 0 ? Math.round((point.y / safeH) * 100) : 0;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    data-crop-handle={key}
+                    role="slider"
+                    aria-label={CORNER_LABEL[corner]}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pctX}
+                    aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
+                    style={handlePosStyle(point.x, point.y)}
+                    className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      dragKeyRef.current = key;
+                      setGrabbed({ kind: 'corner', key });
+                      try {
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                      } catch {
+                        // jsdom / browsers without pointer capture: move
+                        // events still fire on the element while pressed.
+                      }
+                    }}
+                    onPointerMove={(e) => {
+                      if (dragKeyRef.current !== key) return;
+                      if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
+                      const p = clientToImage(e.clientX, e.clientY);
+                      queueCornerMove(key, p.x, p.y);
+                    }}
+                    onPointerUp={() => {
+                      dragKeyRef.current = null;
+                      flushPendingMoves();
+                      setGrabbed((prev) =>
+                        prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                      );
+                    }}
+                    onPointerCancel={() => {
+                      dragKeyRef.current = null;
+                      flushPendingMoves();
+                      setGrabbed((prev) =>
+                        prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                      );
+                    }}
+                    onFocus={() => setFocusedHandle({ kind: 'corner', key })}
+                    onBlur={() =>
+                      setFocusedHandle((prev) =>
+                        prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
+                      )
                     }
-                  }}
-                  onPointerMove={(e) => {
-                    if (dragKeyRef.current !== key) return;
-                    if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
-                    const p = clientToImage(e.clientX, e.clientY);
-                    queueCornerMove(key, p.x, p.y);
-                  }}
-                  onPointerUp={() => {
-                    dragKeyRef.current = null;
-                    flushPendingMoves();
-                    setGrabbed((prev) =>
-                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                    );
-                  }}
-                  onPointerCancel={() => {
-                    dragKeyRef.current = null;
-                    flushPendingMoves();
-                    setGrabbed((prev) =>
-                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                    );
-                  }}
-                  onFocus={() => setFocusedHandle({ kind: 'corner', key })}
-                  onBlur={() =>
-                    setFocusedHandle((prev) =>
-                      prev !== null && prev.kind === 'corner' && prev.key === key ? null : prev,
-                    )
-                  }
-                  onKeyDown={(e) => {
-                    const delta = e.shiftKey ? 10 : 1;
-                    if (e.key === 'ArrowLeft') {
-                      e.preventDefault();
-                      stepCorner(key, -delta, 0);
-                    } else if (e.key === 'ArrowRight') {
-                      e.preventDefault();
-                      stepCorner(key, delta, 0);
-                    } else if (e.key === 'ArrowUp') {
-                      e.preventDefault();
-                      stepCorner(key, 0, -delta);
-                    } else if (e.key === 'ArrowDown') {
-                      e.preventDefault();
-                      stepCorner(key, 0, delta);
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault();
-                      cancelAdjust();
-                    }
-                  }}
-                >
-                  <span
-                    aria-hidden
-                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
-                    style={{ width: handleVisual, height: handleVisual }}
+                    onKeyDown={(e) => {
+                      const delta = e.shiftKey ? 10 : 1;
+                      if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        stepCorner(key, -delta, 0);
+                      } else if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        stepCorner(key, delta, 0);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        stepCorner(key, 0, -delta);
+                      } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        stepCorner(key, 0, delta);
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelAdjust();
+                      }
+                    }}
                   >
                     <span
                       aria-hidden
-                      className="rounded-full bg-brass-400"
-                      style={{ width: handleDot, height: handleDot }}
-                    />
-                  </span>
-                </button>
-              );
-            })}
-            {MID_EDGES.map((edge) => {
-              const mid = midPoint(edge);
-              if (mid === null) return null;
-              const pctX = safeW > 0 ? Math.round((mid.x / safeW) * 100) : 0;
-              const pctY = safeH > 0 ? Math.round((mid.y / safeH) * 100) : 0;
-              return (
-                <button
-                  key={`mid-${edge}`}
-                  type="button"
-                  data-crop-handle-mid={edge}
-                  role="slider"
-                  aria-label={MID_LABEL[edge]}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={pctX}
-                  aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
-                  style={handlePosStyle(mid.x, mid.y)}
-                  className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    if (draft === null) return;
-                    const p = clientToImage(e.clientX, e.clientY);
-                    midDragRef.current = {
-                      edge,
-                      startX: p.x,
-                      startY: p.y,
-                      snapshot: cloneCorners(draft),
-                    };
-                    setGrabbed({ kind: 'mid', key: edge });
-                    try {
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                    } catch {
-                      // jsdom / browsers without pointer capture.
+                      className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
+                      style={{ width: handleVisual, height: handleVisual }}
+                    >
+                      <span
+                        aria-hidden
+                        className="rounded-full bg-brass-400"
+                        style={{ width: handleDot, height: handleDot }}
+                      />
+                    </span>
+                  </button>
+                );
+              })}
+              {MID_EDGES.map((edge) => {
+                const mid = midPoint(edge);
+                if (mid === null) return null;
+                const pctX = safeW > 0 ? Math.round((mid.x / safeW) * 100) : 0;
+                const pctY = safeH > 0 ? Math.round((mid.y / safeH) * 100) : 0;
+                return (
+                  <button
+                    key={`mid-${edge}`}
+                    type="button"
+                    data-crop-handle-mid={edge}
+                    role="slider"
+                    aria-label={MID_LABEL[edge]}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pctX}
+                    aria-valuetext={`${pctX} percent across, ${pctY} percent down`}
+                    style={handlePosStyle(mid.x, mid.y)}
+                    className="absolute inline-flex h-11 w-11 min-h-[44px] min-w-[44px] -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md bg-transparent text-ink-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brass-400"
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      if (draft === null) return;
+                      const p = clientToImage(e.clientX, e.clientY);
+                      midDragRef.current = {
+                        edge,
+                        startX: p.x,
+                        startY: p.y,
+                        snapshot: cloneCorners(draft),
+                      };
+                      setGrabbed({ kind: 'mid', key: edge });
+                      try {
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                      } catch {
+                        // jsdom / browsers without pointer capture.
+                      }
+                    }}
+                    onPointerMove={(e) => {
+                      if (midDragRef.current?.edge !== edge) return;
+                      if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
+                      const p = clientToImage(e.clientX, e.clientY);
+                      queueMidMove(edge, p.x, p.y);
+                    }}
+                    onPointerUp={() => {
+                      // Flush BEFORE dropping the drag snapshot: moveMid reads
+                      // the drag-start snapshot at apply time.
+                      flushPendingMoves();
+                      if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                      setGrabbed((prev) =>
+                        prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                      );
+                    }}
+                    onPointerCancel={() => {
+                      flushPendingMoves();
+                      if (midDragRef.current?.edge === edge) midDragRef.current = null;
+                      setGrabbed((prev) =>
+                        prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                      );
+                    }}
+                    onFocus={() => setFocusedHandle({ kind: 'mid', key: edge })}
+                    onBlur={() =>
+                      setFocusedHandle((prev) =>
+                        prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
+                      )
                     }
-                  }}
-                  onPointerMove={(e) => {
-                    if (midDragRef.current?.edge !== edge) return;
-                    if (e.buttons !== undefined && e.buttons !== 0 && e.buttons !== 1) return;
-                    const p = clientToImage(e.clientX, e.clientY);
-                    queueMidMove(edge, p.x, p.y);
-                  }}
-                  onPointerUp={() => {
-                    // Flush BEFORE dropping the drag snapshot: moveMid reads
-                    // the drag-start snapshot at apply time.
-                    flushPendingMoves();
-                    if (midDragRef.current?.edge === edge) midDragRef.current = null;
-                    setGrabbed((prev) =>
-                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                    );
-                  }}
-                  onPointerCancel={() => {
-                    flushPendingMoves();
-                    if (midDragRef.current?.edge === edge) midDragRef.current = null;
-                    setGrabbed((prev) =>
-                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                    );
-                  }}
-                  onFocus={() => setFocusedHandle({ kind: 'mid', key: edge })}
-                  onBlur={() =>
-                    setFocusedHandle((prev) =>
-                      prev !== null && prev.kind === 'mid' && prev.key === edge ? null : prev,
-                    )
-                  }
-                  onKeyDown={(e) => {
-                    const delta = e.shiftKey ? 10 : 1;
-                    if (e.key === 'ArrowLeft') {
-                      e.preventDefault();
-                      stepMid(edge, -delta, 0);
-                    } else if (e.key === 'ArrowRight') {
-                      e.preventDefault();
-                      stepMid(edge, delta, 0);
-                    } else if (e.key === 'ArrowUp') {
-                      e.preventDefault();
-                      stepMid(edge, 0, -delta);
-                    } else if (e.key === 'ArrowDown') {
-                      e.preventDefault();
-                      stepMid(edge, 0, delta);
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault();
-                      cancelAdjust();
-                    }
-                  }}
-                >
-                  <span
-                    aria-hidden
-                    className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
-                    style={{ width: handleVisual, height: handleVisual }}
+                    onKeyDown={(e) => {
+                      const delta = e.shiftKey ? 10 : 1;
+                      if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        stepMid(edge, -delta, 0);
+                      } else if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        stepMid(edge, delta, 0);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        stepMid(edge, 0, -delta);
+                      } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        stepMid(edge, 0, delta);
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelAdjust();
+                      }
+                    }}
                   >
                     <span
                       aria-hidden
-                      className="rounded-full bg-brass-400"
-                      style={{ width: handleDot, height: handleDot }}
-                    />
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+                      className="inline-flex items-center justify-center rounded-full border border-solid border-brass-400 bg-paper-50/25 shadow-soft"
+                      style={{ width: handleVisual, height: handleVisual }}
+                    >
+                      <span
+                        aria-hidden
+                        className="rounded-full bg-brass-400"
+                        style={{ width: handleDot, height: handleDot }}
+                      />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {loupeBox !== null && loupeImagePoint !== null && (
             <div
               data-loupe
@@ -1156,6 +1160,16 @@ export default function ScanicReview({
               data-adjust-next
               aria-label="Next page"
               onClick={() => {
+                // Dirty-draft guard: never silently drop an un-applied
+                // adjust — auto-keep the draft (the same emission as
+                // Apply) before navigating. Degenerate dims skip the keep
+                // (Apply itself is disabled there: nothing keepable).
+                if (draft !== null && !degenerateDims) {
+                  const baseline = corners ?? fullFrameCorners(safeW, safeH);
+                  if (JSON.stringify(draft) !== JSON.stringify(baseline)) {
+                    onAdjustApply(cloneCorners(draft));
+                  }
+                }
                 onNextPage?.();
               }}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-4 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"

@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D51 ML + viewfinder phase 1',
+    date: '2026-10-11',
+    notes: [
+      'ML core: retained warm detect client across drains, K lanes from pending count, per-item timing spans plus confidence and read-only EXIF probe.',
+      'Session level already optimal (verified in vendored bytes) — no threading or provider change.',
+      'Viewfinder refactor: one top-bar chrome, quiet finder pill, gallery count badge, non-blocking review, safe-area and reduced-motion guards.',
+    ],
+  },
+  {
     build: 'v1.10.3 split sharpness',
     date: '2026-10-11',
     notes: [

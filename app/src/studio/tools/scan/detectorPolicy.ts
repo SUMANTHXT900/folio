@@ -32,11 +32,40 @@ export const ML_ASSET_BASE_URL = '/assets/scanic-ml/';
  * ML options for every scanic ML call in this core: same-origin assets and
  * `numThreads: 1` (the Folio default — no COOP/COEP isolation; ~13ms
  * inference measured upstream).
+ *
+ * Session-options note (no-regret lever 1, inspected 2026-10-11 — KEEP
+ * constraints hold, so this stays a pin, not a change):
+ * - The vendored detector (`node_modules/scanic/dist/scanic-mlDetector.js`,
+ *   same bytes as production) already creates its session as
+ *   `InferenceSession.create(bytes, { executionProviders: ['wasm'],
+ *   graphOptimizationLevel: 'all' })` — the 'all' level this lever asks for
+ *   is already the shipping behavior; there is nothing further to set.
+ * - scanic's public `MlDetectorOptions` exposes NO session passthrough
+ *   (assetBaseUrl / modelUrl / wasmPaths / modelBytes / timeout / threads /
+ *   minScore only), so arena (`enableCpuMemArena`) / mem-pattern
+ *   (`enableMemPattern`) flags are unreachable without forking scanic or
+ *   taking an ORT-direct dependency — both out of scope (no new deps, no EP
+ *   change). Skipped with this comment, not silently.
+ * - `freeDimensionOverrides` is N/A: the model input is fixed 224×224
+ *   (`doccornernet_lean.ort` contains zero `dim_param` entries — fully
+ *   static dims; the detector letterboxes every input to 224 and runs a
+ *   fixed `[1, 224, 224, 3]` tensor). No symbolic dims exist to override.
+ * - Threading / execution providers are FROZEN: 1 thread, wasm EP, no
+ *   COOP/COEP (see `app/public/assets/scanic-ml/VERSIONS.md`).
  */
 export const ML_DETECTOR_OPTIONS = {
   assetBaseUrl: ML_ASSET_BASE_URL,
   numThreads: 1,
 } as const;
+
+/**
+ * Fixed DocCornerNet input edge: the vendored detector letterboxes every
+ * input to 224×224 and runs a static `[1, 224, 224, 3]` tensor (see the
+ * session-options note on `ML_DETECTOR_OPTIONS`). Reported as
+ * `instrumentation.modelInputSize` so future pre-downscale work can reason
+ * about the detection resize without re-deriving it.
+ */
+export const ML_MODEL_INPUT_SIZE = 224;
 
 /**
  * Warm-preload state for THIS JS context. The main thread and the scan worker
@@ -180,6 +209,12 @@ function readLiveDeviceMemory(): number | undefined {
  * Pure policy: how many parallel detection lanes for a review-time run.
  * Clamped to `MIN_DETECTION_WORKERS..MAX_DETECTION_WORKERS`. Exported for
  * unit tests and review-time scheduling.
+ *
+ * K-lane hygiene (2026-10-11): pass the PENDING (still-undetected) entry
+ * count as `pageCount`, NOT the total queue length — a revisit with 1
+ * queued page out of 8 total must resolve 1 lane, not over-provision 2–3
+ * workers whose sessions warm for nothing. The single-page rule below is
+ * exactly that case (`pageCount <= 1` → serial).
  */
 export function resolveDetectionWorkerCount(opts?: DetectionWorkerOptions): number {
   if (opts?.pageCount !== undefined && opts.pageCount <= 1) return MIN_DETECTION_WORKERS;

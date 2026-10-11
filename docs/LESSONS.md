@@ -157,3 +157,15 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** The adjust overlay positioned from async-measured `frameBox` STATE while drag mapped through a live `getBoundingClientRect()` — any layout shift between them offset every handle and sheared the stretched SVG. Fix: measure synchronously in render with state as fallback, so both paths share one rect; and don't render the overlay until the rect exists.
 - **Why it matters.** Two rect sources that agree "almost always" disagree exactly when the user is interacting (scroll, DVH shift, resize) — the drift reports always look like warp bugs but live in the overlay.
 - **Rule.** One live rect source for render + pointer mapping; gate overlay rendering on its presence. Evidence: `docs/DECISIONS.md` D43 (user phone feedback 2026-10-04).
+
+## L-27 — Wasm-first for sub-1M-param models; GPU backends need cap + lifecycle evidence
+
+- **Observation.** Phase-1 analysis verdict (lane-reported per the brief; no independent measurement in this docs pass): the D51 slice keeps the D33 1-thread no-isolation WASM baseline and rejects WebGPU/WebGL for Phase 1 on a 27 MB cap plus deprecation evidence (details lane-reported, not re-verified here).
+- **Why it matters.** Backend churn (GPU, threads, COOP/COEP headers) rewrites the shipping and reproducibility contract for a model class WASM already serves — the cost is certain, the win is unmeasured until spans land.
+- **Rule.** Keep sub-1M-param detection on the shipping WASM baseline; any GPU/threaded proposal must bring measured spans plus cap accounting and lifecycle (deprecation/isolation) evidence first. Evidence: `docs/DECISIONS.md` D33/D51 (brief-cited cap + deprecation details unverified here — omitted, never invented).
+
+## L-28 — Calibrate thresholds on a corpus, never on anecdotes
+
+- **Observation.** Phase-1 analysis verdict (lane-reported per the brief; no corpus observed in this docs pass): threshold gating and resolution choice wait for the confidence record + miss corpus (D51 measurement order: spans → EXIF probe → 800-vs-full A/B → miss corpus).
+- **Why it matters.** Calibrating on anecdotes is the blind-round failure mode D33 rejected (F-21: three custom-pipeline recall rounds, suite green, field gate never closed).
+- **Rule.** No threshold or resolution change without the confidence record and miss corpus that justify it; Phase-2 work is gated on Phase-1 instrumentation. Render-tier fit discipline (L-26) already covers the viewfinder/backing-store side — referenced here, not duplicated. Evidence: `docs/DECISIONS.md` D51; `docs/BUGS.md` F-21.

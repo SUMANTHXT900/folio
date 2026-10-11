@@ -10,7 +10,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import './scanicTestImageData';
 import { useScanicProcessor, type ScanicProcessorOptions } from './useScanicProcessor';
 import type { ScanicClient } from './scanicClient';
-import type { ScanicCorners, ScanicDetectorKind } from './scanicProtocol';
+import type {
+  ScanicCorners,
+  ScanicDetectInstrumentation,
+  ScanicDetectorKind,
+} from './scanicProtocol';
 
 const CORNERS: ScanicCorners = {
   topLeft: { x: 0, y: 0 },
@@ -24,6 +28,8 @@ interface FakeClientHarness {
   kinds: string[];
   /** Detector argument per detect call; undefined = client policy default. */
   detectors: Array<ScanicDetectorKind | undefined>;
+  /** Third-argument opts per detect call (decodeMs measurement). */
+  detectOpts: Array<{ decodeMs?: number | null } | undefined>;
   maxConcurrent: () => number;
 }
 
@@ -34,25 +40,30 @@ function makeFakeClient(
       corners: ScanicCorners | null;
       confidence: number | null;
       detector: ScanicDetectorKind;
+      instrumentation?: ScanicDetectInstrumentation | null;
     }>;
   } = {},
 ): FakeClientHarness {
   const kinds: string[] = [];
   const detectors: Array<ScanicDetectorKind | undefined> = [];
+  const detectOpts: Array<{ decodeMs?: number | null } | undefined> = [];
   let concurrent = 0;
   let maxConcurrent = 0;
   const client = {
     async detect(
       _image: ImageData,
       detector?: ScanicDetectorKind,
+      opts?: { decodeMs?: number | null },
     ): Promise<{
       success: boolean;
       corners: ScanicCorners | null;
       confidence: number | null;
       detector: ScanicDetectorKind;
+      instrumentation?: ScanicDetectInstrumentation | null;
     }> {
       kinds.push('detect');
       detectors.push(detector);
+      detectOpts.push(opts);
       concurrent += 1;
       maxConcurrent = Math.max(maxConcurrent, concurrent);
       try {
@@ -69,7 +80,7 @@ function makeFakeClient(
       return new ImageData(2, 2);
     },
   } as unknown as ScanicClient;
-  return { client, kinds, detectors, maxConcurrent: () => maxConcurrent };
+  return { client, kinds, detectors, detectOpts, maxConcurrent: () => maxConcurrent };
 }
 
 function makeOptions(client: ScanicClient, overrides: Partial<ScanicProcessorOptions> = {}) {
@@ -266,6 +277,45 @@ describe('useScanicProcessor draining', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].phase).toBe('ready');
     expect(entries[0].warpedUrl).not.toBeNull();
+    unmount();
+  });
+
+  it('passes measured decodeMs into detect and stores instrumentation on ready entries', async () => {
+    const instrumentation: ScanicDetectInstrumentation = {
+      decodeMs: 4.5,
+      transferBytes: 16,
+      ortLoadMs: 40,
+      sessionCreateMs: null,
+      inferenceMs: 11,
+      confidence: 0.8,
+      inputWidth: 2,
+      inputHeight: 2,
+      modelInputSize: 224,
+    };
+    const { client, detectOpts } = makeFakeClient({
+      detect: async () => ({
+        success: true,
+        corners: CORNERS,
+        confidence: 0.8,
+        detector: 'ml',
+        instrumentation,
+      }),
+    });
+    const { result, unmount } = renderHook(() => useScanicProcessor(makeOptions(client)));
+
+    act(() => {
+      result.current.enqueueCapture(new File(['a'], 'a.jpg', { type: 'image/jpeg' }));
+    });
+    await act(async () => {
+      await result.current.buildNow();
+    });
+
+    // The hook measured its own decode and supplied it (finite ms).
+    expect(detectOpts).toHaveLength(1);
+    expect(typeof detectOpts[0]?.decodeMs).toBe('number');
+    expect(Number.isFinite(detectOpts[0]?.decodeMs ?? Number.NaN)).toBe(true);
+    // The client result's instrumentation lands on the settled entry.
+    expect(result.current.entries[0].instrumentation).toEqual(instrumentation);
     unmount();
   });
 });

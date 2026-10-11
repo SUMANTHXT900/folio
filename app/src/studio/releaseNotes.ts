@@ -18,6 +18,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.11.0 release',
+    date: '2026-10-11',
+    notes: [
+      'The scanner looks cleaner and stays out of your way — simpler top bar, quiet guidance, and you can keep browsing pages while it prepares them.',
+      'Faster repeat scans: the detector stays warm between pages.',
+    ],
+  },
+  {
     build: 'v1.10.3 release',
     date: '2026-10-11',
     notes: [

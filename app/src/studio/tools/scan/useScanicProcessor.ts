@@ -35,7 +35,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScanicClient } from './scanicClient';
-import type { ScanicCorners, ScanicDetectorKind } from './scanicProtocol';
+import type {
+  ScanicCorners,
+  ScanicDetectInstrumentation,
+  ScanicDetectorKind,
+} from './scanicProtocol';
 
 export type ScanicEntryPhase = 'queued' | 'processing' | 'ready';
 
@@ -64,6 +68,13 @@ export interface ScanicEntry {
   detector: ScanicDetectorKind | null;
   /** Failure message when processing failed; null otherwise. */
   error: string | null;
+  /**
+   * Measure-only detection instrumentation (timings + dims + confidence;
+   * frozen field names — see `scanicProtocol.ts`). Null while
+   * queued/processing and when processing failed before detection.
+   * Log/collect only — never drives behavior.
+   */
+  instrumentation: ScanicDetectInstrumentation | null;
 }
 
 /**
@@ -111,6 +122,18 @@ function createCanvas(width: number, height: number): OffscreenCanvas | HTMLCanv
 
 function isOffscreenCanvas(canvas: OffscreenCanvas | HTMLCanvasElement): canvas is OffscreenCanvas {
   return typeof OffscreenCanvas !== 'undefined' && canvas instanceof OffscreenCanvas;
+}
+
+/** Monotonic millisecond clock where available (measurement only). */
+function nowMs(): number {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+  } catch {
+    // Non-DOM runtimes without performance: fall through to Date.
+  }
+  return Date.now();
 }
 
 /**
@@ -208,10 +231,16 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
       try {
         // Detection copy: decoded from the original File, consumed by the
         // transfer inside `detect` (the ImageData is neutered on send).
+        // The decode wall time is caller-supplied measurement into
+        // `detect` (`instrumentation.decodeMs`) — log/collect only.
+        const decodeStart = nowMs();
         const detectionImage = await seams.decode(record.file);
+        const decodeMs = nowMs() - decodeStart;
         if (stale()) return 'requeued';
         patch(id, { imageWidth: detectionImage.width, imageHeight: detectionImage.height });
-        const detection = await seams.client.detect(detectionImage, detectorRef.current);
+        const detection = await seams.client.detect(detectionImage, detectorRef.current, {
+          decodeMs,
+        });
         if (stale()) return 'requeued';
         if (!detection.success || detection.corners === null) {
           patch(id, {
@@ -219,6 +248,7 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
             corners: null,
             warpedUrl: null,
             detector: detection.detector,
+            instrumentation: detection.instrumentation ?? null,
           });
           return 'done';
         }
@@ -236,6 +266,7 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
           corners,
           warpedUrl: URL.createObjectURL(png),
           detector: detection.detector,
+          instrumentation: detection.instrumentation ?? null,
         });
         return 'done';
       } catch (error) {
@@ -315,6 +346,7 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
         phase: 'queued',
         detector: null,
         error: null,
+        instrumentation: null,
       };
       recordsRef.current = [...recordsRef.current, entry];
       publish();

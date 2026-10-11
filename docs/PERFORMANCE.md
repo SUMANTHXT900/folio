@@ -118,6 +118,22 @@ Status: ✅ = fixed in the 2026-09-26 performance pass; ◻ = open (phase in par
 
 Implemented across `app/src/studio/tools/` (Images, PageGrid, scan, PDF tools), `app/src/studio/services/folio.ts`, hooks, `app/vite.config.ts` (lazy ML assets), and `engine/src` (copy/images/progress/merge/delete/geometry/bench/EXIF). Engine contract untouched (no op IDs, wire shapes, or protocol changes). Prior P0–P4 verdicts stand (P0.2 shelved, single-threaded WASM baseline).
 
+## Phase-1 ML + viewfinder (D51, 2026-10-11 — lane-reported, unverified in this docs pass)
+
+No suite was executed in this docs pass and no source was touched here; statuses below are per the Phase-1 brief as lane-reported, not independently verified. Findings-register style; ◻ = open, 🔄 = lane in flight, ✅ = lane-reported implemented (unverified here).
+
+| #   | Finding                                                                                                                                  | Where (per brief)                     | Impact     | Status                                                                                          |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------- |
+| 18  | Drain stage costs (decode vs inference vs warp) unmeasured — every resolution/threshold proposal is currently a guess.                   | D47 drain (`scan/`, review detection) | **High**   | 🔄 lane-reported: stage spans (perf mark/measure) in flight, unverified here                    |
+| 19  | Detection confidence unrecorded — threshold gating cannot be calibrated without the score distribution + miss corpus.                    | D47 drain → D51 instrumentation       | **High**   | 🔄 lane-reported: confidence record in flight, unverified here                                  |
+| 20  | EXIF orientation evidence missing — 800-vs-full resolution A/B cannot be read honestly until orientation handling is observed read-only. | Capture path (read-only probe)        | Medium     | ◻ open (probe per brief; observe-only, no capture-path change)                                  |
+| 21  | Warm ORT session rebuilt per drain (suspected) — pays session-init cost on every review entry.                                           | Scan client (`scan/`)                 | Medium     | 🔄 lane-reported: retained warm client in flight, unverified here                               |
+| 22  | K-lane pending counts drift under stride/cancel — progress honesty (D47 overlay `i of N`) depends on hygiene the lanes own.              | `scan/reviewDetection.ts` + policy    | Medium     | 🔄 lane-reported: pending-count hygiene in flight, unverified here                              |
+| 23  | Viewfinder/review modules coupled — capture, finder, review, and adjust share paths that block each other (F-22 class).                  | `ScanicCapture` / `ScanicReview`      | Medium     | 🔄 lane-reported: 4-module surgical refactor, non-blocking review, in flight, unverified here   |
+| 24  | WebGPU/WebGL proposed without cap/lifecycle accounting — brief cites 27 MB cap + deprecation evidence; wasm-first stands for Phase 1.    | ML runtime choice (D33 baseline kept) | Low (cost) | ◻ rejected for Phase 1 (brief-cited evidence unverified here — details omitted, never invented) |
+
+**Measurement order (gates Phase 2; per the brief).** (1) Stage spans land → (2) read-only EXIF probe observed → (3) 800-vs-full A/B on real photos → (4) miss corpus + threshold calibration. No step may be skipped or reordered; resolution/threshold/downscale/capture-bounds work stays DEFERRED until its gate evidence exists (see D51).
+
 ## Pass record — 2026-09-26 (P3)
 
 | Verification        | Result                                                                                                           |

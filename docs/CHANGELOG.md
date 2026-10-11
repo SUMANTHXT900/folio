@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.11.0 — ML no-regret pass + viewfinder refactor (`dev`, 2026-10-11)
+
+Scanner wave (D51): the detector stays warm between pages (retained client, K lanes from pending work), and every detection now records timing plus confidence evidence for the measured accuracy work to come. The viewfinder is rebuilt around the same pipeline — one top bar, quiet guidance, gallery count, non-blocking review preparation, safe-area and reduced-motion care. No resolution, threshold, or provider changes (all deferred to measured Phase 2). Scoped verification only (full suite + E2E laptop-side).
+
 ## v1.10.3 — Sharp Split thumbnails (`dev`, 2026-10-11)
 
 Split pick-grid tiles and the preview dialog rendered from the small list-tier backing store, upscaling 2–2.5× into tiles and far worse into the dialog (F-23). The grid now renders at a grid tier (192px base × DPR) and the preview borrows the full-res render with the thumb as fallback. Scoped verification only (full suite + E2E laptop-side).

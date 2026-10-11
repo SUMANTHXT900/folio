@@ -36,9 +36,18 @@ import type { ScanicCorners } from './scan/index';
 // Detection + warp run through `ScanicClient` (module scan worker); jsdom
 // has no workers/WASM, so every constructed client shares one set of
 // doubles. `ScanicClientError` stays a real class so the component's
-// `instanceof` cancel-swallow checks behave.
-const { __clientMocks } = vi.hoisted(() => ({
+// `instanceof` cancel-swallow checks behave. The retained-client + K-lane
+// pool API (`getRetainedDetectClient` / `releaseRetainedDetectClient` /
+// `acquireDetectionPool` / `detectionLaneClient`) is doubled on the same
+// shared client so drain + Re-detect counts keep flowing through `detect`.
+const { __clientMocks, __poolMocks } = vi.hoisted(() => ({
   __clientMocks: { detect: vi.fn(), extract: vi.fn(), terminate: vi.fn() },
+  __poolMocks: {
+    releaseRetained: vi.fn(),
+    releaseOwned: vi.fn(),
+    acquire: vi.fn(),
+    lane: vi.fn(),
+  },
 }));
 
 vi.mock('./scan/scanicClient', () => ({
@@ -52,6 +61,24 @@ vi.mock('./scan/scanicClient', () => ({
       this.name = 'ScanicClientError';
       this.code = code;
     }
+  },
+  getRetainedDetectClient: vi.fn(() => __clientMocks),
+  releaseRetainedDetectClient: (...args: unknown[]) => {
+    void (__poolMocks.releaseRetained as (...a: unknown[]) => unknown)(...args);
+  },
+  acquireDetectionPool: (workerCount: unknown) => {
+    void (__poolMocks.acquire as (...a: unknown[]) => unknown)(workerCount);
+    const count = Math.max(1, Math.floor(typeof workerCount === 'number' ? workerCount : 1));
+    return {
+      clients: Array.from({ length: count }, () => __clientMocks),
+      releaseOwned: (...args: unknown[]) => {
+        void (__poolMocks.releaseOwned as (...a: unknown[]) => unknown)(...args);
+      },
+    };
+  },
+  detectionLaneClient: (pool: unknown[], workerIndex: number) => {
+    void (__poolMocks.lane as (...a: unknown[]) => unknown)(pool, workerIndex);
+    return pool[workerIndex];
   },
 }));
 
@@ -98,13 +125,13 @@ async function injectAndReview(...files: File[]) {
   fireEvent.click(cta);
   await findQ('[data-scan-queue]');
   // The review drain is deferred ML: wait until every page settles `ready`
-  // (the blocking preparing overlay clears) before interacting.
+  // (the slim preparing banner clears) before interacting.
   await waitFor(() => {
     expect(document.querySelector('[data-review-preparing]')).toBeNull();
   });
 }
 
-/** Waits until the review preparing overlay clears (all pages `ready`). */
+/** Waits until the review preparing banner clears (all pages `ready`). */
 async function waitForPrepared(): Promise<void> {
   await waitFor(() => {
     expect(document.querySelector('[data-review-preparing]')).toBeNull();
@@ -367,6 +394,9 @@ describe('mirror control', () => {
     expect(video?.style.transform).toBe('');
     const toggle = await findQ('[data-mirror-toggle]');
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    // Back camera: the mirror reason is inline text, never tooltip-only.
+    expect(q('[data-mirror-note]').textContent).toBe('Mirror applies to the front camera only');
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
 
     // Switch to the front camera — preview mirrors by default.
     fireEvent.click(screen.getByLabelText('Switch camera'));
@@ -376,6 +406,9 @@ describe('mirror control', () => {
       ) as HTMLVideoElement | null;
       expect(video?.style.transform).toBe('scaleX(-1)');
     });
+    // Front camera: the inline reason clears and the toggle enables.
+    expect(document.querySelector('[data-mirror-note]')).toBeNull();
+    expect((q('[data-mirror-toggle]') as HTMLButtonElement).disabled).toBe(false);
 
     // Toggle off — preview unmirrors (captures stay unmirrored regardless).
     fireEvent.click(q('[data-mirror-toggle]'));
@@ -567,6 +600,22 @@ describe('corner editor', () => {
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
 
+    // The adjust overlay is gated on the measured rect: measure first.
+    const adjustFrame = document.body.querySelector('[data-crop-adjust]') as HTMLElement | null;
+    if (!adjustFrame) throw new Error('missing adjust frame');
+    adjustFrame.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
+
     const tl = document.body.querySelector('[data-crop-handle="tl"]') as HTMLButtonElement | null;
     expect(tl).not.toBeNull();
     expect(document.body.querySelectorAll('[data-crop-handle]').length).toBe(4);
@@ -592,6 +641,21 @@ describe('corner editor', () => {
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(screen.getByText('Adjust corners', { exact: true }));
     await findQ('[data-crop-adjust]');
+    // The adjust overlay is gated on the measured rect: measure first.
+    const adjustFrame8 = document.body.querySelector('[data-crop-adjust]') as HTMLElement | null;
+    if (!adjustFrame8) throw new Error('missing adjust frame');
+    adjustFrame8.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    fireEvent(window, new Event('resize'));
     expect(document.body.querySelectorAll('[data-crop-handle]').length).toBe(4);
     expect(document.body.querySelectorAll('[data-crop-handle-mid]').length).toBe(4);
     for (const edge of ['top', 'right', 'bottom', 'left']) {
@@ -684,7 +748,31 @@ describe('capture mode + gallery cluster', () => {
     expect(screen.getByText('Page 2 of 2')).toBeTruthy();
   });
 
-  it('keeps the shutter instant and queue-only: no worker call, no Scanning pill', async () => {
+  it('gallery carries a visible count badge', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    // Empty queue: no badge.
+    expect(document.querySelector('[data-gallery-count]')).toBeNull();
+    injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
+    const badge = await findQ('[data-gallery-count]');
+    expect(badge.textContent).toBe('2');
+    // The accessible name still carries the count for AT.
+    expect((q('[data-scan-gallery]') as HTMLButtonElement).getAttribute('aria-label')).toBe(
+      'Open review, 2 pages',
+    );
+  });
+
+  it('voices hold-steady in Auto mode and stays quiet in Manual', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    fireEvent.click(screen.getByText('Auto capture', { exact: true }));
+    expect(q('[data-finder-status]').textContent).toBe('Hold steady over the page');
+    fireEvent.click(screen.getByText('Manual', { exact: true }));
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+  });
+
+  it('keeps the shutter instant and queue-only: no worker call, captured flash, back to quiet', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
@@ -693,27 +781,33 @@ describe('capture mode + gallery cluster', () => {
     await findQ('[data-review-cta]');
     // The entry parks `queued` with its photo thumb: never-resolving ML
     // would hang here under per-capture detection, but the shutter path
-    // never calls the worker — the pill stays idle.
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    // never calls the worker — the pill flashes once (actionable voice).
+    expect(q('[data-finder-status]').textContent).toBe('Captured — keep shooting');
     await new Promise((r) => setTimeout(r, 200));
     expect(mockDetect).not.toHaveBeenCalled();
-    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
     // Queued thumbs show the photo immediately with no … overlay.
     const strip = q('[data-scan-strip]');
     expect(strip.querySelector('img')).not.toBeNull();
     expect(strip.textContent).not.toContain('…');
+    // The flash is brief: back to quiet without any action.
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(q('[data-finder-status]').textContent).toBe('Point at the page');
   });
 
-  it('never dwells the working pill in the camera phase (queue-only shutter)', async () => {
+  it('flashes Captured for 900ms after enqueue, never a Scanning dwell', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     // Default mock settles detection in milliseconds — but detection no
-    // longer runs on the camera phase, so past the old 800ms dwell window
-    // the pill must STILL read idle.
+    // longer runs on the camera phase, so the pill flashes Captured once
+    // and returns to quiet: the old 800ms Scanning dwell is gone.
     injectFiles(photo('a.jpg', [9]));
-    await new Promise((r) => setTimeout(r, 400));
+    await findQ('[data-review-cta]');
+    expect(q('[data-finder-status]').textContent).toBe('Captured — keep shooting');
+    expect(q('[data-finder-status]').textContent).not.toMatch(/Scanning/);
+    await new Promise((r) => setTimeout(r, 1100));
     expect(q('[data-finder-status]').textContent).toBe('Point at the page');
+    expect(q('[data-finder-status]').textContent).not.toMatch(/Scanning/);
   });
 });
 
@@ -750,13 +844,18 @@ describe('deferred review drain', () => {
     expect(mockDetect).not.toHaveBeenCalled();
     fireEvent.click(cta);
     await findQ('[data-scan-queue]');
-    // Deferred drain: the blocking overlay carries done/of/total progress…
+    // Deferred drain: the slim non-blocking banner carries done/of/total progress…
     const preparing = await findQ('[data-review-preparing]');
     expect(preparing.getAttribute('role')).toBe('status');
     expect(preparing.textContent).toMatch(/Preparing pages… \d+ of 2/);
-    // …pager and Next stay disabled while preparing…
-    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(true);
+    // …pager, filmstrip, Add, and Next stay enabled while preparing
+    // (non-blocking review — viewing-is-verdict)…
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(false);
+    for (const thumb of Array.from(document.querySelectorAll('[data-film-thumb]'))) {
+      expect((thumb as HTMLButtonElement).disabled).toBe(false);
+    }
     // …then every page settles ready through the ML detector, once each.
     await waitForPrepared();
     expect(mockDetect).toHaveBeenCalledTimes(2);
@@ -786,6 +885,37 @@ describe('deferred review drain', () => {
     fireEvent.click(q('[data-review-cta]'));
     await findQ('[data-review-preparing]');
     expect(mockDetect.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('lets review navigate while preparing (non-blocking: ready pages stay interactive)', async () => {
+    mockDetect.mockReturnValue(new Promise(() => {}));
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    const cta = await findQ('[data-review-cta]');
+    fireEvent.click(cta);
+    await findQ('[data-scan-queue]');
+    await findQ('[data-review-preparing]');
+    // Pending thumbs carry the … overlay…
+    const thumbs = Array.from(document.querySelectorAll('[data-film-thumb]'));
+    expect(thumbs.length).toBe(2);
+    for (const thumb of thumbs) {
+      expect((thumb as HTMLButtonElement).disabled).toBe(false);
+      expect((thumb as HTMLElement).textContent).toContain('…');
+    }
+    // …yet navigation is free while the banner still shows.
+    expect(document.querySelector('[data-review-preparing]')).not.toBeNull();
+    fireEvent.click(q('[data-page-next]'));
+    await screen.findByText('Page 2 of 2');
+    expect(document.querySelector('[data-review-preparing]')).not.toBeNull();
+    // Add-back and batch Next stay live too.
+    expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    // Preparing cancel still parks back to the camera with the queue intact.
+    fireEvent.click(q('[data-review-preparing-cancel]'));
+    await waitFor(() => {
+      expect(document.querySelector('[data-scan-queue]')).toBeNull();
+    });
+    expect(q('[data-review-cta]').textContent).toBe('View 2 pages');
   });
 
   it('enters review exactly once per entry under a double CTA tap', async () => {
@@ -881,10 +1011,10 @@ describe('implicit accept navigation', () => {
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]));
     fireEvent.click(screen.getByText('Discard', { exact: true }));
-    await waitFor(() => {
-      expect(document.querySelector('[data-scan-queue]')).toBeNull();
-    });
-    expect(q('[data-scan-strip]').textContent).toMatch(/No pages yet/);
+    // The single strip lives in the camera overlay: wait for the return to
+    // the camera phase, then the empty slot reads back.
+    const strip = await findQ('[data-scan-strip]');
+    expect(strip.textContent).toMatch(/No pages yet/);
   });
 });
 
@@ -1264,7 +1394,7 @@ describe('orientation-honest constraints', () => {
     }
   });
 
-  it('reflects the live stream aspect onto the preview (no forced ratio)', async () => {
+  it('never styles the preview with a forced ratio (full-bleed cover only)', async () => {
     const restore = setOrientation('landscape-primary');
     try {
       const stop = vi.fn();
@@ -1295,9 +1425,11 @@ describe('orientation-honest constraints', () => {
       const video = document.querySelector(
         'video[aria-label="Camera preview"]',
       ) as HTMLVideoElement;
-      await waitFor(() => {
-        expect(video.style.aspectRatio).toBe('2560 / 1440');
-      });
+      // No ratio styling on the cover video: the full-bleed object-cover
+      // layer crops, never stretches (the aspectRatio style is deleted).
+      expect(video.style.aspectRatio).toBe('');
+      expect(video.className).toContain('object-cover');
+      expect(video.className).toContain('inset-0');
       // Full-bleed layer keeps no hardcoded aspect/max-w box.
       expect(q('[data-viewfinder]').className).not.toMatch('aspect-');
     } finally {
@@ -1375,6 +1507,9 @@ describe('honest camera errors', () => {
     expect(options[0].textContent).toMatch(/Default camera/);
     // Denied fallback help + Retry stay untouched.
     expect(screen.getByText('Retry camera', { exact: true })).toBeTruthy();
+    // Recovery is never a dead end: the Import alternate rides both the
+    // fallback card and the bottom overlay.
+    expect(screen.getAllByText('Add image files instead')).toHaveLength(2);
   });
 });
 
@@ -1461,8 +1596,14 @@ describe('camera-phase chrome (slim top bar)', () => {
     expect(topbar.contains(finder)).toBe(false);
     // Top bar stacks vertically (slim row + select row below it).
     expect(topbar.className).toMatch('flex-col');
-    // Finder frame carries top clearance below both chrome rows.
-    expect(finder.className).toMatch('pt-36');
+    // Finder frame carries top clearance below both chrome rows via the
+    // `--finder-clear` CSS var (responsive override on the root) — never a
+    // hardcoded pt- class beside stacking notes.
+    expect(finder.className).toMatch('pt-[var(--finder-clear)]');
+    expect(finder.className).not.toMatch('pt-36');
+    expect(q('[data-scanner-root]').className).toMatch('[--finder-clear:9rem]');
+    // The status pill rides the same var.
+    expect(q('[data-finder-status]').className).toMatch('top-[var(--finder-clear)]');
     // Camera select lives in its own compact row below the top bar,
     // never inside (over) the finder frame.
     const selectRow = q('[data-camera-select-row]');
@@ -1759,5 +1900,85 @@ describe('main-lens scoring (scoreBackCamera)', () => {
     expect(hasZoomCapability({ zoom: { min: 1, max: 1 } })).toBe(false);
     expect(hasZoomCapability({})).toBe(false);
     expect(hasZoomCapability(null)).toBe(false);
+  });
+});
+
+describe('finder chrome hit-testing (L-24)', () => {
+  function chromeControls(): HTMLElement[] {
+    const els: HTMLElement[] = [];
+    for (const sel of [
+      '[aria-label="Close scanner"]',
+      '[aria-label="Switch camera"]',
+      '[data-mirror-toggle]',
+      '[data-camera-select]',
+    ]) {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error(`missing chrome control ${sel}`);
+      els.push(el as HTMLElement);
+    }
+    const torch = document.querySelector('[aria-label="Toggle torch"]');
+    if (torch) els.push(torch as HTMLElement);
+    const suggest = document.querySelector('[data-camera-suggest] button');
+    if (suggest) els.push(suggest as HTMLElement);
+    return els;
+  }
+
+  it('keeps every overlay control pointer-events-auto under the pass-through topbar', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    // The overlay container passes touches through by design…
+    expect(q('[data-scanner-topbar]').className).toMatch('pointer-events-none');
+    // …so every control must opt back in, with visible labels.
+    for (const el of chromeControls()) {
+      expect(el.className).toMatch('pointer-events-auto');
+    }
+    expect(screen.getByText('Close', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Flash', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Flip', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
+  });
+
+  it('keeps every docked control labelled with the mirror reason inline', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    for (const el of chromeControls()) {
+      expect(el.className).toMatch('pointer-events-auto');
+    }
+    // Full control set in the docked variant too — no icon-only toggles.
+    expect(screen.getByText('Close', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Flash', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Flip', { exact: true })).toBeTruthy();
+    expect(screen.getByText('Mirror', { exact: true })).toBeTruthy();
+    expect(screen.getByLabelText('Choose camera')).toBeTruthy();
+    // Back-camera mirror reason is inline text, never tooltip-only.
+    expect(q('[data-mirror-note]').textContent).toBe('Mirror applies to the front camera only');
+    expect((q('[data-mirror-toggle]') as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('review chrome safe-area + reduced motion', () => {
+  it('pads review surfaces for OS insets', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    const queue = q('[data-scan-queue]');
+    expect(queue.className).toMatch('env(safe-area-inset-bottom)');
+    expect(queue.className).toMatch('env(safe-area-inset-left)');
+    expect(queue.className).toMatch('env(safe-area-inset-right)');
+  });
+
+  it('shows the slim non-blocking banner with a reduced-motion-guarded pulse', async () => {
+    mockDetect.mockReturnValue(new Promise(() => {}));
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    const banner = await findQ('[data-review-preparing]');
+    expect(banner.getAttribute('role')).toBe('status');
+    // Slim banner: sticky in flow, never a full-cover overlay.
+    expect(banner.className).toMatch('sticky');
+    expect(banner.className).not.toMatch('inset-0');
+    const dot = banner.querySelector('span[aria-hidden]') as HTMLElement | null;
+    expect(dot?.className).toMatch('animate-pulse');
+    expect(dot?.className).toMatch('motion-reduce:animate-none');
   });
 });

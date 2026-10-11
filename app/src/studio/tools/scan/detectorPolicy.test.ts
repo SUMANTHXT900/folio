@@ -46,6 +46,11 @@ describe('detectorPolicy constants and helper', () => {
       assetBaseUrl: '/assets/scanic-ml/',
       numThreads: 1,
     });
+    // No-regret lever 1 (2026-10-11): session options stay untouched —
+    // no threading change, no EP change, no new deps. The vendored detector
+    // already creates its session with graphOptimizationLevel 'all'; the
+    // fixed 224 input has no symbolic dims (see ML_DETECTOR_OPTIONS note).
+    expect(policy.ML_MODEL_INPUT_SIZE).toBe(224);
   });
 
   it('detectorForAttempt always resolves ML (classical removed)', async () => {
@@ -176,5 +181,14 @@ describe('resolveDetectionWorkerCount', () => {
     const policy = await loadPolicy();
     expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 2 })).toBe(1);
     expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 1 })).toBe(1);
+  });
+
+  it('sizes lanes from PENDING entries, not the total queue (no over-provisioning)', async () => {
+    const policy = await loadPolicy();
+    // Revisit with 1 still-queued page out of 8 total: 1 lane, even on a
+    // many-core device that would fan out for a full queue.
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8, pageCount: 1 })).toBe(1);
+    // Full pending queue on the same device: full fan-out.
+    expect(policy.resolveDetectionWorkerCount({ hardwareConcurrency: 8, pageCount: 8 })).toBe(3);
   });
 });

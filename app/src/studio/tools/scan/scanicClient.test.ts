@@ -5,11 +5,22 @@
  * response mapping/rebuilding, validation-before-transfer, terminate-to-cancel
  * with epoch-guarded late results, and transparent recreate after a crash.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import './scanicTestImageData';
-import { DEFAULT_DETECTOR } from './detectorPolicy';
-import { ScanicClient } from './scanicClient';
-import { SCANIC_WORKER_PROTOCOL_VERSION, type ScanicCorners } from './scanicProtocol';
+import { DEFAULT_DETECTOR, ML_MODEL_INPUT_SIZE } from './detectorPolicy';
+import {
+  ScanicClient,
+  acquireDetectionPool,
+  detectionLaneClient,
+  getRetainedDetectClient,
+  redetect as redetectViaRetained,
+  releaseRetainedDetectClient,
+} from './scanicClient';
+import {
+  SCANIC_WORKER_PROTOCOL_VERSION,
+  type ScanicCorners,
+  type ScanicDetectionResult,
+} from './scanicProtocol';
 
 const CORNERS: ScanicCorners = {
   topLeft: { x: 0, y: 0 },
@@ -82,7 +93,7 @@ describe('ScanicClient.detect', () => {
     expect(post.message.buffer).toBe(image.data.buffer);
 
     workers[0].deliver(detectReply(post.message.id));
-    await expect(promise).resolves.toEqual({
+    await expect(promise).resolves.toMatchObject({
       success: true,
       corners: CORNERS,
       confidence: 0.9,
@@ -97,7 +108,7 @@ describe('ScanicClient.detect', () => {
     workers[0].deliver(
       detectReply(second?.message.id, { success: false, corners: null, confidence: null }),
     );
-    await expect(again).resolves.toEqual({
+    await expect(again).resolves.toMatchObject({
       success: false,
       corners: null,
       confidence: null,
@@ -222,6 +233,266 @@ describe('ScanicClient.extract', () => {
       buffer: new ArrayBuffer(4), // 2×2 RGBA needs 16 bytes.
     });
     await expect(promise).rejects.toMatchObject({ code: 'worker-response' });
+  });
+});
+
+describe('ScanicClient.detect instrumentation', () => {
+  it('backfills client-known instrumentation when the worker predates it', async () => {
+    const { client, workers } = makeClient();
+    const promise = client.detect(new ImageData(2, 2));
+    const [post] = workers[0].posts;
+    workers[0].deliver(detectReply(post.message.id)); // No `instrumentation` on the wire.
+    const result = await promise;
+    expect(result.instrumentation).toEqual({
+      decodeMs: null,
+      transferBytes: 2 * 2 * 4,
+      ortLoadMs: null,
+      sessionCreateMs: null,
+      inferenceMs: null,
+      confidence: 0.9,
+      inputWidth: 2,
+      inputHeight: 2,
+      modelInputSize: ML_MODEL_INPUT_SIZE,
+    });
+  });
+
+  it('applies caller-supplied decodeMs over a backfilled result', async () => {
+    const { client, workers } = makeClient();
+    const promise = client.detect(new ImageData(1, 1), 'ml', { decodeMs: 3.25 });
+    const [post] = workers[0].posts;
+    workers[0].deliver(detectReply(post.message.id));
+    const result = await promise;
+    expect(result.instrumentation).toMatchObject({ decodeMs: 3.25, transferBytes: 4 });
+  });
+
+  it('keeps worker-produced ORT timings and only overrides decodeMs', async () => {
+    const { client, workers } = makeClient();
+    const promise = client.detect(new ImageData(2, 2), 'ml', { decodeMs: 9 });
+    const [post] = workers[0].posts;
+    workers[0].deliver({
+      protocol: SCANIC_WORKER_PROTOCOL_VERSION,
+      kind: 'detect-result',
+      id: post.message.id,
+      result: {
+        success: true,
+        corners: CORNERS,
+        confidence: 0.7,
+        detector: 'ml',
+        instrumentation: {
+          decodeMs: null,
+          transferBytes: 16,
+          ortLoadMs: 40,
+          sessionCreateMs: null,
+          inferenceMs: 11,
+          confidence: 0.7,
+          inputWidth: 2,
+          inputHeight: 2,
+          modelInputSize: ML_MODEL_INPUT_SIZE,
+        },
+      },
+    });
+    const result = await promise;
+    expect(result.instrumentation).toEqual({
+      decodeMs: 9,
+      transferBytes: 16,
+      ortLoadMs: 40,
+      sessionCreateMs: null,
+      inferenceMs: 11,
+      confidence: 0.7,
+      inputWidth: 2,
+      inputHeight: 2,
+      modelInputSize: ML_MODEL_INPUT_SIZE,
+    });
+  });
+});
+
+describe('retained detect client (mount lifetime)', () => {
+  afterEach(() => {
+    releaseRetainedDetectClient();
+  });
+
+  function countingFactory(counter: { creations: number }): {
+    createWorker: () => Worker;
+    workers: FakeWorker[];
+  } {
+    const workers: FakeWorker[] = [];
+    return {
+      workers,
+      createWorker: () => {
+        counter.creations += 1;
+        const worker = new FakeWorker();
+        workers.push(worker);
+        return worker as unknown as Worker;
+      },
+    };
+  }
+
+  it('creates once and reuses across calls (one cold session create)', async () => {
+    const counter = { creations: 0 };
+    const { createWorker, workers } = countingFactory(counter);
+    const first = getRetainedDetectClient({ createWorker });
+    const second = getRetainedDetectClient({ createWorker });
+    expect(second).toBe(first);
+    expect(counter.creations).toBe(0); // Lazy: no worker until first use.
+
+    const pending = first.detect(new ImageData(2, 2));
+    expect(counter.creations).toBe(1);
+    // Second client handle, same worker — no new session.
+    const pending2 = second.detect(new ImageData(1, 1));
+    expect(counter.creations).toBe(1);
+    expect(workers).toHaveLength(1);
+    workers[0].deliver(detectReply(workers[0].posts[0].message.id));
+    workers[0].deliver(
+      detectReply(workers[0].posts[1].message.id, {
+        success: false,
+        corners: null,
+        confidence: null,
+      }),
+    );
+    await expect(pending).resolves.toMatchObject({ success: true });
+    await expect(pending2).resolves.toMatchObject({ success: false });
+  });
+
+  it('release terminates the worker and the next use starts cold', async () => {
+    const counter = { creations: 0 };
+    const { createWorker, workers } = countingFactory(counter);
+    const first = getRetainedDetectClient({ createWorker });
+    // Park an in-flight request so release has something to cancel.
+    const pending = first.detect(new ImageData(1, 1));
+    releaseRetainedDetectClient();
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+    expect(workers[0].terminated).toBe(true);
+
+    const next = getRetainedDetectClient({ createWorker });
+    expect(next).not.toBe(first);
+    const retry = next.detect(new ImageData(1, 1));
+    expect(counter.creations).toBe(2);
+    const worker = workers[1];
+    worker.deliver(detectReply(worker.posts[0].message.id));
+    await expect(retry).resolves.toMatchObject({ success: true });
+    releaseRetainedDetectClient();
+  });
+
+  it('module redetect() is served by the retained client', async () => {
+    const counter = { creations: 0 };
+    const { createWorker, workers } = countingFactory(counter);
+    getRetainedDetectClient({ createWorker });
+    const promise = redetectViaRetained(new ImageData(2, 2));
+    expect(workers).toHaveLength(1);
+    expect(workers[0].posts[0].message.detector).toBe(DEFAULT_DETECTOR);
+    workers[0].deliver(detectReply(workers[0].posts[0].message.id));
+    await expect(promise).resolves.toMatchObject({ success: true, detector: 'ml' });
+    expect(counter.creations).toBe(1);
+  });
+});
+
+describe('acquireDetectionPool (retained-preferring K lanes)', () => {
+  afterEach(() => {
+    releaseRetainedDetectClient();
+  });
+
+  /**
+   * Session-creation counting driver: workers are lazy (a `ScanicClient`
+   * creates its worker on first USE), so a "cold session create" is
+   * observed exactly when a lane's first `detect()` runs. `detectAndSettle`
+   * runs one detect per lane and answers it, so `counter.creations` counts
+   * warmed sessions across simulated drains.
+   */
+  function makeDriver(): {
+    createWorker: () => Worker;
+    counter: { creations: number };
+    detectAndSettle: (client: ScanicClient) => Promise<ScanicDetectionResult>;
+  } {
+    const workers: FakeWorker[] = [];
+    const consumed = new Map<FakeWorker, number>();
+    const counter = { creations: 0 };
+    return {
+      counter,
+      createWorker: () => {
+        counter.creations += 1;
+        const worker = new FakeWorker();
+        workers.push(worker);
+        consumed.set(worker, 0);
+        return worker as unknown as Worker;
+      },
+      detectAndSettle: async (client: ScanicClient) => {
+        const promise = client.detect(new ImageData(2, 2));
+        const worker = workers.find(
+          (candidate) => (consumed.get(candidate) ?? 0) < candidate.posts.length,
+        );
+        if (worker === undefined) throw new Error('no posted worker for detect');
+        const post = worker.posts[consumed.get(worker) ?? 0];
+        consumed.set(worker, (consumed.get(worker) ?? 0) + 1);
+        worker.deliver(detectReply(post.message.id));
+        return promise;
+      },
+    };
+  }
+
+  it('staffs lane 0 with the retained client and reuses it across drains', async () => {
+    const { createWorker, counter, detectAndSettle } = makeDriver();
+    // First drain of K=3: 1 retained + 2 fresh = 3 cold session creates.
+    const first = acquireDetectionPool(3, { createWorker });
+    expect(first.clients).toHaveLength(3);
+    await Promise.all(first.clients.map((client) => detectAndSettle(client)));
+    expect(counter.creations).toBe(3);
+    expect(first.clients[0]).toBe(getRetainedDetectClient());
+    first.releaseOwned();
+
+    // Second drain: retained lane reused — only the 2 fresh lanes recreate.
+    const second = acquireDetectionPool(3, { createWorker });
+    expect(second.clients).toHaveLength(3);
+    expect(second.clients[0]).toBe(first.clients[0]);
+    expect(second.clients[1]).not.toBe(first.clients[1]);
+    await Promise.all(second.clients.map((client) => detectAndSettle(client)));
+    expect(counter.creations).toBe(5);
+    second.releaseOwned();
+    releaseRetainedDetectClient();
+    expect(counter.creations).toBe(5); // Release creates nothing.
+  });
+
+  it('releaseOwned terminates fresh lanes but keeps the retained lane warm', async () => {
+    const { createWorker, counter, detectAndSettle } = makeDriver();
+    const pool = acquireDetectionPool(2, { createWorker });
+    const retained = pool.clients[0];
+    await Promise.all(pool.clients.map((client) => detectAndSettle(client)));
+    expect(counter.creations).toBe(2);
+    pool.releaseOwned();
+    // Retained survives releaseOwned: still the same instance afterwards,
+    // and its next detect reuses the warm worker (no new session create).
+    expect(getRetainedDetectClient()).toBe(retained);
+    await detectAndSettle(retained);
+    expect(counter.creations).toBe(2);
+  });
+
+  it('preferRetained:false staffs all-fresh lanes', async () => {
+    const { createWorker, counter, detectAndSettle } = makeDriver();
+    const pool = acquireDetectionPool(2, { createWorker, preferRetained: false });
+    expect(pool.clients).toHaveLength(2);
+    await Promise.all(pool.clients.map((client) => detectAndSettle(client)));
+    expect(counter.creations).toBe(2);
+    pool.releaseOwned();
+  });
+
+  it('clamps to at least 1 lane', () => {
+    const { createWorker } = makeDriver();
+    const pool = acquireDetectionPool(0, { createWorker });
+    expect(pool.clients).toHaveLength(1);
+    expect(pool.clients[0]).toBe(getRetainedDetectClient());
+    pool.releaseOwned();
+  });
+});
+
+describe('detectionLaneClient (no-modulo lane indexing)', () => {
+  it('indexes lanes directly and rejects out-of-range lanes loudly', () => {
+    const { client } = makeClient();
+    const pool = [
+      client,
+      new ScanicClient({ createWorker: () => new FakeWorker() as unknown as Worker }),
+    ];
+    expect(detectionLaneClient(pool, 0)).toBe(client);
+    expect(detectionLaneClient(pool, 1)).toBe(pool[1]);
+    expect(() => detectionLaneClient(pool, 2)).toThrow(/lane 2 has no client/);
   });
 });
 

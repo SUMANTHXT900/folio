@@ -50,6 +50,51 @@ export interface ScanicDetectionResult {
    * the result shape stays untouched.
    */
   detector: ScanicDetectorKind;
+  /**
+   * Measure-only instrumentation (no-regret ML pipeline, 2026-10-11):
+   * dev-visible timings + dims alongside the corners. Additive and
+   * wire-compatible — the protocol stays v1. Absent only on results
+   * produced before instrumentation landed (old workers, test doubles);
+   * `ScanicClient.detect` backfills the client-known fields in that case.
+   * Never drives behavior (log/collect only).
+   */
+  instrumentation?: ScanicDetectInstrumentation;
+}
+
+/**
+ * No-regret ML instrumentation payload (measure-before-optimize).
+ *
+ * Field names are FROZEN for the review (VF) lane — do not rename.
+ * - `decodeMs`: main-thread decode cost, caller-supplied into
+ *   `ScanicClient.detect()`; null when the caller did not supply it (the
+ *   worker never observes decode — it only receives pixels).
+ * - `transferBytes`: RGBA bytes transferred to the worker for this detect
+ *   (`width × height × 4`).
+ * - `ortLoadMs`: scanic's "ML Session Load" step (ORT import + model fetch
+ *   + session create, folded into one step upstream); null when unreported.
+ * - `sessionCreateMs`: always null — not separately observable through
+ *   scanic's public API (folded into `ortLoadMs` upstream). Kept so the
+ *   shape is stable if a split ever becomes measurable; a split needs
+ *   ORT-direct session ownership, which is out of scope (no new deps).
+ * - `inferenceMs`: scanic's "ML Inference" step; null when unreported.
+ * - `confidence`: scanner-reported 0–1 confidence (top-level value on hits).
+ * - `inputWidth`/`inputHeight` are the decoded-bitmap dims (the detection
+ *   coordinate space) — the EXIF probe's dims half; the orientation half
+ *   rides `probeExifOrientation` (read-only, decode untouched).
+ * - `modelInputSize` is the fixed DocCornerNet input edge (224 — the
+ *   vendored detector letterboxes to 224×224; the model has no symbolic
+ *   dims, so no override applies).
+ */
+export interface ScanicDetectInstrumentation {
+  decodeMs: number | null;
+  transferBytes: number;
+  ortLoadMs: number | null;
+  sessionCreateMs: number | null;
+  inferenceMs: number | null;
+  confidence: number | null;
+  inputWidth: number;
+  inputHeight: number;
+  modelInputSize: number;
 }
 
 export interface ScanicDetectRequest {
