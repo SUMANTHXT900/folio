@@ -7,7 +7,7 @@ Chronological record of meaningful development events. Each entry records object
 - **Freshness rule followed.** Version 1.10.3 → 1.11.0, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.11.0 entry.
 - **Work.** ML core (session verified optimal, retained warm client + pool, pending-count lanes, spans/confidence/EXIF-probe instrumentation) + viewfinder surgical refactor (4 modules, non-blocking review, labels, safe-area, motion guards) + integration wiring (drain/Re-detect onto retained API, telemetry hookup).
 - **Verification (observed).** tsc 0 errors; 198/198 across 10 scan+capture+review suites; build green (44 entries / 7837.51 KiB, `dist/_headers` present). E2E deferred.
-- **Deploy.** `dev` alias live-verified below. Production (`main`) stays v1.10.3 until you say so.
+- **Deploy.** `af15a8b` → `wrangler pages deploy dist --branch dev` → `https://b415895e.folio-pdf.pages.dev` (alias verified serving `/assets/index-B0Z1BiE2.js`, matches local build). Production (`main`) stays v1.10.3 until you say so.
 - **Remaining.** Phase 2 measured levers (resolution A/B, threshold sweep, pre-downscale) after field data; canonical E2E laptop-side.
 
 ## 2026-10-11 — ML + viewfinder Phase 1 docs record (D51; ML-CORE + VF-BUILD lanes in flight, no source touched)
