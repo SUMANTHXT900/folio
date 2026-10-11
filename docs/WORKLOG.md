@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — Continue-flow commit + dev deploy (21cae07, bundle index-DwNeBjKg.js)
+
+- **Commit.** `21cae07` on `dev` (32 files, +4512/−406): D48 Continue-flow wave (service handoff, ContinueCard, 6 tools wired, polish, integration reconciliation) plus D47 review-detection follow-ups present in tree. Pushed `dev` → `origin/dev` (6744b77..21cae07).
+- **Verification pre-commit.** Full `tsc` clean, eslint clean, prettier clean, scoped vitest 138/138 across 12 files, `npm run build` green (precache 44 entries / 7827.42 KiB). E2E deferred.
+- **Deploy.** `npx wrangler pages deploy dist --project-name folio-pdf --branch dev` → `https://e3f0e4dd.folio-pdf.pages.dev`, alias `https://dev.folio-pdf.pages.dev`. Live `index.html` verified serving `/assets/index-DwNeBjKg.js` — byte-identical to the local build. Production (`main`) untouched.
+- **Remaining.** Canonical E2E updates for toggle-gated download anchors (laptop-side); real-device validation per STATUS.
+
 ## 2026-10-11 — Continue-flow handoff wave-1 build (cross-tool output reuse; E2E deferred)
 
 - **Objective.** Kill the re-upload hassle: let any tool completion feed its output into another tool by reference, without a workspace rewrite (see `docs/DECISIONS.md` D48). Lane C (polish) runs in parallel on `ContinueCard` only — untouched by this entry.

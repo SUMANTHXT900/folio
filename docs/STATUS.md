@@ -103,7 +103,7 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `69eb215` (v1.9.5 release, 2026-10-04). `package.json` 1.9.5 — v2.0.0 bump HELD (see release checklist above); `dev` + `main` both at v1.9.5 (see below).
+- Branch: `dev`. HEAD: `21cae07` (Continue-flow handoff D48 + D47 follow-ups, 2026-10-11; deployed to `dev` alias, bundle `index-DwNeBjKg.js`). `package.json` 1.10.1 — v2.0.0 bump HELD (see release checklist above); production (`main`) still serves v1.9.5.
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace. The `scan/` crate is deleted (D33).
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
 - `main` at v1.9.5 (merged from `dev` 2026-10-04, deployed to production).
