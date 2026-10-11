@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-11 — Production promotion to v1.10.3 (git `main` + Cloudflare prod)
+
+- **Git.** `main` fast-forwarded to `dev` (`d98dcee..805cd7b`, ff-only, no force) and pushed `main` → `origin/main`. `dev` and `main` in sync at `805cd7b`.
+- **Cloudflare.** Same `dist/` build redeployed with `--branch main` → `https://91ffd012.folio-pdf.pages.dev` (0 new files — all assets already uploaded). Production `https://folio-pdf.pages.dev` verified serving `/assets/index-ydYGM36m.js` on both apex and direct URL.
+- **Docs sync.** ROADMAP promotion line, README version badge (→1.10.3), STATUS repo state. Ships: continue-flow handoff, one-button auto updates, sharp Split thumbs, scan D46/D47, `_headers` trust.
+- **Remaining.** Real-device validation (update auto-apply path, scanner feel, thumb sharpness); canonical E2E laptop-side.
+
 ## 2026-10-11 — v1.10.3 Split sharpness deploy (F-23, bundle index-ydYGM36m.js)
 
 - **Freshness rule followed.** Version 1.10.2 → 1.10.3, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.10.3 entry.
