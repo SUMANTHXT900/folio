@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-18 — v1.12.1 shutter-instant deploy (D53, bundle index-EcouG2cA.js)
+
+- **Freshness rule followed.** Version 1.12.0 → 1.12.1, dated `devNotes` (D53) + `releaseNotes` (v1.12.1) entries, `CHANGELOG.md` v1.12.1 entry.
+- **Work.** Shutter-instant hardening (D53/F-22): inflight guard + instant pill + disabled shutter, per-track caps cache, deferred probe, async thumb decode; pipeline/detection untouched. Field verdicts recorded (F-23 resolved, F-21 gate closed).
+- **Verification (observed).** tsc clean; 123/123 capture+review suites; eslint/prettier clean; production build green (44 entries / 7837.30 KiB, under 9MB alarm + 10MB cap). Full E2E explicitly deferred.
+- **Deploy.** `7a57157` → `wrangler pages deploy dist --branch dev` → `https://eb8f3ce9.folio-pdf.pages.dev` (alias `dev.folio-pdf.pages.dev` verified serving `/assets/index-EcouG2cA.js`, matches local build). Production (`main`) stays v1.10.3 until you say so.
+- **Remaining.** Field re-confirmation of shutter feel on the user's phone; canonical E2E laptop-side.
+
 ## 2026-10-18 — Shutter-instant hardening (F-22/D53) + field verdicts (F-23 resolved, F-21 gate closed)
 
 - **Field verdicts (user phone).** Split thumbs sharp (F-23 confirmed resolved); scanic ML detection decent, no further tuning (F-21 re-armed gate closed); shutter-tap freeze still present after D47 (F-22 stays open, fixed here). Compress stays future work; Sign & annotate / Batch & OCR / focal-accurate zoom are out of scope (ROADMAP Future/not committed, unchanged).
