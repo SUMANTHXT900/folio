@@ -169,3 +169,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** Phase-1 analysis verdict (lane-reported per the brief; no corpus observed in this docs pass): threshold gating and resolution choice wait for the confidence record + miss corpus (D51 measurement order: spans → EXIF probe → 800-vs-full A/B → miss corpus).
 - **Why it matters.** Calibrating on anecdotes is the blind-round failure mode D33 rejected (F-21: three custom-pipeline recall rounds, suite green, field gate never closed).
 - **Rule.** No threshold or resolution change without the confidence record and miss corpus that justify it; Phase-2 work is gated on Phase-1 instrumentation. Render-tier fit discipline (L-26) already covers the viewfinder/backing-store side — referenced here, not duplicated. Evidence: `docs/DECISIONS.md` D51; `docs/BUGS.md` F-21.
+
+## L-29 — A camera shutter must answer instantly and never queue on the sensor
+
+- **Observation.** `takePhoto(max)` holds the camera pipeline for hundreds of ms; without an inflight guard a second tap serializes another `takePhoto` on the same track and the finder reads as frozen. Per-tap capability round-trips and a background probe opening other cameras mid-shoot add to the stall; full-res blobs in tiny thumbs add a main-thread decode per tap (F-22, user phone verdict 2026-10-18 — still frozen after the D47 queue-only shape).
+- **Why it matters.** A shutter that goes silent for a second reads as a crash; users tap again, which lengthens the exact stall they are reacting to.
+- **Rule.** Flip an inflight flag synchronously on tap (instant busy voice + disabled control; overlapping taps no-op; release in `finally`); cache per-track capabilities (one round-trip per track); start advisory probes past the mount burst and skip them while shooting; render thumbs with async decode and never re-encode originals on the shutter path. Evidence: `docs/BUGS.md` F-22; `docs/DECISIONS.md` D53.

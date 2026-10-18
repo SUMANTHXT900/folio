@@ -978,6 +978,22 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /** Last shutter time (manual or auto) — the auto cooldown gates on this. */
   const lastFireRef = useRef<number | null>(null);
   /**
+   * Shutter-inflight guard (F-22): `takePhoto(max)` can hold the camera
+   * pipeline for hundreds of ms with zero UI feedback, so a second tap
+   * queues a second `takePhoto` on the same track and the finder reads as
+   * frozen. `capturing` flips synchronously on tap (pill + disabled
+   * shutter paint before the first await yields) and drops in `finally`,
+   * so overlapping taps no-op instead of serializing on the sensor.
+   */
+  const [capturing, setCapturing] = useState(false);
+  const capturingRef = useRef(false);
+  /**
+   * Per-track photo-capability cache: `getPhotoCapabilities()` is an async
+   * round-trip that never changes for a live track, so pay it once per
+   * track instead of once per tap.
+   */
+  const photoCapsRef = useRef(new Map<string, { imageWidth?: number; imageHeight?: number }>());
+  /**
    * Captured-flash: the quiet finder pill flashes `Captured — keep shooting`
    * for CAPTURE_FLASH_MS after each queue-only shutter park, then returns to
    * quiet. Refs never render alone — the tick state repaints on set and on
@@ -1563,82 +1579,92 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (activePick !== null && activePick !== '') return;
     if (probeFiredRef.current) return;
     if (typeof navigator === 'undefined' || !navigator.mediaDevices) return;
+    // F-22: never contend with shooting — the probe opens every other
+    // camera one by one, which can stall the live track on phones. Skip
+    // once the user is already capturing, and start 600ms past live so the
+    // mount burst and the first tap never race it.
+    if (entriesRef.current.length > 0 || capturingRef.current) return;
     probeFiredRef.current = true;
     const gen = (probeGenRef.current += 1);
     let alive = true;
-    (async () => {
-      try {
-        const liveTrack = streamRef.current?.getVideoTracks()[0] ?? null;
-        if (!liveTrack) return;
-        const currentPixels = await maxPixelsForTrack(liveTrack);
-        if (currentPixels === null) return;
-        const currentLabel =
-          typeof (liveTrack as { label?: unknown }).label === 'string'
-            ? ((liveTrack as { label?: string }).label ?? '')
-            : '';
-        const currentHasZoom = await hasZoomForTrack(liveTrack);
-        const currentScore = scoreBackCamera({
-          label: currentLabel,
-          maxPixels: currentPixels,
-          hasZoom: currentHasZoom,
-        });
-        // Default stream's device is unknown, so every listed input is a
-        // candidate; with an explicit pick this effect never runs (guarded).
-        const candidates = cameras.filter((c) => c.deviceId !== '' && c.deviceId !== activePick);
-        if (candidates.length === 0) return;
-        let bestId: string | null = null;
-        let bestPixels = 0;
-        let bestScore = Number.NEGATIVE_INFINITY;
-        for (const candidate of candidates) {
-          if (!alive || probeGenRef.current !== gen) return;
-          let probeStream: MediaStream | null = null;
-          try {
-            probeStream = await navigator.mediaDevices.getUserMedia({
-              video: { deviceId: { exact: candidate.deviceId } },
-              audio: false,
-            });
-            const probeTrack = probeStream.getVideoTracks()[0];
-            if (!probeTrack) continue;
-            const pixels = await maxPixelsForTrack(probeTrack);
-            if (pixels === null) continue;
-            const hasZoom = await hasZoomForTrack(probeTrack);
-            const score = scoreBackCamera({
-              label: candidate.label ?? '',
-              maxPixels: pixels,
-              hasZoom,
-            });
-            if (score > bestScore) {
-              bestScore = score;
-              bestPixels = pixels;
-              bestId = candidate.deviceId;
-            }
-          } catch {
-            // Unopenable candidate — try the next one.
-            continue;
-          } finally {
+    const timer = window.setTimeout(() => {
+      if (!alive || probeGenRef.current !== gen) return;
+      if (entriesRef.current.length > 0 || capturingRef.current) return;
+      void (async () => {
+        try {
+          const liveTrack = streamRef.current?.getVideoTracks()[0] ?? null;
+          if (!liveTrack) return;
+          const currentPixels = await maxPixelsForTrack(liveTrack);
+          if (currentPixels === null) return;
+          const currentLabel =
+            typeof (liveTrack as { label?: unknown }).label === 'string'
+              ? ((liveTrack as { label?: string }).label ?? '')
+              : '';
+          const currentHasZoom = await hasZoomForTrack(liveTrack);
+          const currentScore = scoreBackCamera({
+            label: currentLabel,
+            maxPixels: currentPixels,
+            hasZoom: currentHasZoom,
+          });
+          // Default stream's device is unknown, so every listed input is a
+          // candidate; with an explicit pick this effect never runs (guarded).
+          const candidates = cameras.filter((c) => c.deviceId !== '' && c.deviceId !== activePick);
+          if (candidates.length === 0) return;
+          let bestId: string | null = null;
+          let bestPixels = 0;
+          let bestScore = Number.NEGATIVE_INFINITY;
+          for (const candidate of candidates) {
+            if (!alive || probeGenRef.current !== gen) return;
+            let probeStream: MediaStream | null = null;
             try {
-              if (probeStream) for (const t of probeStream.getTracks()) t.stop();
+              probeStream = await navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: candidate.deviceId } },
+                audio: false,
+              });
+              const probeTrack = probeStream.getVideoTracks()[0];
+              if (!probeTrack) continue;
+              const pixels = await maxPixelsForTrack(probeTrack);
+              if (pixels === null) continue;
+              const hasZoom = await hasZoomForTrack(probeTrack);
+              const score = scoreBackCamera({
+                label: candidate.label ?? '',
+                maxPixels: pixels,
+                hasZoom,
+              });
+              if (score > bestScore) {
+                bestScore = score;
+                bestPixels = pixels;
+                bestId = candidate.deviceId;
+              }
             } catch {
-              // Stop is best-effort.
+              // Unopenable candidate — try the next one.
+              continue;
+            } finally {
+              try {
+                if (probeStream) for (const t of probeStream.getTracks()) t.stop();
+              } catch {
+                // Stop is best-effort.
+              }
             }
           }
+          if (!alive || probeGenRef.current !== gen) return;
+          if (!mountedRef.current) return;
+          // Still on the default pick? Never auto-switch — suggest only.
+          const stillDefault =
+            (chosenDeviceIdRef.current ?? selectedDeviceId) === null ||
+            (chosenDeviceIdRef.current ?? selectedDeviceId) === '';
+          if (!stillDefault) return;
+          if (bestId !== null && bestPixels > currentPixels * 1.25 && bestScore > currentScore) {
+            setSuggestedDeviceId(bestId);
+          }
+        } catch {
+          // Probe is advisory — any failure stays silent.
         }
-        if (!alive || probeGenRef.current !== gen) return;
-        if (!mountedRef.current) return;
-        // Still on the default pick? Never auto-switch — suggest only.
-        const stillDefault =
-          (chosenDeviceIdRef.current ?? selectedDeviceId) === null ||
-          (chosenDeviceIdRef.current ?? selectedDeviceId) === '';
-        if (!stillDefault) return;
-        if (bestId !== null && bestPixels > currentPixels * 1.25 && bestScore > currentScore) {
-          setSuggestedDeviceId(bestId);
-        }
-      } catch {
-        // Probe is advisory — any failure stays silent.
-      }
-    })();
+      })();
+    }, 600);
     return () => {
       alive = false;
+      window.clearTimeout(timer);
     };
   }, [phase, paused, camState, cameras, selectedDeviceId]);
 
@@ -1693,92 +1719,110 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * the branch, same unmirrored `drawImage` semantics as before.
    */
   const captureFrame = useCallback(async () => {
+    if (capturingRef.current) return;
+    capturingRef.current = true;
+    setCapturing(true);
     const video = videoRef.current;
     const track = streamRef.current?.getVideoTracks()[0] ?? null;
     setCaptureError(null);
-    if (!track || track.readyState === 'ended') {
-      setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
-      return;
-    }
-    const ImageCaptureCtor = getImageCaptureCtor();
-    if (ImageCaptureCtor) {
-      try {
-        const capture = new ImageCaptureCtor(track);
-        let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined;
+    try {
+      if (!track || track.readyState === 'ended') {
+        setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
+        return;
+      }
+      const ImageCaptureCtor = getImageCaptureCtor();
+      if (ImageCaptureCtor) {
         try {
-          if (typeof capture.getPhotoCapabilities === 'function') {
-            const caps = await capture.getPhotoCapabilities();
-            const maxW = caps.imageWidth?.max;
-            const maxH = caps.imageHeight?.max;
-            if (typeof maxW === 'number' && typeof maxH === 'number') {
-              photoSettings = { imageWidth: maxW, imageHeight: maxH };
+          const capture = new ImageCaptureCtor(track);
+          const trackKey =
+            typeof (track as { id?: unknown }).id === 'string'
+              ? (track as { id: string }).id
+              : 'default';
+          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined =
+            photoCapsRef.current.get(trackKey);
+          if (photoSettings === undefined) {
+            try {
+              if (typeof capture.getPhotoCapabilities === 'function') {
+                const caps = await capture.getPhotoCapabilities();
+                const maxW = caps.imageWidth?.max;
+                const maxH = caps.imageHeight?.max;
+                if (typeof maxW === 'number' && typeof maxH === 'number') {
+                  photoSettings = { imageWidth: maxW, imageHeight: maxH };
+                  photoCapsRef.current.set(trackKey, photoSettings);
+                }
+              }
+            } catch {
+              // Capabilities unreadable — fall through to the native default.
+              photoSettings = undefined;
             }
           }
-        } catch {
-          // Capabilities unreadable — fall through to the native default.
-          photoSettings = undefined;
-        }
-        const blob =
-          photoSettings !== undefined
-            ? await capture.takePhoto(photoSettings)
-            : await capture.takePhoto();
-        if (!mountedRef.current) return;
-        if (!blob || blob.size === 0) throw new Error('empty photo');
-        // Untouched original from here on: the queue never re-encodes it.
-        const file = new File([blob], `capture-${idRef.current + 1}.jpg`, {
-          type: blob.type || 'image/jpeg',
-        });
-        enqueueCapture(file);
-        return;
-      } catch {
-        // takePhoto rejected (virtual camera, insecure pipe, in-use track) —
-        // fall through to the canvas-draw fallback below, which reads the
-        // live <video> frame instead of the sensor still.
-      }
-    }
-    // Fallback ONLY: ImageCapture unavailable or takePhoto threw on this
-    // browser/device. Reads raw camera pixels (never the CSS mirror), at the
-    // preview's native frame size — no upscale, no quality param beyond the
-    // legacy JPEG container this path historically produced.
-    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
-      setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
-      return;
-    }
-    try {
-      await video.play().catch(() => undefined);
-    } catch {
-      // Play failure still leaves the last frame drawable in most browsers.
-    }
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      setCaptureError('Could not read a camera frame on this browser — add an image file instead.');
-      return;
-    }
-    // Unmirrored invariant: drawImage reads raw camera pixels, never the CSS
-    // `scaleX(-1)` preview transform — captures are always true-to-scene.
-    ctx.drawImage(video, 0, 0);
-    const blob = await new Promise<Blob | null>((resolve) => {
-      try {
-        if (typeof canvas.toBlob !== 'function') {
-          resolve(null);
+          const blob =
+            photoSettings !== undefined
+              ? await capture.takePhoto(photoSettings)
+              : await capture.takePhoto();
+          if (!mountedRef.current) return;
+          if (!blob || blob.size === 0) throw new Error('empty photo');
+          // Untouched original from here on: the queue never re-encodes it.
+          const file = new File([blob], `capture-${idRef.current + 1}.jpg`, {
+            type: blob.type || 'image/jpeg',
+          });
+          enqueueCapture(file);
           return;
+        } catch {
+          // takePhoto rejected (virtual camera, insecure pipe, in-use track) —
+          // fall through to the canvas-draw fallback below, which reads the
+          // live <video> frame instead of the sensor still.
         }
-        canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
-      } catch {
-        resolve(null);
       }
-    });
-    if (!mountedRef.current) return;
-    if (!blob) {
-      setCaptureError('Could not capture a frame — try again or add an image file instead.');
-      return;
+      // Fallback ONLY: ImageCapture unavailable or takePhoto threw on this
+      // browser/device. Reads raw camera pixels (never the CSS mirror), at the
+      // preview's native frame size — no upscale, no quality param beyond the
+      // legacy JPEG container this path historically produced.
+      if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+        setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
+        return;
+      }
+      try {
+        await video.play().catch(() => undefined);
+      } catch {
+        // Play failure still leaves the last frame drawable in most browsers.
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setCaptureError(
+          'Could not read a camera frame on this browser — add an image file instead.',
+        );
+        return;
+      }
+      // Unmirrored invariant: drawImage reads raw camera pixels, never the CSS
+      // `scaleX(-1)` preview transform — captures are always true-to-scene.
+      ctx.drawImage(video, 0, 0);
+      const blob = await new Promise<Blob | null>((resolve) => {
+        try {
+          if (typeof canvas.toBlob !== 'function') {
+            resolve(null);
+            return;
+          }
+          canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+        } catch {
+          resolve(null);
+        }
+      });
+      if (!mountedRef.current) return;
+      if (!blob) {
+        setCaptureError('Could not capture a frame — try again or add an image file instead.');
+        return;
+      }
+      // Untouched original from here on: the queue never re-encodes it.
+      const file = new File([blob], `capture-${idRef.current + 1}.jpg`, { type: 'image/jpeg' });
+      enqueueCapture(file);
+    } finally {
+      capturingRef.current = false;
+      if (mountedRef.current) setCapturing(false);
     }
-    // Untouched original from here on: the queue never re-encodes it.
-    const file = new File([blob], `capture-${idRef.current + 1}.jpg`, { type: 'image/jpeg' });
-    enqueueCapture(file);
   }, [enqueueCapture]);
 
   /** Shutter tap: records the fire time so auto mode never double-fires. */
@@ -1798,6 +1842,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     let stable = 0;
     const id = window.setInterval(() => {
       if (cancelled || document.hidden) return;
+      if (capturingRef.current) return;
       const video = videoRef.current;
       if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
       const gray = samplePreviewGrayscale(video);
@@ -2311,9 +2356,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   /**
    * ONE status pill, rendered ONLY when actionable (minimal finder — a quiet
-   * Manual idle shows NO pill at all): the starting/paused states, the 900ms
-   * captured flash, and the Auto-mode hold-steady hint; denied/retry states
-   * come from `cameraHelp` below with the Import alternate, never a dead
+   * Manual idle shows NO pill at all): the starting/paused/capturing states,
+   * the 900ms captured flash, and the Auto-mode hold-steady hint; denied/retry
+   * states come from `cameraHelp` below with the Import alternate, never a dead
    * end. No `Scanning…` branch, no dwell: the review preparing banner owns
    * the busy voice. (No dark-surface hint: detection is deferred to review,
    * so the camera phase has no brightness signal — inventing one would be
@@ -2324,11 +2369,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       ? 'Starting camera…'
       : paused
         ? 'Paused (tab hidden) — preview resumes when you return.'
-        : Date.now() < captureFlashUntilRef.current
-          ? 'Captured — keep shooting'
-          : mode === 'auto'
-            ? 'Hold steady over the page'
-            : null;
+        : capturing
+          ? 'Capturing…'
+          : Date.now() < captureFlashUntilRef.current
+            ? 'Captured — keep shooting'
+            : mode === 'auto'
+              ? 'Hold steady over the page'
+              : null;
 
   // Camera-phase flag: the camera is true full-bleed (video fills the
   // fixed surface edge-to-edge, chrome floats over it); review/done keep
@@ -2647,8 +2694,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     data-scan-capture
                     aria-label="Capture page"
                     autoFocus
+                    disabled={capturing}
                     onClick={manualCapture}
-                    className="inline-flex h-[72px] w-[72px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 dark:bg-paper-50 dark:text-ink-900"
+                    className="inline-flex h-[72px] w-[72px] items-center justify-center rounded-full border-4 border-brass-400/70 bg-ink-900 text-paper-50 shadow-soft transition-transform active:scale-95 disabled:opacity-60 dark:bg-paper-50 dark:text-ink-900"
                   >
                     <span aria-hidden className="h-12 w-12 rounded-full bg-brass-400" />
                   </button>
@@ -2669,6 +2717,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     <img
                       src={lastQueued.photoUrl}
                       alt=""
+                      decoding="async"
                       className="h-full w-full rounded-xl object-cover"
                     />
                   ) : (
@@ -2842,7 +2891,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 }`}
               >
                 {entry.photoUrl ? (
-                  <img src={entry.photoUrl} alt="" className="h-full w-full object-cover" />
+                  <img
+                    src={entry.photoUrl}
+                    alt=""
+                    decoding="async"
+                    className="h-full w-full object-cover"
+                  />
                 ) : (
                   <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
                     {i + 1}

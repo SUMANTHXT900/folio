@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-18 — Shutter-instant hardening (F-22/D53) + field verdicts (F-23 resolved, F-21 gate closed)
+
+- **Field verdicts (user phone).** Split thumbs sharp (F-23 confirmed resolved); scanic ML detection decent, no further tuning (F-21 re-armed gate closed); shutter-tap freeze still present after D47 (F-22 stays open, fixed here). Compress stays future work; Sign & annotate / Batch & OCR / focal-accurate zoom are out of scope (ROADMAP Future/not committed, unchanged).
+- **Work.** `app/src/studio/tools/ScanicCapture.tsx` shutter path only (pipeline and detection untouched): `capturing` inflight guard + instant `Capturing…` pill + disabled shutter (overlapping taps no-op, released in `finally`); per-track `getPhotoCapabilities` cache; best-camera probe 600ms delay + skip while shooting/capturing; `decoding="async"` on strip/gallery/filmstrip thumbs. Zero-encode shutter invariant kept.
+- **Verification (observed).** `tsc --noEmit` clean; 123/123 `ScanicCapture` (85) + `ScanicReview` (38) suites incl. probe-suggest + no-re-encode pins (one iteration: probe delay 2500ms → 600ms to fit the tests' 1s `findQ` budget); eslint clean; prettier pass. Full E2E explicitly deferred.
+- **Docs sync.** `BUGS.md` F-22 (D53 fix, field re-confirmation pending), F-23 → Resolved, F-21 → Resolved (verdict-closed); `STATUS.md` current-work + next-steps; `DECISIONS.md` D53; `LESSONS.md` L-29.
+- **Remaining.** Field re-confirmation of shutter feel on the user's phone; canonical E2E laptop-side; commit + deploy unscheduled (uncommitted working tree).
+
 ## 2026-10-11 — v1.12.0 minimal scanner redo deploy (D52, bundle index-Coe-NMwJ.js)
 
 - **Freshness rule followed.** Version 1.11.0 → 1.12.0, dated `devNotes` + `releaseNotes` entries, `CHANGELOG.md` v1.12.0 entry.

@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D53 shutter-instant hardening',
+    date: '2026-10-18',
+    notes: [
+      'The shutter answers instantly: a Capturing note shows on tap and the button waits for the shot instead of stacking taps.',
+      'Camera capabilities resolve once per camera, not once per tap.',
+      'The sharper-camera suggestion arrives past the first taps and never interrupts shooting.',
+    ],
+  },
+  {
     build: 'D52 minimal scanner redo',
     date: '2026-10-11',
     notes: [

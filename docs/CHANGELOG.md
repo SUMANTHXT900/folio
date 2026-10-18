@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.1 — Shutter-instant hardening (`dev`, 2026-10-18)
+
+The scanner shutter answers instantly now: the tap shows a Capturing note at once and overlapping taps no longer stack on the sensor. Camera capabilities resolve once per camera instead of once per tap, and the sharper-camera suggestion arrives past the first taps without interrupting shooting. Pipeline and detection untouched. Scoped verification only (full suite + E2E laptop-side).
+
 ## v1.12.0 — Minimal scanner redo (`dev`, 2026-10-11)
 
 The scanner camera UI was crammed with visible controls. Now the finder stands alone: one shutter button, a slim count bar, Close and a More sheet holding flash, flip, mirror, camera pick, and capture mode. The status pill speaks only when actionable; review keeps its single-canvas hero with a minimal pager and Next/Discard bar. Pipeline behavior untouched (takePhoto → queue → drain → warp → commit). Scoped verification only (full suite + E2E laptop-side).
