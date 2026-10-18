@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.2 release',
+    date: '2026-10-18',
+    notes: [
+      'You can install Folio on your phone now — look for the install banner or the Install app card in About.',
+    ],
+  },
+  {
     build: 'v1.12.1 release',
     date: '2026-10-18',
     notes: [

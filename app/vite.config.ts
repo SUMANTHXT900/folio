@@ -64,6 +64,14 @@ export default defineConfig({
       registerType: 'prompt',
       includeAssets: ['favicon.svg'],
       manifest: {
+        // PWA installability: Chromium requires raster 192 + 512 icons,
+        // a standalone display, and a fetching service worker before it
+        // fires `beforeinstallprompt` (the SVG alone never qualifies).
+        // Screenshots power the richer install UI (narrow = phones,
+        // wide = desktop). All four icons + three screenshots ship from
+        // `public/` (icons precached via the png glob; screenshots stay
+        // network-served to protect the 9MB alarm budget).
+        id: '/',
         name: 'Folio - PDF tools that stay on your device',
         short_name: 'Folio',
         description:
@@ -72,7 +80,39 @@ export default defineConfig({
         background_color: '#faf7f2',
         display: 'standalone',
         start_url: '/',
-        icons: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+        scope: '/',
+        categories: ['productivity', 'utilities'],
+        icons: [
+          { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          {
+            src: '/icons/icon-maskable-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+          { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+        ],
+        screenshots: [
+          {
+            src: '/screenshots/home-mobile.jpeg',
+            sizes: '752x1266',
+            type: 'image/jpeg',
+            form_factor: 'narrow',
+          },
+          {
+            src: '/screenshots/merge-mobile.jpeg',
+            sizes: '752x1266',
+            type: 'image/jpeg',
+            form_factor: 'narrow',
+          },
+          {
+            src: '/screenshots/home-desktop.jpeg',
+            sizes: '1922x1200',
+            type: 'image/jpeg',
+            form_factor: 'wide',
+          },
+        ],
       },
       workbox: {
         // The Folio WASM engine (~1.6 MB) and the vendored scanic-ml assets

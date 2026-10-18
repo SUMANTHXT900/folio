@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { updateManager, usePwaUpdate } from '../pwa/usePwaUpdate';
 import { formatIso } from '../utils/format';
 import { ToolHeading } from './components/ui';
+import InstallCard from './InstallCard';
 import { DEV_NOTES } from './devNotes';
 import { RELEASE_NOTES } from './releaseNotes';
 
@@ -450,6 +451,11 @@ export default function About() {
           every launch and auto-applies; the button runs the same check on
           demand. Version + build stamp prove which build actually landed. */}
       <UpdateCard />
+
+      {/* Install app — home-screen entry (PWA installability). Chromium
+          spends the stashed beforeinstallprompt; iOS gets manual steps;
+          installed apps see proof copy, never a button. */}
+      <InstallCard />
 
       {/* Dev channel — visible on every host except production (D36). The
           card itself returns null on folio-pdf.pages.dev, so production

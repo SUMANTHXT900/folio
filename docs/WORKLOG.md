@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-18 — Full PWA installability (D54: raster icons + screenshots + install UX)
+
+- **Gap.** SVG-only manifest never qualified for `beforeinstallprompt` (Chromium requires 192 + 512 raster icons), so phones never offered installation; no screenshots, no install UI, no iOS home-screen tags.
+- **Work.** `sharp` icon set from `favicon.svg` (192/512 any, maskable-512 safe-zoned, apple-touch 180); three real-app screenshots via Chrome DevTools MCP against the deployed `dev` build (home-mobile + merge-mobile 752×1266 narrow, home-desktop 1922×1200 wide JPEG); manifest `id`/`scope`/`categories`/icons/screenshots; iOS meta tags; framework-free `installPrompt` store + `InstallCard` (About) + dismissible `InstallBanner` (Home); 14 new tests.
+- **Verification (observed).** tsc/lint/prettier clean; 32/32 pwa+install suites; production build green (51 entries / 7874.86 KiB, under the 9MB alarm); `dist/manifest.webmanifest` verified (icons + screenshots + id); local preview + Lighthouse navigation audit (a11y 98, best-practices 100, SEO 91 — the 4 fails are unrelated pre-existing items: home heading order, logo label mismatch, robots.txt, llms.txt; untouched); live proof in real Chromium: `beforeinstallprompt` fired, Home banner and About Install button render.
+- **Docs sync.** `DECISIONS.md` D54; `STATUS.md` current-work; this entry.
+- **Remaining.** Deploy to Cloudflare `dev` for the phone install check (uncommitted working tree); canonical E2E laptop-side.
+
 ## 2026-10-18 — v1.12.1 shutter-instant deploy (D53, bundle index-EcouG2cA.js)
 
 - **Freshness rule followed.** Version 1.12.0 → 1.12.1, dated `devNotes` (D53) + `releaseNotes` (v1.12.1) entries, `CHANGELOG.md` v1.12.1 entry.

@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { useState } from 'react';
 import type { CSSProperties } from 'react';
+import InstallBanner from './InstallBanner';
 import { TOOL_LIST } from './StudioApp';
 import { getMostUsedId, recordToolOpen } from './toolUsage';
 
@@ -242,6 +243,9 @@ export default function Home() {
           </span>
         </motion.p>
       </section>
+
+      {/* install banner — renders only when installable, undismissed, not installed */}
+      <InstallBanner />
 
       {/* bento tool grid */}
       <motion.section

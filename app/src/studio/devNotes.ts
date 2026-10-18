@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'D54 PWA installability',
+    date: '2026-10-18',
+    notes: [
+      'Proper install icons (192/512, maskable, Apple touch) plus real-app screenshots in the manifest.',
+      'About gains an Install app card; Home shows a dismissible install banner only when installation is possible.',
+      'iPhones get Share-to-Home-Screen steps; installed apps see proof copy instead of a button.',
+    ],
+  },
+  {
     build: 'D53 shutter-instant hardening',
     date: '2026-10-18',
     notes: [
