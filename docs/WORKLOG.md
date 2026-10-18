@@ -2,6 +2,14 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-18 — v1.12.2 PWA installability deploy (D54, bundle index-CKxw8dbQ.js)
+
+- **Freshness rule followed.** Version 1.12.1 → 1.12.2, dated `devNotes` (D54) + `releaseNotes` (v1.12.2) entries, `CHANGELOG.md` v1.12.2 entry.
+- **Work.** Raster icon set + manifest screenshots + `id`/`scope`/`categories` + iOS meta + explicit install UX (`InstallCard` + `InstallBanner` over `installPrompt` store).
+- **Verification (observed).** tsc/lint/prettier clean; 32/32 pwa+install suites; production build green (51 entries / 7875.37 KiB, under the 9MB alarm); `beforeinstallprompt` fired with banner + Install button live in real Chromium (local preview audit).
+- **Deploy.** `b2d8d7f` → `wrangler pages deploy dist --branch dev` → `https://1efec4ae.folio-pdf.pages.dev` (alias `dev.folio-pdf.pages.dev` verified serving `/assets/index-CKxw8dbQ.js`, matches local build). Production (`main`) stays v1.10.3 until you say so.
+- **Remaining.** Phone install check (banner/prompt on Android, Share-steps on iPhone); canonical E2E laptop-side.
+
 ## 2026-10-18 — Full PWA installability (D54: raster icons + screenshots + install UX)
 
 - **Gap.** SVG-only manifest never qualified for `beforeinstallprompt` (Chromium requires 192 + 512 raster icons), so phones never offered installation; no screenshots, no install UI, no iOS home-screen tags.
