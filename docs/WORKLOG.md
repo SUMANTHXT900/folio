@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-18 — Production promotion to v1.12.2 (git `main` + Cloudflare prod)
+
+- **Git.** `main` fast-forwarded to `dev` (`f7418bb..88d833e`, ff-only, no force) and pushed `main` → `origin/main`. `dev` and `main` in sync at `88d833e` (docs-sync commit on `dev` follows separately).
+- **Cloudflare.** Same `dist/` build redeployed with `--branch main` → `https://bca1ea9c.folio-pdf.pages.dev` (0 new files — all assets already uploaded). Production `https://folio-pdf.pages.dev` verified serving `/assets/index-CKxw8dbQ.js` on both apex and direct URL.
+- **Docs sync.** ROADMAP promotion line, README version badge (→1.12.2), STATUS repo state. Ships: shutter-instant hardening, PWA installability, F-23/F-21 field verdicts.
+- **Remaining.** Phone install + shutter re-checks against production; canonical E2E laptop-side.
+
 ## 2026-10-18 — v1.12.2 PWA installability deploy (D54, bundle index-CKxw8dbQ.js)
 
 - **Freshness rule followed.** Version 1.12.1 → 1.12.2, dated `devNotes` (D54) + `releaseNotes` (v1.12.2) entries, `CHANGELOG.md` v1.12.2 entry.

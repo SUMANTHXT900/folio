@@ -27,7 +27,7 @@ This roadmap records actual project direction. Items are separated by commitment
 ## Next
 
 - **Performance program (`docs/PERFORMANCE.md`) — all done.** P0, P1, P2, P3, P4 implemented 2026-09-26 (P3: image-build sharding + parallel-honesty-by-construction, D22). P0.2 main-thread slice removal measured-and-SHELVED 2026-09-27 on real-device evidence (phone 55 MB merge staging 79 ms cold / 28 ms warm vs ~40 ms engine; see `docs/WORKLOG.md` + `docs/PERFORMANCE.md`) — no implementation, reopens only on a large-PDF-on-phone crash or staging >~500 ms on a used file. Threaded WASM explicitly gated behind a future decision.
-- **Production promotion — DONE 2026-10-11.** `dev` fast-forwarded into `main` and pushed (d98dcee..805cd7b → v1.10.3: continue-flow handoff, one-button auto updates, sharp Split thumbs, scan D46/D47 waves); `https://folio-pdf.pages.dev` verified serving the v1.10.3 build (`91ffd012`, bundle `index-ydYGM36m.js`). Previous v1.9.5 promotion (2026-10-04) superseded.
+- **Production promotion — DONE 2026-10-18.** `dev` fast-forwarded into `main` and pushed (f7418bb..88d833e → v1.12.2: shutter-instant hardening, PWA installability, F-23/F-21 field verdicts); `https://folio-pdf.pages.dev` verified serving the v1.12.2 build (`bca1ea9c`, bundle `index-CKxw8dbQ.js`) on apex and direct URL. Previous v1.10.3 promotion (2026-10-11) superseded.
 
 ## Future / not committed
 

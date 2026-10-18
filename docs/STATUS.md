@@ -60,7 +60,7 @@
 
 ## Pending work
 
-- `main` now carries the Folio v1.9.5 build (merged from `dev` 2026-10-04) and serves production at `https://folio-pdf.pages.dev`; `dev` continues as the staging line.
+- `main` now carries the Folio v1.12.2 build (merged from `dev` 2026-10-18) and serves production at `https://folio-pdf.pages.dev`; `dev` continues as the staging line.
 
 ## Blocked work
 
@@ -114,7 +114,7 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `dev` post-v1.12.2 (full PWA installability D54; deployed to `dev` alias, bundle `index-CKxw8dbQ.js`). `package.json` 1.12.2 — v2.0.0 bump HELD (see release checklist above); production (`main`) still serves v1.10.3.
+- Branch: `dev`. HEAD: `dev` post-v1.12.2 (full PWA installability D54; deployed to `dev` alias, bundle `index-CKxw8dbQ.js`). `package.json` 1.12.2 — v2.0.0 bump HELD (see release checklist above); production (`main`) now serves v1.12.2 (promoted 2026-10-18, prod deploy `bca1ea9c`).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace. The `scan/` crate is deleted (D33).
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
 - `main` at v1.9.5 (merged from `dev` 2026-10-04, deployed to production).
