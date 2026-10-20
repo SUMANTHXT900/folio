@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'Audit fixes + capture diagnostics',
+    date: '2026-10-20',
+    notes: [
+      'Reliability pass across engine, workers, thumbnails, tools, and scanner: panics closed, error paths honest, cancel works mid-import and mid-scan.',
+      'Keyboard and screen-reader support across reorder tools and dialogs; honest progress, download, and install copy.',
+      'Dev-only capture-timing diagnostics: per-step shutter spans plus a Download timings JSON button for field measurement (F-22).',
+    ],
+  },
+  {
     build: 'D54 PWA installability',
     date: '2026-10-18',
     notes: [

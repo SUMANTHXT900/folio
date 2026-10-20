@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.3 release',
+    date: '2026-10-20',
+    notes: [
+      'A reliability pass: steadier cancel, clearer errors, keyboard-friendly tools, and more honest progress and download messages.',
+    ],
+  },
+  {
     build: 'v1.12.2 release',
     date: '2026-10-18',
     notes: [
