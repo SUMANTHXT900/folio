@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — F-22 capture-timing diagnostics (dev-gated spans + JSON export)
+
+- **Objective.** Localize the residual shutter-tap freeze on the user's phone with measured spans instead of guesses (L-28): per-step timing + heap at every capture-pipeline step, exportable as JSON beside the PDF download, dev builds only.
+- **Work (one agent, observability-and-instrumentation + performance-optimization).** New `captureSpans.ts` (bounded 200-span ring: tap→pill→caps→takePhoto→file-parked→thumb→strip→per-page drain→warp→build→download deltas + guarded heap samples; no bytes/names/PII); 14 one-line marks in `ScanicCapture.tsx` (behavior untouched); dev-only "Download timings JSON" button in `DownloadCard` (renders null on production — byte-identical prod); `console.table` summary at build. Never auto-downloads (browser multi-download block).
+- **Verification.** tsc clean; 19 new tests + 100 existing (ScanicCapture 95, DownloadCard 5) green; central tsc + 17 span/button tests re-verified here.
+- **Remaining.** Deploy to `dev`, shoot photos on the phone, send back the timings JSON — the spans decide the next fix (hybrid capture vs thumb work vs driver verdict). Production never sees the button (hostname gate).
+
 ## 2026-10-20 — Audit fix waves P0–P3 (implementation; central verification green)
 
 - **Objective.** Implement the `docs/audit-2026-10-20-research.md` fix plan (P0–P4) via skill-driven parallel lanes with exclusive file ownership (L-15). 5 (P0) + 6 (P1) + 7 (P2) + 6 (P3) agents + central orchestration.

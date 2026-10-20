@@ -22,6 +22,12 @@ import { useEffect, useRef, useState } from 'react';
 import { sanitizeFileName } from './downloadNaming';
 import { studioShare } from '../services/folio';
 import { DoneBanner } from './ui';
+import {
+  exportCaptureSpansJSON,
+  isCaptureSpansEnabled,
+  markCaptureSpan,
+  timingsFilename,
+} from '../tools/captureSpans';
 
 const CUSTOM_PLACEHOLDER = 'my-document';
 
@@ -107,6 +113,57 @@ export function DownloadCard({
     suggestedName,
   );
 
+  // F-22 shutter localize (dev-only): exportable capture-pipeline timings.
+  // The button renders ONLY on dev hosts (`isCaptureSpansEnabled`) — gate
+  // off renders null, so production output is byte-identical. The JSON
+  // snapshot builds at tap time (never auto-downloaded: browsers block
+  // multi-download) and downloads through an anchor carrying the
+  // `timings-<smartname>-<timestamp>.json` name, mirroring the Download
+  // anchor pattern above.
+  const timingsUrlRef = useRef<string | null>(null);
+  useEffect(
+    () => () => {
+      if (timingsUrlRef.current !== null) {
+        try {
+          URL.revokeObjectURL(timingsUrlRef.current);
+        } catch {
+          // Release is best-effort.
+        }
+        timingsUrlRef.current = null;
+      }
+    },
+    [],
+  );
+
+  const downloadTimings = () => {
+    markCaptureSpan('download');
+    let text = '';
+    try {
+      text = JSON.stringify(exportCaptureSpansJSON(), null, 2);
+    } catch {
+      return;
+    }
+    const timingBlob = new Blob([text], { type: 'application/json' });
+    let nextUrl = '';
+    try {
+      if (timingsUrlRef.current !== null) URL.revokeObjectURL(timingsUrlRef.current);
+      nextUrl = URL.createObjectURL(timingBlob);
+    } catch {
+      return;
+    }
+    timingsUrlRef.current = nextUrl;
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = nextUrl;
+      anchor.download = timingsFilename(suggestedName);
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch {
+      // A blocked click keeps the blob URL live for a retry tap.
+    }
+  };
+
   if (card.downloaded) {
     return <DoneBanner name={finalName} blob={blob} shareable={shareable} url={url} />;
   }
@@ -171,6 +228,16 @@ export function DownloadCard({
             </svg>
             Download
           </a>
+        )}
+        {isCaptureSpansEnabled() && (
+          <button
+            type="button"
+            onClick={downloadTimings}
+            aria-label="Download timings JSON"
+            className="inline-flex items-center gap-2 rounded-lg border border-brass-400/40 text-ink-600 dark:text-brass-300 px-4 py-2.5 text-sm font-medium hover:bg-brass-400/[0.08] transition-colors min-h-[44px]"
+          >
+            Download timings JSON
+          </button>
         )}
         {shareable && (
           <button
