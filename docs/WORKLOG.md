@@ -2,6 +2,12 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — Sheet-toggle dev deploy (bundle index-DDSjHUTn.js)
+
+- **Work.** Dev-only Capture quality row in the More sheet (Max default / Fast test, persists via the same localStorage key); 14 flag tests + 111 existing green; tsc clean; devNotes entry.
+- **Deploy.** Pushed `dev` → `origin/dev`; `wrangler pages deploy dist --branch dev` → `https://ae5d2818.folio-pdf.pages.dev`; alias verified serving `/assets/index-DDSjHUTn.js`. Production untouched (row renders null there).
+- **Remaining.** Phone A/B with the toggle (same page/light/distance, both modes, timings JSONs back); then build A regardless.
+
 ## 2026-10-20 — Experiment B dev deploy (bare-capture switch, bundle index-zemLptel.js)
 
 - **Work.** `folio-bare-capture` localStorage switch (bare `takePhoto()` vs max-res, default OFF, byte-identical default path); 9 flag tests + 95 existing ScenicCapture tests green; tsc clean; devNotes entry.
