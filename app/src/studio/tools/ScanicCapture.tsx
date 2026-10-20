@@ -148,7 +148,12 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
-import { isCaptureSpansEnabled, logCaptureSpansTable, markCaptureSpan, resetCaptureSpans } from './captureSpans';
+import {
+  isCaptureSpansEnabled,
+  logCaptureSpansTable,
+  markCaptureSpan,
+  resetCaptureSpans,
+} from './captureSpans';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -1070,6 +1075,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * so overlapping taps no-op instead of serializing on the sensor.
    */
   const [capturing, setCapturing] = useState(false);
+  // Option A (F-22 hybrid) provisional frame thumb: a video-frame grab shown
+  // in the gallery ~50ms after tap while takePhoto holds the sensor (~860ms
+  // measured). Preview-only artifact — never committed, never decoded;
+  // cleared + revoked the moment the real entry parks in enqueueCapture.
+  const [pendingShotUrl, setPendingShotUrl] = useState<string | null>(null);
+  const pendingShotRef = useRef<string | null>(null);
   const capturingRef = useRef(false);
   /**
    * Per-track photo-capability cache: `getPhotoCapabilities()` is an async
@@ -1252,6 +1263,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     (file: File): number => {
       const id = idRef.current + 1;
       idRef.current = id;
+      // Option A: the real entry just parked — drop the provisional frame
+      // thumb (revoked, never leaked; unmount sweeps tracked URLs anyway).
+      const prev = pendingShotRef.current;
+      pendingShotRef.current = null;
+      if (prev !== null) {
+        revokeUrl(prev);
+        setPendingShotUrl(null);
+      }
       let photoUrl = '';
       try {
         photoUrl = trackUrl(URL.createObjectURL(file));
@@ -1285,7 +1304,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       markCaptureSpan('thumb-url');
       return position;
     },
-    [trackUrl, flashCaptured],
+    [trackUrl, flashCaptured, revokeUrl],
   );
 
   /**
@@ -1851,6 +1870,46 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   }, [torchOn]);
 
   /**
+   * Option A (F-22 hybrid) provisional thumb: draws the live preview frame
+   * into a small JPEG (~50ms) so the tap reads as kept while takePhoto holds
+   * the sensor. Preview-only — never committed, never decoded, replaced by
+   * the real queued entry on resolve. Any failure (no video frame, no 2D
+   * canvas, no toBlob) resolves to silent null: the shutter behaves exactly
+   * as before, thumb landing with the park. Never delays takePhoto: the
+   * encode callback settles on its own, guarded by the inflight flag.
+   */
+  const grabProvisionalThumb = useCallback(() => {
+    try {
+      const v = videoRef.current;
+      if (!v || v.videoWidth === 0 || v.videoHeight === 0) return;
+      const scale = Math.min(1, 320 / Math.max(v.videoWidth, v.videoHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(v.videoWidth * scale));
+      canvas.height = Math.max(1, Math.floor(v.videoHeight * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+      if (typeof canvas.toBlob !== 'function') return;
+      canvas.toBlob(
+        (b) => {
+          if (!b || !mountedRef.current || !capturingRef.current) return;
+          try {
+            const url = trackUrl(URL.createObjectURL(b));
+            pendingShotRef.current = url;
+            setPendingShotUrl(url);
+          } catch {
+            // Preview-only: never fail the shutter.
+          }
+        },
+        'image/jpeg',
+        0.7,
+      );
+    } catch {
+      // Preview-only: any platform gap falls back to today's behavior.
+    }
+  }, [trackUrl]);
+
+  /**
    * Original-blob shutter: the ImageCapture API returns the sensor's native
    * Blob (`takePhoto()`) — zero canvas, zero toBlob, zero re-encode, no
    * quality param. takePhoto output is sensor-native and therefore
@@ -1877,6 +1936,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     // pill state requested. No-op off dev hosts; capture behavior untouched.
     markCaptureSpan('tap');
     markCaptureSpan('pill');
+    // Option A: provisional frame thumb fires sync here — it never awaits
+    // takePhoto, so the gallery shows the tap in ~50ms, not ~860ms.
+    grabProvisionalThumb();
     const video = videoRef.current;
     const track = streamRef.current?.getVideoTracks()[0] ?? null;
     setCaptureError(null);
@@ -2004,7 +2066,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       capturingRef.current = false;
       if (mountedRef.current) setCapturing(false);
     }
-  }, [enqueueCapture]);
+  }, [enqueueCapture, grabProvisionalThumb]);
 
   /** Shutter tap: records the fire time so auto mode never double-fires. */
   const manualCapture = useCallback(() => {
@@ -2577,6 +2639,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           : null;
 
   const lastQueued = queue.length === 0 ? null : queue[queue.length - 1];
+  // Option A: provisional frame thumb wins until the real entry parks (never
+  // counted as a page — it is preview-only until takePhoto resolves).
+  const gallerySrc = pendingShotUrl ?? lastQueued?.photoUrl ?? null;
 
   /**
    * Preparing progress (review phase only): done = `ready` entries, total =
@@ -3003,9 +3068,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   onClick={() => goToReview(queue.length - 1)}
                   className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-paper-50/25 bg-ink-950/60 text-paper-100 backdrop-blur transition-colors disabled:opacity-40"
                 >
-                  {lastQueued?.photoUrl ? (
+                  {gallerySrc ? (
                     <img
-                      src={lastQueued.photoUrl}
+                      src={gallerySrc}
                       alt=""
                       decoding="async"
                       className="h-full w-full rounded-xl object-cover"
@@ -3013,6 +3078,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   ) : (
                     <span aria-hidden className="text-lg">
                       ▦
+                    </span>
+                  )}
+                  {pendingShotUrl !== null && capturing && (
+                    <span
+                      aria-hidden
+                      className="absolute inset-0 flex items-center justify-center rounded-xl bg-ink-950/40 text-sm text-paper-100"
+                    >
+                      …
                     </span>
                   )}
                   {queue.length > 0 && (

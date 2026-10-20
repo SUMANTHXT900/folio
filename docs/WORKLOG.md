@@ -2,6 +2,12 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — Option A hybrid shutter thumb (implemented in main session, no subagent)
+
+- **Work.** Provisional video-frame thumb in the gallery (~50ms post-tap) while takePhoto holds the sensor; real entry replaces + revokes it on park; silent fallback on any platform gap; not counted as a page; capturing badge while provisional. Zero-encode invariant, guard/finally, E2E hooks untouched.
+- **Verification.** 98/98 ScanicCapture tests (95 existing + 3 new), tsc clean, prettier clean, production build green.
+- **Remaining.** Deploy to dev below; phone feel check against the bare/max A/B.
+
 ## 2026-10-20 — Sheet-toggle dev deploy (bundle index-DDSjHUTn.js)
 
 - **Work.** Dev-only Capture quality row in the More sheet (Max default / Fast test, persists via the same localStorage key); 14 flag tests + 111 existing green; tsc clean; devNotes entry.

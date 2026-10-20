@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'Option A: instant shutter thumb',
+    date: '2026-10-20',
+    notes: [
+      'The gallery shows a video-frame thumb ~50ms after tap while takePhoto holds the sensor; the full-res entry replaces it on resolve.',
+      'Frame grab is preview-only and fails silent — the shutter behaves exactly as before on any platform gap.',
+    ],
+  },
+  {
     build: 'Experiment B: sheet toggle',
     date: '2026-10-20',
     notes: [
