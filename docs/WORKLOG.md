@@ -6,7 +6,7 @@ Chronological record of meaningful development events. Each entry records object
 
 - **Work.** Provisional video-frame thumb in the gallery (~50ms post-tap) while takePhoto holds the sensor; real entry replaces + revokes it on park; silent fallback on any platform gap; not counted as a page; capturing badge while provisional. Zero-encode invariant, guard/finally, E2E hooks untouched.
 - **Verification.** 98/98 ScanicCapture tests (95 existing + 3 new), tsc clean, prettier clean, production build green.
-- **Remaining.** Deploy to dev below; phone feel check against the bare/max A/B.
+- **Remaining.** Deployed to dev (`https://472f2b35.folio-pdf.pages.dev`, alias verified `index-BEtrxDCg.js`); phone feel check against the bare/max A/B.
 
 ## 2026-10-20 — Sheet-toggle dev deploy (bundle index-DDSjHUTn.js)
 
