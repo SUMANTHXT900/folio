@@ -13,6 +13,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::copy::copy_pages;
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
@@ -127,6 +128,24 @@ impl Operation for ExtractPagesOperation {
                 "page selection must not be empty; select at least one page",
             ));
         }
+        // Page 0 is malformed for every document (pages are 1-based), so it
+        // fails as `InvalidPageRange` before the document is even parsed.
+        // Numbers above the page count stay `PageOutOfRange` inside
+        // `copy_pages`, which knows the document size.
+        if let Some((index, _)) = options
+            .pages
+            .iter()
+            .enumerate()
+            .find(|(_, page)| **page == 0)
+        {
+            return Err(EngineError::new(
+                ErrorCode::InvalidPageRange,
+                "invalid page number 0; pages are 1-based, starting at 1",
+            )
+            .with_details(format!(
+                "invalid entry at selection index {index}; page numbers must be >= 1"
+            )));
+        }
 
         let source = load_pdf(&input.data)?;
         ctx.report_progress(Some("preparing"), 10, 100, Some("parsing PDF structure"));
@@ -145,16 +164,23 @@ impl Operation for ExtractPagesOperation {
         // Full range validation happens inside `copy_pages` before anything
         // is constructed; only progress/cancellation reporting lives here.
         let total = options.pages.len() as u64;
+        let mut throttle = ProgressThrottle::new();
         let document = copy_pages(&source, &options.pages, |done, _| {
             ctx.check_cancellation()?;
             // Selected pages occupy the 10–95% band.
-            let completed = 10 + (done as u64 * 85) / total.max(1);
-            ctx.report_progress(
-                Some("extracting pages"),
-                completed.min(95),
-                100,
-                Some(&format!("page {done} of {total}")),
-            );
+            let completed = (10 + (done as u64 * 85) / total.max(1)).min(95);
+            // Source-side throttle mirroring the glue sink rule (phase
+            // changes always pass here — one phase per loop; Δ≥1 pp or
+            // every N pages otherwise). Same shape, fewer messages;
+            // cancellation stays per page above.
+            if throttle.should_report(completed, done as u64) {
+                ctx.report_progress(
+                    Some("extracting pages"),
+                    completed,
+                    100,
+                    Some(&format!("page {done} of {total}")),
+                );
+            }
             Ok(())
         })?;
 
@@ -306,6 +332,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_page_zero_as_invalid_range() {
+        let err = ExtractPagesOperation
+            .execute(
+                &ctx(),
+                input(fixtures::single_page_pdf()),
+                ExtractPagesOptions::new(vec![0]),
+            )
+            .expect_err("page zero must fail");
+        assert_eq!(err.code(), ErrorCode::InvalidPageRange);
+        assert!(err.message().contains('0'));
+        assert!(err.details().is_some());
+    }
+
+    #[test]
     fn rejects_out_of_range_pages() {
         let err = ExtractPagesOperation
             .execute(
@@ -319,12 +359,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multiple_invalid_pages() {
+    fn rejects_multiple_out_of_range_pages() {
         let err = ExtractPagesOperation
             .execute(
                 &ctx(),
                 input(fixtures::mixed_pages_pdf()),
-                ExtractPagesOptions::new(vec![0, 99]),
+                ExtractPagesOptions::new(vec![4, 99]),
             )
             .expect_err("invalid pages must fail");
         assert_eq!(err.code(), ErrorCode::PageOutOfRange);
@@ -439,5 +479,75 @@ mod tests {
             out.save_to_bytes().expect("serializes")
         };
         assert_eq!(first, second);
+    }
+
+    /// Context recording every reported event, for throttle assertions.
+    struct RecordingCtx {
+        id: JobId,
+        events: std::cell::RefCell<Vec<(Option<String>, u64, u64)>>,
+    }
+
+    impl OperationContext for RecordingCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.extract_pages"
+        }
+        fn report_progress(
+            &self,
+            phase: Option<&str>,
+            completed: u64,
+            total: u64,
+            _message: Option<&str>,
+        ) {
+            self.events
+                .borrow_mut()
+                .push((phase.map(str::to_string), completed, total));
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn progress_is_throttled_but_monotonic_to_100() {
+        // 200 pages through one extraction: the source-side throttle must
+        // emit strictly fewer per-page events than pages, while every
+        // emitted event keeps the historical shape (phase + completed/total
+        // band) and the run still ends at exactly 100, monotonically.
+        let labels: Vec<String> = (1..=200).map(|n| format!("PAGE {n}")).collect();
+        let texts: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let bytes = fixtures::text_pages_pdf(&texts);
+        let pages: Vec<PageNumber> = (1..=200).collect();
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = ExtractPagesOperation
+            .execute(&ctx, input(bytes), ExtractPagesOptions::new(pages))
+            .expect("extraction succeeds");
+        assert_eq!(out.document.page_count(), 200);
+        let events = ctx.events.borrow();
+        // Unthrottled history: validating + preparing + 200 pages +
+        // finalizing. The throttle must cut the per-page reports.
+        assert!(
+            events.len() < 200 + 3,
+            "throttle must drop redundant events: {}",
+            events.len()
+        );
+        assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
+        assert!(
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
+        );
+        assert_eq!(*completed.last().expect("events"), 100);
     }
 }

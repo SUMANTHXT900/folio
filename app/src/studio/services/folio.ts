@@ -17,8 +17,9 @@
  * - No PDF manipulation in UI code: tools call `runStudioOperation`;
  *   all parsing/mutation stays in the engine.
  * - Rendering goes through `PdfRenderEngine`, thumbnails through
- *   `PdfThumbnailEngine` — the UI never touches PDF.js or pdf-lib
- *   (both legacy implementations are deleted).
+ *   `PdfThumbnailEngine` — the UI never touches PDF.js directly, and never
+ *   pdf-lib (the pre-engine browser-side manipulation path, deleted —
+ *   see `docs/DETOURS.md` T-2).
  * - Thumbnail object URLs are bounded (LRU, 6 documents) and revoked on
  *   evict/close — no unbounded canvas/URL retention.
  */
@@ -140,6 +141,24 @@ const ERROR_TEXT: Record<string, string> = {
   INVALID_INPUT: 'The input is not usable.',
   INVALID_OPTIONS: 'Those options are not valid for this operation.',
   INTERNAL: 'An unexpected internal error occurred.',
+  // Rendering (PDF.js) failures never cross the Rust/WASM boundary, so they
+  // are not part of the frozen engine `ErrorCode` (Lesson 12A) — but they
+  // surface through `toStudioError` all the same, and need friendly text
+  // here so callers never see a raw render message as the primary line.
+  RENDER_INVALID_INPUT: 'Those preview settings are not valid.',
+  RENDER_DOCUMENT_FAILED: 'That file could not be opened for preview.',
+  RENDER_INVALID_PAGE: 'A page number is outside the document.',
+  RENDER_PAGE_FAILED: 'A page could not be rendered.',
+  RENDER_CANCELLED: 'The operation was cancelled.',
+  RENDER_CLOSED: 'That document is no longer open.',
+  RENDER_INTERNAL: 'An unexpected rendering error occurred.',
+  // Thumbnail failures (same subsystem split as above, Lesson 13).
+  THUMBNAIL_INVALID_INPUT: 'Those thumbnail settings are not valid.',
+  THUMBNAIL_INVALID_PAGE: 'A thumbnail page number is outside the document.',
+  THUMBNAIL_CLOSED: 'That document is no longer open.',
+  THUMBNAIL_RENDER_FAILED: 'A page preview could not be rendered.',
+  THUMBNAIL_CANCELLED: 'The operation was cancelled.',
+  THUMBNAIL_INTERNAL: 'An unexpected thumbnail error occurred.',
 };
 
 export function toStudioError(
@@ -167,29 +186,155 @@ export function formatDurationMs(ms: number): string {
 }
 
 /**
+ * Bounded-concurrency intake fan-out for multi-file intake (P3 item 6).
+ *
+ * Pure scheduling (no engines): runs `worker` over `items` with at most
+ * `concurrency` in flight, collecting results by INDEX so output order
+ * always equals input order regardless of completion order. First failure
+ * wins (fail-fast: lanes stop claiming new items) and queued items never
+ * start after it. Exported for unit tests; `openStudioDocs` wires the
+ * real read+parse worker below.
+ */
+export async function runBoundedPool<T, R>(
+  items: readonly T[],
+  worker: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+  const lanes = Math.max(1, Math.min(Math.floor(concurrency) || 1, items.length));
+  const results = new Array<R>(items.length) as R[];
+  let next = 0;
+  let firstError: unknown;
+  let failed = false;
+  async function lane(): Promise<void> {
+    // Single-threaded cooperative scheduling: the check-and-claim below
+    // runs without an intervening await, so no two lanes claim one slot.
+    while (next < items.length) {
+      if (failed) {
+        return;
+      }
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await worker(items[index] as T, index);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+        return;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: lanes }, () => lane()));
+  if (failed) {
+    throw firstError;
+  }
+  return results;
+}
+
+/**
+ * Intake fan-out width (P3 item 6). ESTIMATE, not measured: file reads are
+ * async and the render-side parse dominates, so 3 overlaps read+parse
+ * across files while bounding transient buffers/parses. Every intake file
+ * is retained open afterwards anyway — this bounds only the IN-FLIGHT
+ * overlap, never the total.
+ */
+export const OPEN_STUDIO_DOCS_CONCURRENCY = 3;
+
+/**
+ * Attributes an intake failure to its file (P3 item 6): multi-file intake
+ * reporting "that file is not readable" without saying WHICH file is
+ * unactionable. Structured `StudioError`s keep code + operation with the
+ * file position appended to details; anything else becomes an
+ * INVALID_DOCUMENT with the position. Tradeoff (R3-low noted): the file
+ * name rides the secondary error line — accepted because position-only
+ * attribution cannot identify the culprit in a same-size batch.
+ */
+function withIntakeAttribution(
+  error: unknown,
+  fileName: string,
+  index: number,
+  total: number,
+): unknown {
+  const where = `intake file ${index + 1} of ${total} ("${fileName}")`;
+  if (error instanceof Error && 'code' in error && 'operation' in error) {
+    const failure = error as StudioError;
+    failure.details = failure.details !== undefined ? `${failure.details}; ${where}` : where;
+    return failure;
+  }
+  return toStudioError(
+    { message: error instanceof Error ? error.message : undefined, details: where },
+    'pdf.inspect',
+  );
+}
+
+/**
  * Opens files as studio documents: bytes go to the module store,
  * a rendering document opens for page count + thumbnails, and only
  * lightweight handles return. Throws `StudioError` on unreadable input.
+ *
+ * Bounded fan-out (P3 item 6): async reads overlap the render-side
+ * parse across files (width `OPEN_STUDIO_DOCS_CONCURRENCY`) instead of
+ * strictly serially. Output order equals input order; the first failure
+ * fails the batch with its file attributed (`withIntakeAttribution`),
+ * and every document opened before the failure is closed again — the old
+ * serial loop leaked those bytes + render documents on a mid-batch
+ * failure while the caller (which only syncs state on success) dropped
+ * the handles.
  */
 export async function openStudioDocs(files: File[]): Promise<StudioDoc[]> {
-  const docs: StudioDoc[] = [];
-  for (const file of files) {
-    const buffer = await file.arrayBuffer();
-    docs.push(await openStudioBytes(file.name, new Uint8Array(buffer)));
+  const opened: StudioDoc[] = [];
+  const worker = async (file: File, index: number): Promise<StudioDoc> => {
+    let buffer: ArrayBuffer;
+    try {
+      buffer = await file.arrayBuffer();
+    } catch (error) {
+      throw withIntakeAttribution(error, file.name, index, files.length);
+    }
+    let doc: StudioDoc;
+    try {
+      doc = await openStudioBytes(file.name, new Uint8Array(buffer));
+    } catch (error) {
+      throw withIntakeAttribution(error, file.name, index, files.length);
+    }
+    // Tracked for the failure path below: `runBoundedPool` joins every
+    // lane before it throws, so every success lands here before any
+    // cleanup runs — no late opener can slip past the close loop.
+    opened.push(doc);
+    return doc;
+  };
+  try {
+    return await runBoundedPool(files, worker, OPEN_STUDIO_DOCS_CONCURRENCY);
+  } catch (error) {
+    for (const doc of opened) {
+      await closeStudioDoc(doc.id).catch(() => undefined);
+    }
+    throw error;
   }
-  return docs;
 }
 
 /**
  * Registers raw bytes as a studio document (e.g. intermediate outputs
  * of chained operations). Same ownership contract as `openStudioDocs`.
+ *
+ * `operation` attributes the PRODUCER (the caller staging this intake),
+ * so failures carry the producing operation instead of a hardcoded
+ * default — callers that open on behalf of an engine run pass that run's
+ * operation; plain file intake keeps the `pdf.inspect` default.
  */
-export async function openStudioBytes(name: string, bytes: Uint8Array): Promise<StudioDoc> {
+export async function openStudioBytes(
+  name: string,
+  bytes: Uint8Array,
+  operation: OperationId = 'pdf.inspect',
+): Promise<StudioDoc> {
   const { renders } = await engines();
   if (bytes.length === 0 || !isPdfBytes(bytes)) {
     throw toStudioError(
       { code: 'INVALID_DOCUMENT', message: 'input is not a readable PDF document' },
-      'pdf.inspect',
+      operation,
     );
   }
   docCounter += 1;
@@ -203,16 +348,37 @@ export async function openStudioBytes(name: string, bytes: Uint8Array): Promise<
     binaries.delete(id);
     throw toStudioError(
       error instanceof Error
-        ? { code: (error as { code?: string }).code, message: error.message }
+        ? {
+            code: (error as { code?: string }).code,
+            message: error.message,
+            details: (error as { details?: string }).details,
+          }
         : {},
-      'pdf.inspect',
+      operation,
     );
   }
 }
 
-/** Reads stored bytes by reference (never copies, never enters state). */
+/**
+ * Reads stored bytes as a defensive COPY (mirrors the binary store's
+ * `copyBytes`, never its live `getBytes`): callers can retain or mutate
+ * the result without corrupting the module store or any sibling view.
+ *
+ * Liveness probes (`getStudioBytes(id) !== undefined`) keep working but
+ * copy the buffer — prefer the allocation-free `hasStudioDoc` for those.
+ * The zero-copy transfer path (`runStudioOperation` intake) borrows the
+ * live store entry directly inside this module and never goes through
+ * this copy; `openStudioBytes` intake likewise keeps its by-reference
+ * store registration (no slice, no copy).
+ */
 export function getStudioBytes(id: string): Uint8Array | undefined {
-  return binaries.get(id)?.bytes;
+  const bytes = binaries.get(id)?.bytes;
+  return bytes === undefined ? undefined : bytes.slice();
+}
+
+/** Allocation-free liveness check for `getStudioBytes(id) !== undefined` probes. */
+export function hasStudioDoc(id: string): boolean {
+  return binaries.has(id);
 }
 
 /**
@@ -267,6 +433,13 @@ export async function closeStudioDoc(id: string): Promise<void> {
     await renders.closeDocument(renderId).catch(() => undefined);
   }
   binaries.delete(id);
+  // Staged ids carry no rendering document, but they DO carry the
+  // zero-copy transfer flag — closing one must clear it. Studio ids are
+  // counter-based and never reused, so a stale entry is harmless to
+  // lookups, but it would grow the set without bound (one string per
+  // staged-then-closed doc). (Same release discipline as
+  // `releaseStagedBytes`; both are idempotent.)
+  stagedIds.delete(id);
 }
 
 /* ---------- cross-tool handoff (zero-copy pending transfer) ---------- */
@@ -313,10 +486,14 @@ export interface PendingTransfer {
  * partially-adopted doc is closed again (no leaked bytes, render docs,
  * or URLs); structured `StudioError`s — including `CANCELLED` — rethrow
  * with code + operation intact, never swallowed or rewrapped.
+ *
+ * `operation` attributes the PRODUCER (forwarded to `openStudioBytes`):
+ * pass the engine operation whose outputs these are when known.
  */
 export async function adoptOutputsAsDocs(
   outputs: StudioOutput[],
   sourceName: string,
+  operation: OperationId = 'pdf.inspect',
 ): Promise<StudioDoc[]> {
   if (outputs.length === 0) {
     throw toStudioError(
@@ -325,13 +502,13 @@ export async function adoptOutputsAsDocs(
         message: 'engine produced no outputs to adopt',
         details: `source=${sourceName}`,
       },
-      'pdf.inspect',
+      operation,
     );
   }
   const docs: StudioDoc[] = [];
   try {
     for (const output of outputs) {
-      docs.push(await openStudioBytes(output.name, output.bytes));
+      docs.push(await openStudioBytes(output.name, output.bytes, operation));
     }
   } catch (error) {
     for (const doc of docs) {
@@ -343,7 +520,7 @@ export async function adoptOutputsAsDocs(
     if (error instanceof Error && 'code' in error && 'operation' in error) {
       throw error;
     }
-    throw toStudioError(error instanceof Error ? { message: error.message } : {}, 'pdf.inspect');
+    throw toStudioError(error instanceof Error ? { message: error.message } : {}, operation);
   }
   return docs;
 }
@@ -359,6 +536,11 @@ let pendingTransfer: PendingTransfer | null = null;
  * owned in the `binaries` map — this only stages handles, so the caller
  * (or the consumer after `consumePendingTransfer`) still closes each doc
  * via `closeStudioDoc`. Returns the transfer id.
+ *
+ * Overwrite owns the orphan: the replaced slot has no owner left (unlike
+ * `clearPendingTransfer`, where the caller keeps its docs), so docs that
+ * are NOT re-staged in the new transfer are closed here, fire-and-forget.
+ * Docs carried over into the new transfer are kept, never double-closed.
  */
 export function setPendingTransfer(
   docs: StudioDoc[],
@@ -367,7 +549,18 @@ export function setPendingTransfer(
 ): string {
   transferCounter += 1;
   const id = `transfer-${transferCounter}`;
+  const prior = pendingTransfer;
   pendingTransfer = { id, docs: [...docs], sourceName, producedBy, at: Date.now() };
+  if (prior !== null) {
+    const kept = new Set(docs.map((d) => d.id));
+    for (const orphan of prior.docs) {
+      if (!kept.has(orphan.id)) {
+        // Best-effort hygiene (bytes + render doc + URLs); the slot is
+        // already replaced, so a failure must never break the new stage.
+        void closeStudioDoc(orphan.id).catch(() => undefined);
+      }
+    }
+  }
   return id;
 }
 
@@ -382,7 +575,15 @@ export function consumePendingTransfer(): PendingTransfer | null {
   return transfer;
 }
 
-/** Drops the pending transfer without taking it (docs stay caller-owned). */
+/**
+ * Drops the pending transfer without taking it.
+ *
+ * Ownership stays with the CALLER: unlike the `setPendingTransfer`
+ * overwrite path (whose replaced slot has no owner left, so orphans are
+ * closed there), a cleared transfer's docs are still live handles the
+ * caller registered — it closes each via `closeStudioDoc` when done.
+ * This never frees bytes, render docs, or URLs itself.
+ */
 export function clearPendingTransfer(): void {
   pendingTransfer = null;
 }
@@ -405,6 +606,10 @@ export const __studioBinariesForTests = {
   },
   has(id: string): boolean {
     return binaries.has(id);
+  },
+  /** Whether `id` currently carries the zero-copy transfer flag. */
+  isStaged(id: string): boolean {
+    return stagedIds.has(id);
   },
 };
 
@@ -569,19 +774,29 @@ export function runStudioOperation(
       // then release the adapter store entries (no copies, no retention).
       // (Narrowed here: the closure below would lose `finished` narrowing.)
       const engineResult = finished.result;
-      const outputs: StudioOutput[] = spanSync(perfMarks, 'studio:run:outputs', () =>
-        (engineResult.outputs ?? []).map((ref) => {
-          const bytes = getBytes(ref.outputId);
+      const outputs: StudioOutput[] = spanSync(perfMarks, 'studio:run:outputs', () => {
+        const refs = engineResult.outputs ?? [];
+        // Collect first, THEN release every entry unconditionally: the old
+        // throw-on-first-missing loop leaked every later `outputId` in the
+        // adapter store whenever one ref went missing.
+        const resolved = refs.map((ref) => ({ ref, bytes: getBytes(ref.outputId) }));
+        for (const { ref } of resolved) {
           releaseBytes(ref.outputId);
+        }
+        return resolved.map(({ ref, bytes }) => {
           if (bytes === undefined) {
             throw toStudioError(
-              { code: 'INTERNAL', message: 'engine output went missing' },
+              {
+                code: 'INTERNAL',
+                message: 'engine output went missing',
+                details: `outputId=${ref.outputId}`,
+              },
               operation,
             );
           }
           return { name: ref.name, bytes, byteLength: ref.byteLength, pageCount: ref.pageCount };
-        }),
-      );
+        });
+      });
       const result: StudioResult = {
         summary: engineResult.summary,
         outputs,
@@ -608,7 +823,19 @@ export function runStudioOperation(
 
 /* ---------- thumbnails (bounded object-URL cache) ---------- */
 
-const thumbUrls = new Map<string, Map<number, string>>();
+/**
+ * One cached thumbnail: the service-owned object URL plus the render box
+ * (size tier) it was rendered at. A request hits iff the cached box covers
+ * it (`isThumbBoxUsable`) — a smaller tier is a miss that re-renders at
+ * the requested box and revokes the stale entry, so list tiles never
+ * upscale grid renders and grid tiles never upscale list renders.
+ */
+export interface ThumbCacheEntry {
+  url: string;
+  box: number;
+}
+
+const thumbUrls = new Map<string, Map<number, ThumbCacheEntry>>();
 const thumbOrder: string[] = [];
 const MAX_THUMB_DOCS = 6;
 
@@ -655,15 +882,38 @@ function noteThumbEvict(docId: string): void {
 
 /** True while `url` is still the live cached thumbnail for (docId, page). */
 export function isThumbUrlLive(docId: string, pageNumber: number, url: string): boolean {
-  return thumbUrls.get(docId)?.get(pageNumber) === url;
+  return thumbUrls.get(docId)?.get(pageNumber)?.url === url;
+}
+
+/**
+ * Tier rule: a cached thumbnail is usable for a request iff its render box
+ * covers the requested box (upscale-safe — same-tier and downscale reuse,
+ * smaller-tier re-renders). Pure so unit tests pin it without an engine;
+ * `studioThumbWindow` is its only production caller.
+ */
+export function isThumbBoxUsable(cachedBox: number, requestedBox: number): boolean {
+  return cachedBox >= requestedBox;
+}
+
+/**
+ * Drops borrow-site entries whose URLs died mid-flight (evicted by a
+ * concurrent window after the pre-await hit snapshot): a pruned page is a
+ * hole for the caller, never a revoked URL served as live.
+ */
+function pruneDeadThumbBorrows(docId: string, out: Map<number, string>): void {
+  for (const [page, url] of [...out]) {
+    if (!isThumbUrlLive(docId, page, url)) {
+      out.delete(page);
+    }
+  }
 }
 
 function revokeDocUrls(docId: string): void {
   const pages = thumbUrls.get(docId);
   const had = pages !== undefined && pages.size > 0;
   if (pages !== undefined) {
-    for (const url of pages.values()) {
-      URL.revokeObjectURL(url);
+    for (const entry of pages.values()) {
+      URL.revokeObjectURL(entry.url);
     }
     thumbUrls.delete(docId);
   }
@@ -676,7 +926,7 @@ function revokeDocUrls(docId: string): void {
   }
 }
 
-function touchDoc(docId: string): Map<number, string> {
+function touchDoc(docId: string): Map<number, ThumbCacheEntry> {
   let pages = thumbUrls.get(docId);
   if (pages === undefined) {
     pages = new Map();
@@ -693,21 +943,35 @@ function touchDoc(docId: string): Map<number, string> {
       revokeDocUrls(oldest);
     }
   }
-  return pages as Map<number, string>;
+  return pages as Map<number, ThumbCacheEntry>;
 }
 
 /**
- * Caches one thumbnail URL under the per-document page cap. Evicted
- * pages are revoked immediately and listeners notified (same contract
- * as document eviction). The just-written page is never the victim.
+ * Caches one thumbnail URL with its render box under the per-document page
+ * cap. A same-page rewrite (tier upgrade) revokes the stale smaller-tier
+ * URL first so no orphaned entry survives beside the fresh render — the
+ * caller replaces the page with the new URL from the same window result,
+ * so the revoked URL is never re-served. Evicted pages are revoked
+ * immediately and listeners notified (same contract as document eviction).
+ * The just-written page is never the victim.
  */
 function thumbCacheSet(
-  cache: Map<number, string>,
+  cache: Map<number, ThumbCacheEntry>,
   docId: string,
   pageNumber: number,
   url: string,
+  box: number,
 ): void {
-  cache.set(pageNumber, url);
+  const prior = cache.get(pageNumber);
+  if (prior !== undefined) {
+    cache.delete(pageNumber);
+    try {
+      URL.revokeObjectURL(prior.url);
+    } catch {
+      // Best effort.
+    }
+  }
+  cache.set(pageNumber, { url, box });
   while (cache.size > MAX_THUMB_PAGES_PER_DOC) {
     let oldest: number | undefined;
     for (const key of cache.keys()) {
@@ -723,7 +987,7 @@ function thumbCacheSet(
     cache.delete(oldest);
     if (evicted !== undefined) {
       try {
-        URL.revokeObjectURL(evicted);
+        URL.revokeObjectURL(evicted.url);
       } catch {
         // Best effort.
       }
@@ -738,7 +1002,7 @@ function thumbCacheSet(
  * for a closed document). An evicted-but-open document re-touches as
  * MRU so fresh URLs always land in the live map.
  */
-function liveThumbCache(docId: string): Map<number, string> | null {
+function liveThumbCache(docId: string): Map<number, ThumbCacheEntry> | null {
   if (renderDocIds.get(docId) === undefined) {
     return null;
   }
@@ -750,11 +1014,26 @@ export const __thumbCacheForTests = {
   maxDocs: MAX_THUMB_DOCS,
   maxPagesPerDoc: MAX_THUMB_PAGES_PER_DOC,
   touch: touchDoc,
-  set: thumbCacheSet,
+  set(
+    cache: Map<number, ThumbCacheEntry>,
+    docId: string,
+    pageNumber: number,
+    url: string,
+    // Optional for seed callers holding unknown-tier URLs (hook tests seed
+    // arbitrary blobs the mocked window never consults): defaults to the
+    // conservative list tier, never over-claiming resolution. Production
+    // writes always pass the real render box explicitly.
+    box: number = THUMB_LIST_BOX,
+  ): void {
+    thumbCacheSet(cache, docId, pageNumber, url, box);
+  },
   revokeDoc: revokeDocUrls,
   live: isThumbUrlLive,
   generation: getThumbGeneration,
   subscribe: subscribeThumbEvictions,
+  box(docId: string, pageNumber: number): number | undefined {
+    return thumbUrls.get(docId)?.get(pageNumber)?.box;
+  },
   size(docId: string): number {
     return thumbUrls.get(docId)?.size ?? 0;
   },
@@ -766,9 +1045,9 @@ export const __thumbCacheForTests = {
       const pages = thumbUrls.get(docId);
       thumbUrls.delete(docId);
       if (pages !== undefined) {
-        for (const url of pages.values()) {
+        for (const entry of pages.values()) {
           try {
-            URL.revokeObjectURL(url);
+            URL.revokeObjectURL(entry.url);
           } catch {
             // Best effort.
           }
@@ -781,15 +1060,48 @@ export const __thumbCacheForTests = {
   },
 };
 
+/**
+ * Encoders proven missing this session (P3 item 3). `canvas.toBlob` calls
+ * back null for an unsupported MIME (and, rarely, under memory pressure):
+ * the first null for a MIME records it here so later encodes skip it
+ * instead of paying a serial failed toBlob per thumbnail. Session-scoped
+ * and cleared in `__resetStudioForTests`.
+ *
+ * Tradeoff (documented): a transient null (memory pressure, not a missing
+ * encoder) demotes that MIME for the rest of the session. Accepted: the
+ * chain still resolves every encode, and at thumbnail sizes the JPEG
+ * fallback is visually equivalent. Capable browsers never record anything
+ * and keep the historical webp→jpeg→png chain byte-for-byte.
+ */
+const unsupportedThumbMimes = new Set<string>();
+
+/**
+ * Pure MIME chain minus session-known-missing encoders (P3 item 3).
+ * Order is always webp→jpeg→png; PNG is the last resort and is never
+ * skipped (it always encodes). Exported for unit tests.
+ */
+export function selectThumbMimeChain(
+  skip: ReadonlySet<string>,
+): Array<{ mime: string; quality?: number }> {
+  const chain = [
+    { mime: 'image/webp', quality: 0.85 },
+    { mime: 'image/jpeg', quality: 0.85 },
+    { mime: 'image/png' },
+  ].filter((type) => !skip.has(type.mime));
+  if (chain.length === 0) {
+    return [{ mime: 'image/png' }];
+  }
+  return chain;
+}
+
 function canvasToUrl(canvas: HTMLCanvasElement): Promise<string> {
   // MIME fallback chain: some environments lack a webp encoder (or fail
   // under memory pressure), in which case toBlob calls back with null.
   // JPEG is near-universal; PNG always works. Never reject the wave.
-  const types: Array<{ mime: string; quality?: number }> = [
-    { mime: 'image/webp', quality: 0.85 },
-    { mime: 'image/jpeg', quality: 0.85 },
-    { mime: 'image/png' },
-  ];
+  // P3 item 3: encoders proven missing earlier this session are skipped
+  // up front (`unsupportedThumbMimes`) instead of re-paying a failed
+  // toBlob per thumbnail.
+  const types = selectThumbMimeChain(unsupportedThumbMimes);
   return new Promise((resolve, reject) => {
     const attempt = (index: number): void => {
       const type = types[index];
@@ -800,6 +1112,7 @@ function canvasToUrl(canvas: HTMLCanvasElement): Promise<string> {
       canvas.toBlob(
         (blob) => {
           if (blob === null) {
+            unsupportedThumbMimes.add(type.mime);
             attempt(index + 1);
             return;
           }
@@ -991,13 +1304,19 @@ export function studioThumbWindow(
     const cache = touchDoc(docId);
     // List/grid tier by default (≈128 box at 2×); zoomed callers pass an
     // explicit box (THUMB_ZOOM_BOX). Never the old fixed 400 for lists.
+    // Tier-aware: only entries rendered at-or-above the requested box hit
+    // (`isThumbBoxUsable`); a smaller tier re-renders at the requested box
+    // below, revoking the stale entry on write.
     const box = opts?.box ?? thumbListBox();
-    const missing = pages.filter((page) => cache.get(page) === undefined);
+    const missing = pages.filter((page) => {
+      const entry = cache.get(page);
+      return entry === undefined || !isThumbBoxUsable(entry.box, box);
+    });
     const out = new Map<number, string>();
     for (const page of pages) {
       const hit = cache.get(page);
-      if (hit !== undefined) {
-        out.set(page, hit);
+      if (hit !== undefined && isThumbBoxUsable(hit.box, box)) {
+        out.set(page, hit.url);
       }
     }
     if (missing.length === 0) {
@@ -1084,10 +1403,13 @@ export function studioThumbWindow(
       for (const page of missing) {
         const url = byPage.get(page);
         if (url !== undefined) {
-          thumbCacheSet(live, docId, page, url);
+          thumbCacheSet(live, docId, page, url, box);
           out.set(page, url);
         }
       }
+      // Hits snapshotted pre-await may have died mid-flight under a
+      // concurrent window's evict — never serve the revoked leftovers.
+      pruneDeadThumbBorrows(docId, out);
       return out;
     } catch (batchError) {
       // Per-page fault isolation: one bad page must not sink the window.
@@ -1147,7 +1469,7 @@ export function studioThumbWindow(
               'pdf.inspect',
             );
           }
-          thumbCacheSet(liveSingle, docId, page, url);
+          thumbCacheSet(liveSingle, docId, page, url, box);
           out.set(page, url);
         } catch (singleError) {
           if (canvas !== null) {
@@ -1174,6 +1496,9 @@ export function studioThumbWindow(
         }
       }
       cancelJob = null;
+      // Same mid-flight-eviction guard as the batch path: a concurrent
+      // window may have revoked a pre-await hit after it was snapshotted.
+      pruneDeadThumbBorrows(docId, out);
       if (out.size === 0) {
         throw batchError;
       }
@@ -1204,15 +1529,55 @@ export function studioThumbWindow(
 // — it alone revokes entries, on LRU evict and on document close. Callers
 // borrow the returned string and MUST NOT revoke it; a borrowed URL stays
 // valid until the service evicts it or its document closes. Callers that
-// hold a URL across awaits re-request through `studioPreview` (a live hit
-// returns the same URL) or verify with `isPreviewUrlLive` — a dropped key
-// is never re-served, the page simply re-renders on the next request.
+// hold a URL across awaits subscribe via `subscribePreviewEvictions` (and
+// re-request through `studioPreview`, or verify with `isPreviewUrlLive` /
+// `getPreviewGeneration`) — a dropped key is never re-served, the page
+// simply re-renders on the next request.
 const previewUrls = new Map<string, string>();
 const previewOrder: string[] = [];
 const MAX_PREVIEW_URLS = 8;
 
+/** Generation bumped every time an eviction drops previews for `renderId`. */
+const previewGenerations = new Map<string, number>();
+type PreviewEvictListener = (renderId: string) => void;
+const previewEvictListeners = new Set<PreviewEvictListener>();
+
+/**
+ * Subscribes to preview evictions (LRU evict, render purge on close).
+ * Holders of borrowed hi-res URLs drop their copy on notification and
+ * re-request through `studioPreview` — a revoked URL is never rendered.
+ * Returns an unsubscribe closure. Mirrors `subscribeThumbEvictions`.
+ */
+export function subscribePreviewEvictions(listener: PreviewEvictListener): () => void {
+  previewEvictListeners.add(listener);
+  return () => {
+    previewEvictListeners.delete(listener);
+  };
+}
+
+/** Eviction generation for `renderId` (0 when never evicted). */
+export function getPreviewGeneration(renderId: string): number {
+  return previewGenerations.get(renderId) ?? 0;
+}
+
+function notePreviewEvict(renderId: string): void {
+  previewGenerations.set(renderId, getPreviewGeneration(renderId) + 1);
+  for (const listener of [...previewEvictListeners]) {
+    try {
+      listener(renderId);
+    } catch {
+      // Best effort — a holder must never break eviction.
+    }
+  }
+}
+
 function previewCacheKey(renderId: string, pageNumber: number): string {
   return `${renderId}:${pageNumber}`;
+}
+
+/** Render ids carry no colons, so the key splits at the last one. */
+function previewRenderIdOf(key: string): string {
+  return key.slice(0, key.lastIndexOf(':'));
 }
 
 function revokePreviewUrl(url: string): void {
@@ -1238,6 +1603,7 @@ function previewCacheTouch(key: string, url: string): void {
       if (evicted !== undefined) {
         revokePreviewUrl(evicted);
       }
+      notePreviewEvict(previewRenderIdOf(oldest));
     }
   }
 }
@@ -1271,6 +1637,9 @@ export const __previewCacheForTests = {
   touch: previewCacheTouch,
   hit: previewCacheHit,
   live: isPreviewUrlLive,
+  generation: getPreviewGeneration,
+  subscribe: subscribePreviewEvictions,
+  purge: purgePreviewsForRender,
   size(): number {
     return previewUrls.size;
   },
@@ -1283,12 +1652,15 @@ export const __previewCacheForTests = {
     }
     previewUrls.clear();
     previewOrder.length = 0;
+    previewGenerations.clear();
+    previewEvictListeners.clear();
   },
 };
 
 /** Revokes and drops every cached preview rendered from `renderId`. */
 function purgePreviewsForRender(renderId: string): void {
   const prefix = `${renderId}:`;
+  let dropped = 0;
   for (const key of [...previewUrls.keys()]) {
     if (key.startsWith(prefix)) {
       const url = previewUrls.get(key);
@@ -1300,7 +1672,11 @@ function purgePreviewsForRender(renderId: string): void {
       if (url !== undefined) {
         revokePreviewUrl(url);
       }
+      dropped += 1;
     }
+  }
+  if (dropped > 0) {
+    notePreviewEvict(renderId);
   }
 }
 
@@ -1529,11 +1905,21 @@ export async function __resetStudioForTests(): Promise<void> {
   for (const docId of [...thumbUrls.keys()]) {
     revokeDocUrls(docId);
   }
+  // Test reset drops previews like a close-all: revoke, then notify per
+  // render document so borrowed hi-res URLs are never served silently dead
+  // (mirrors `revokeDocUrls` above, which notifies thumb holders).
+  const resetRenderIds = new Set<string>();
+  for (const key of [...previewUrls.keys()]) {
+    resetRenderIds.add(previewRenderIdOf(key));
+  }
   for (const url of previewUrls.values()) {
     revokePreviewUrl(url);
   }
   previewUrls.clear();
   previewOrder.length = 0;
+  for (const renderId of resetRenderIds) {
+    notePreviewEvict(renderId);
+  }
   if (renders !== null) {
     for (const renderId of renderDocIds.values()) {
       await renders.closeDocument(renderId).catch(() => undefined);
@@ -1541,6 +1927,10 @@ export async function __resetStudioForTests(): Promise<void> {
   }
   renderDocIds.clear();
   binaries.clear();
+  stagedIds.clear();
+  // Session encoder learning (P3 item 3) resets with everything else so
+  // one test's missing-encoder simulation never leaks into the next.
+  unsupportedThumbMimes.clear();
   pendingTransfer = null;
   adapter = null;
   renders = null;

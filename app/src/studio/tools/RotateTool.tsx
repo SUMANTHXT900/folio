@@ -13,16 +13,14 @@ import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import ContinueCard from '../components/ContinueCard';
 import {
-  consumePendingTransfer,
-  getStudioBytes,
-  closeStudioDoc,
   releaseStagedBytes,
   runStudioOperation,
   stageStudioBytes,
-  type StudioDoc,
   type StudioOutput,
   type StudioJob,
 } from '../services/folio';
+import { usePendingTransfer } from './usePendingTransfer';
+import { cancelledError, useCancelOnUnmount } from './studioJob';
 
 const ICON = (
   <svg
@@ -80,7 +78,7 @@ const RotateTile = memo(function RotateTile({
             className="max-h-full max-w-full object-contain transition-transform"
           />
         ) : (
-          <span className="absolute inset-0 flex items-center justify-center text-xs text-ink-400 animate-pulse">
+          <span className="absolute inset-0 flex items-center justify-center text-xs text-ink-400 dark:text-ink-300 animate-pulse">
             …
           </span>
         )}
@@ -88,15 +86,17 @@ const RotateTile = memo(function RotateTile({
       <div className="flex items-center gap-1">
         <button
           onClick={() => onSpin(idx, -1)}
-          className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
+          className="w-11 h-11 min-w-[44px] min-h-[44px] rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
           aria-label={`Rotate left (page ${idx + 1})`}
         >
           ↺
         </button>
-        <span className="w-6 text-center text-xs font-medium text-ink-400">{idx + 1}</span>
+        <span className="w-6 text-center text-xs font-medium text-ink-400 dark:text-ink-300">
+          {idx + 1}
+        </span>
         <button
           onClick={() => onSpin(idx, 1)}
-          className="w-8 h-8 rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors"
+          className="w-11 h-11 min-w-[44px] min-h-[44px] rounded-lg border border-paper-300 dark:border-ink-700 flex items-center justify-center text-sm hover:bg-paper-200 dark:hover:bg-ink-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
           aria-label={`Rotate right (page ${idx + 1})`}
         >
           ↻
@@ -110,45 +110,17 @@ export default function RotateTool() {
   const { files, addFiles, remove, setFiles } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
-  const [continuedFrom, setContinuedFrom] = useState<{
-    producedBy: string;
-    sourceName: string;
-  } | null>(null);
-  // Pending-transfer claim: same back-out-release discipline as
-  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
-  // uploaded, never in state).
-  const claimedRef = useRef<StudioDoc[]>([]);
-  const ranRef = useRef(false);
-  const mountGenRef = useRef(0);
-
-  // Pending-transfer intake (mount once): the handed-off doc becomes the
-  // single input by reference — verified live, never re-uploaded.
-  useEffect(() => {
-    mountGenRef.current += 1;
-    const gen = mountGenRef.current;
-    const pending = consumePendingTransfer();
-    if (pending !== null) {
-      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
-      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
-      if (firstDoc !== undefined) {
-        claimedRef.current = [firstDoc];
-        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
-        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
-      }
-    }
-    return () => {
-      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
-      const claimed = claimedRef.current;
-      window.setTimeout(() => {
-        if (mountGenRef.current !== gen) return;
-        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
-        if (ranRef.current) return;
-        for (const d of claimed) void closeStudioDoc(d.id);
-      }, 0);
-    };
-  }, [setFiles]);
+  // Shared pending-transfer intake (claim + gen-guarded back-out release).
+  const { claimedRef, ranRef, continuedFrom } = usePendingTransfer(setFiles, 'single');
 
   useEffect(() => {
+    // File-swap discipline (Split/Rearrange/Metadata parity): a new input
+    // drops the previous rotation state, completion, and error.
+    setRot({});
+    setAllRot(0);
+    setDone(null);
+    setError(null);
+    setShowAll(false);
     if (!file) return;
     let cancelled = false;
     (async () => {
@@ -174,14 +146,16 @@ export default function RotateTool() {
 
   const [rot, setRot] = useState<Record<number, number>>({});
   const [allRot, setAllRot] = useState(0);
+  // No-op honesty: a zero-rotation "run" must not celebrate Done — the
+  // download stays disabled with the reason inline until something is
+  // actually rotated.
+  const hasRotation = allRot !== 0 || Object.values(rot).some((t) => ((t % 4) + 4) % 4 !== 0);
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{
     outputs: StudioOutput[];
     sourceName: string;
-    /** Engine `StudioResult.durationMs` (summed across chained runs; 0 for the no-op path) — display-only (D4). */
+    /** Engine `StudioResult.durationMs` (summed across chained runs) — display-only (D4). */
     durationMs: number;
-    /** No-op success (0°/empty selection): the output references the input bytes. */
-    isNoop: boolean;
   } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [showAll, setShowAll] = useState(false);
@@ -236,19 +210,10 @@ export default function RotateTool() {
         }))
         .filter((group) => group.pages.length > 0);
       if (groups.length === 0) {
-        // No-op success (engine contract: empty selection and 0° are
-        // valid): the output references the input bytes — no worker
-        // round-trip, no copy. It doubles as the handoff item, labelled
-        // with the existing smart `rotate` name.
-        const bytes = getStudioBytes(file.id);
-        if (bytes === undefined) throw new Error('document is no longer open');
-        const name = smartOutputName('rotate', [file.name]);
-        setDone({
-          sourceName: file.name,
-          outputs: [{ name, bytes, byteLength: bytes.byteLength, pageCount: file.pageCount }],
-          durationMs: 0,
-          isNoop: true,
-        });
+        // Unreachable via the UI (the download stays disabled until a
+        // rotation is selected) — kept as a defensive honest error so a
+        // zero-rotation run can never surface a Done card again.
+        setError(new Error('No pages rotated yet — spin a page or use All ±90° first.'));
         return;
       }
       let currentId = file.id;
@@ -313,7 +278,6 @@ export default function RotateTool() {
             sourceName: file.name,
             outputs: [{ ...first, name }],
             durationMs: totalDurationMs,
-            isNoop: false,
           });
         }
       }
@@ -322,7 +286,7 @@ export default function RotateTool() {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
       if (code === 'CANCELLED') {
-        setError(new Error('Rotate cancelled.'));
+        setError(cancelledError('rotate'));
       } else {
         setError(e);
       }
@@ -349,12 +313,7 @@ export default function RotateTool() {
   }, []);
 
   // Cancel the running job when the user navigates away
-  useEffect(
-    () => () => {
-      void jobRef.current?.cancel();
-    },
-    [],
-  );
+  useCancelOnUnmount(jobRef);
 
   return (
     <div>
@@ -388,6 +347,8 @@ export default function RotateTool() {
                 onRemove={() => {
                   setRot({});
                   setAllRot(0);
+                  setDone(null);
+                  setError(null);
                   claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
                   remove(file.id);
                 }}
@@ -425,7 +386,7 @@ export default function RotateTool() {
           )}
 
           {loading && (
-            <div className="flex items-center gap-2 text-sm text-ink-400">
+            <div className="flex items-center gap-2 text-sm text-ink-400 dark:text-ink-300">
               <Spinner /> Rendering previews…
             </div>
           )}
@@ -465,14 +426,14 @@ export default function RotateTool() {
                 )}
               </div>
               {thumbs.length > 30 && !showAll && (
-                <p className="text-xs text-ink-400 mt-3">
+                <p className="text-xs text-ink-400 dark:text-ink-300 mt-3">
                   Showing {PAGE_LIMIT} of {thumbs.length} pages — click “Show all” for the rest.
                 </p>
               )}
               {showAll && thumbs.length > 30 && (
                 <button
                   onClick={() => setShowAll(false)}
-                  className="mt-3 text-xs text-ink-400 hover:text-ink-700"
+                  className="mt-3 min-h-[44px] px-3 inline-flex items-center text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
                 >
                   Show less
                 </button>
@@ -481,7 +442,7 @@ export default function RotateTool() {
           )}
 
           <div className="mt-8 flex items-center gap-3">
-            <Button onClick={onDownload} disabled={working || thumbs.length === 0}>
+            <Button onClick={onDownload} disabled={working || thumbs.length === 0 || !hasRotation}>
               Download rotated PDF
             </Button>
             {working ? (
@@ -494,12 +455,17 @@ export default function RotateTool() {
                   setRot({});
                   setAllRot(0);
                 }}
-                className="ml-1 text-sm text-ink-400 hover:text-ink-900 dark:hover:text-paper-100"
+                className="ml-1 min-h-[44px] px-2 inline-flex items-center text-sm text-ink-400 dark:text-ink-300 hover:text-ink-900 dark:hover:text-paper-100 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
               >
                 Reset
               </button>
             )}
           </div>
+          {!working && !hasRotation && thumbs.length > 0 && (
+            <p className="mt-2 text-xs text-ink-400 dark:text-ink-300">
+              No rotation selected — spin a page or use All ±90° to enable the download.
+            </p>
+          )}
           {/* Single busy pattern: determinate Progress when a fraction is
               known, otherwise the staged Spinner — never both. */}
           {working &&
@@ -519,11 +485,6 @@ export default function RotateTool() {
                 onBackToEdit={handleBackToEdit}
                 durationMs={done.durationMs}
               />
-              {done.isNoop && (
-                <p className="mt-2 text-xs text-ink-400 dark:text-ink-300">
-                  No pages rotated — the output matches the input.
-                </p>
-              )}
             </div>
           )}
           {error !== null && <ErrorBlock error={error} />}

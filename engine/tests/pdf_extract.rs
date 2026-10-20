@@ -118,6 +118,21 @@ fn empty_selection_fails_cleanly() {
 }
 
 #[test]
+fn zero_page_fails_as_invalid_range() {
+    let result = run_operation(
+        &ExtractPagesOperation,
+        input(common::single_page_pdf()),
+        ExtractPagesOptions::new(vec![0]),
+    );
+    assert_eq!(result.status(), CompletionStatus::Failed);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::InvalidPageRange);
+    assert!(err.message().contains('0'));
+    assert_eq!(err.operation(), Some("pdf.extract_pages"));
+    assert!(err.job_id().is_some());
+}
+
+#[test]
 fn out_of_range_selection_fails_before_output() {
     let result = run_operation(
         &ExtractPagesOperation,
@@ -137,7 +152,7 @@ fn multiple_invalid_pages_fail_cleanly() {
     let result = run_operation(
         &ExtractPagesOperation,
         input(common::mixed_pages_pdf()),
-        ExtractPagesOptions::new(vec![0, 99]),
+        ExtractPagesOptions::new(vec![4, 99]),
     );
     assert_eq!(result.status(), CompletionStatus::Failed);
     let err = expect_error(result, ErrorCode::PageOutOfRange);

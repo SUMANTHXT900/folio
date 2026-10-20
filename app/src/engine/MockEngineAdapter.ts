@@ -131,7 +131,10 @@ export class MockEngineAdapter implements EngineAdapter {
 
   execute(request: EngineRequest): { jobId: string; done: Promise<EngineExecution> } {
     this.jobCounter += 1;
-    const jobId = `job-${this.jobCounter}`;
+    // `mock-N`: never `job-N` — the real engine owns the `job-N` shape
+    // (it restarts from `job-1` every worker restart), so sharing it would
+    // let simulated ids masquerade as engine provenance.
+    const jobId = `mock-${this.jobCounter}`;
     const record: JobRecord = {
       cancelled: false,
       listeners: new Set(),
@@ -429,7 +432,7 @@ export class MockEngineAdapter implements EngineAdapter {
         { phase: 'validating', message: 'validating image list', steps: 1 },
         { phase: 'preparing', message: 'preparing destination', steps: 1 },
         {
-          phase: 'processing images',
+          phase: 'processing_images',
           message: `processing ${imageCount} images`,
           steps: Math.min(Math.max(imageCount, 2), 40),
         },

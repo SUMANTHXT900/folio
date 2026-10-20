@@ -46,6 +46,39 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('x'.repeat(200)).length).toBeLessThanOrEqual(120);
     expect(sanitizeFileName('x'.repeat(200))).toMatch(/\.pdf$/);
   });
+
+  it('strips bidirectional controls instead of passing them through', () => {
+    expect(sanitizeFileName('a\u202Eb')).toBe('ab.pdf');
+    expect(sanitizeFileName('a\u2066b')).toBe('ab.pdf');
+    expect(sanitizeFileName('a\u2069b')).toBe('ab.pdf');
+    expect(sanitizeFileName('a\u200Eb')).toBe('ab.pdf');
+    expect(sanitizeFileName('a\u200Fb')).toBe('ab.pdf');
+    expect(sanitizeFileName('evil\u202Efdp')).toBe('evilfdp.pdf');
+    expect(sanitizeFileName('a\u202Db\u202Cc')).toBe('abc.pdf');
+    // A name of only bidi controls falls back instead of returning empty.
+    expect(sanitizeFileName('\u202E\u2066\u200E\u200F')).toBe(FALLBACK_PDF_NAME);
+  });
+  it('prefixes Windows reserved stems instead of emitting them verbatim', () => {
+    expect(sanitizeFileName('con')).toBe('_con.pdf');
+    expect(sanitizeFileName('con.pdf')).toBe('_con.pdf');
+    expect(sanitizeFileName('COM1')).toBe('_COM1.pdf');
+    expect(sanitizeFileName('nul.pdf')).toBe('_nul.pdf');
+    expect(sanitizeFileName('lpt9')).toBe('_lpt9.pdf');
+    expect(sanitizeFileName('aux')).toBe('_aux.pdf');
+    // Non-exact stems are untouched.
+    expect(sanitizeFileName('console')).toBe('console.pdf');
+    expect(sanitizeFileName('con.txt')).toBe('con.txt.pdf');
+    expect(sanitizeFileName('com10')).toBe('com10.pdf');
+  });
+
+  it('sanitizes the fallback instead of returning it verbatim', () => {
+    expect(sanitizeFileName('', '../evil')).toBe('-evil.pdf');
+    expect(sanitizeFileName('   ', 'con')).toBe('_con.pdf');
+    expect(sanitizeFileName('', 'x'.repeat(200)).length).toBeLessThanOrEqual(120);
+    // Empty/hostile fallbacks still terminate on the default.
+    expect(sanitizeFileName('', '')).toBe(FALLBACK_PDF_NAME);
+    expect(sanitizeFileName('', '   ')).toBe(FALLBACK_PDF_NAME);
+  });
 });
 
 describe('smartOutputName', () => {

@@ -10,8 +10,8 @@
 
 /**
  * Where a page came from — badge/diagnostics only, never a pipeline.
- * `'camera'` is currently unused (capture removed in the D33 strip;
- * the scanic integration wave will emit captures with it again).
+ * `'upload'` is gallery/file intake; `'camera'` is scanic captures
+ * committed through `ImagesTool` (pre-named `scan-NNN.jpg`).
  */
 export type ImageSource = 'upload' | 'camera';
 

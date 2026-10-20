@@ -136,28 +136,33 @@ export function translateWireEvent(
 
 export function translateSummary(operation: OperationId, summary: SharedSummary): ResultSummary {
   // Each transport returns exactly one summary shape per operation; the
-  // casts below select it. Shape mismatches throw and surface as
+  // guards below select it. Shape mismatches throw and surface as
   // transport failures (never silent wrong data).
   switch (operation) {
     case 'pdf.inspect': {
       const inspect = summary as EngineInspectSummary;
+      const pageCount = requireNumber(inspect?.page_count, 'page_count');
+      const pdfVersion = requireString(inspect?.pdf_version, 'pdf_version');
+      const encrypted = requireBoolean(inspect?.encrypted, 'encrypted');
+      const metadata = requireRecord(inspect?.metadata, 'metadata');
+      const pages = requireNullablePages(inspect?.pages, 'pages');
       return {
-        pageCount: inspect.page_count,
-        pdfVersion: inspect.pdf_version,
-        encrypted: inspect.encrypted,
+        pageCount,
+        pdfVersion,
+        encrypted,
         metadata: {
-          title: inspect.metadata.title,
-          author: inspect.metadata.author,
-          producer: inspect.metadata.producer,
+          title: requireNullableString(metadata.title, 'metadata.title'),
+          author: requireNullableString(metadata.author, 'metadata.author'),
+          producer: requireNullableString(metadata.producer, 'metadata.producer'),
         },
         pages:
-          inspect.pages === null
+          pages === null
             ? null
-            : inspect.pages.map((page) => ({
-                pageNumber: page.page_number,
-                widthPt: page.width_pt,
-                heightPt: page.height_pt,
-                rotationDeg: page.rotation_deg,
+            : pages.map((page) => ({
+                pageNumber: requireNumber(page?.page_number, 'pages[].page_number'),
+                widthPt: requireNumber(page?.width_pt, 'pages[].width_pt'),
+                heightPt: requireNumber(page?.height_pt, 'pages[].height_pt'),
+                rotationDeg: requireNumber(page?.rotation_deg, 'pages[].rotation_deg'),
               })),
       };
     }
@@ -165,42 +170,57 @@ export function translateSummary(operation: OperationId, summary: SharedSummary)
     case 'pdf.reorder':
     case 'pdf.rotate': {
       const counts = summary as EngineCountsSummary;
-      return { pageCount: counts.page_count };
+      return { pageCount: requireNumber(counts?.page_count, 'page_count') };
     }
     case 'pdf.images_to_pdf': {
       const counts = summary as EngineCountsSummary;
+      const pageCount = requireNumber(counts?.page_count, 'page_count');
+      const imageCount =
+        counts?.image_count === undefined
+          ? undefined
+          : requireNumber(counts.image_count, 'image_count');
       return {
-        pageCount: counts.page_count,
-        ...(counts.image_count === undefined ? {} : { imageCount: counts.image_count }),
+        pageCount,
+        ...(imageCount === undefined ? {} : { imageCount }),
       };
     }
     case 'pdf.delete_pages': {
       const counts = summary as EngineCountsSummary;
       return {
-        pageCount: counts.page_count,
-        inputPageCount: counts.input_page_count,
-        outputPageCount: counts.output_page_count,
+        pageCount: requireNumber(counts?.page_count, 'page_count'),
+        inputPageCount: requireNumber(counts?.input_page_count, 'input_page_count'),
+        outputPageCount: requireNumber(counts?.output_page_count, 'output_page_count'),
       };
     }
     case 'pdf.split': {
       const split = summary as EngineSplitSummary;
+      const inputPageCount = requireNumber(split?.input_page_count, 'input_page_count');
+      if (!Array.isArray(split?.parts)) {
+        throw new Error('malformed summary: parts must be an array');
+      }
       return {
-        inputPageCount: split.input_page_count,
-        parts: split.parts.map((part) => ({ name: part.name, pageCount: part.page_count })),
+        inputPageCount,
+        parts: split.parts.map((part) => ({
+          name: requireNullableString(part?.name, 'parts[].name'),
+          pageCount: requireNumber(part?.page_count, 'parts[].page_count'),
+        })),
       };
     }
     case 'pdf.merge': {
       const merge = summary as EngineMergeSummary;
       return {
-        inputDocumentCount: merge.input_document_count,
-        inputPageCount: merge.input_page_count,
-        outputPageCount: merge.output_page_count,
+        inputDocumentCount: requireNumber(merge?.input_document_count, 'input_document_count'),
+        inputPageCount: requireNumber(merge?.input_page_count, 'input_page_count'),
+        outputPageCount: requireNumber(merge?.output_page_count, 'output_page_count'),
       };
     }
     case 'pdf.read_metadata': {
       const meta = summary as EngineMetadataSummary;
+      const pageCount = requireNumber(meta?.page_count, 'page_count');
+      const metadata = requireRecord(meta?.metadata, 'metadata');
       const date = (
         value: EnginePdfDate | null,
+        field: string,
       ): {
         year: number;
         month: number;
@@ -209,40 +229,119 @@ export function translateSummary(operation: OperationId, summary: SharedSummary)
         minute: number;
         second: number;
         tzOffsetMinutes: number;
-      } | null =>
-        value === null
-          ? null
-          : {
-              year: value.year,
-              month: value.month,
-              day: value.day,
-              hour: value.hour,
-              minute: value.minute,
-              second: value.second,
-              tzOffsetMinutes: value.tz_offset_minutes,
-            };
+      } | null => {
+        if (value === null) {
+          return null;
+        }
+        const record = requireRecord(value, field);
+        return {
+          year: requireNumber(record.year, `${field}.year`),
+          month: requireNumber(record.month, `${field}.month`),
+          day: requireNumber(record.day, `${field}.day`),
+          hour: requireNumber(record.hour, `${field}.hour`),
+          minute: requireNumber(record.minute, `${field}.minute`),
+          second: requireNumber(record.second, `${field}.second`),
+          tzOffsetMinutes: requireNumber(record.tz_offset_minutes, `${field}.tz_offset_minutes`),
+        };
+      };
       return {
-        pageCount: meta.page_count,
+        pageCount,
         metadata: {
-          title: meta.metadata.title,
-          author: meta.metadata.author,
-          subject: meta.metadata.subject,
-          keywords: meta.metadata.keywords,
-          creator: meta.metadata.creator,
-          producer: meta.metadata.producer,
-          creationDate: date(meta.metadata.creation_date),
-          modificationDate: date(meta.metadata.modification_date),
+          title: requireNullableString(metadata.title, 'metadata.title'),
+          author: requireNullableString(metadata.author, 'metadata.author'),
+          subject: requireNullableString(metadata.subject, 'metadata.subject'),
+          keywords: requireNullableString(metadata.keywords, 'metadata.keywords'),
+          creator: requireNullableString(metadata.creator, 'metadata.creator'),
+          producer: requireNullableString(metadata.producer, 'metadata.producer'),
+          creationDate: date(
+            metadata.creation_date as EnginePdfDate | null,
+            'metadata.creation_date',
+          ),
+          modificationDate: date(
+            metadata.modification_date as EnginePdfDate | null,
+            'metadata.modification_date',
+          ),
         },
       };
     }
     case 'pdf.set_metadata': {
       const counts = summary as EngineCountsSummary;
-      return { pageCount: counts.page_count };
+      return { pageCount: requireNumber(counts?.page_count, 'page_count') };
     }
   }
 }
 
+function requireNumber(value: unknown, field: string): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    throw new Error(`malformed summary: ${field} must be a number`);
+  }
+  return value;
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`malformed summary: ${field} must be a string`);
+  }
+  return value;
+}
+
+function requireBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`malformed summary: ${field} must be a boolean`);
+  }
+  return value;
+}
+
+function requireNullableString(value: unknown, field: string): string | null {
+  if (value !== null && typeof value !== 'string') {
+    throw new Error(`malformed summary: ${field} must be a string or null`);
+  }
+  return value;
+}
+
+function requireRecord(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`malformed summary: ${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireNullablePages(
+  value: unknown,
+  field: string,
+): Array<Record<string, unknown>> | null {
+  if (value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`malformed summary: ${field} must be an array or null`);
+  }
+  return value as Array<Record<string, unknown>>;
+}
+
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
+  'INVALID_DOCUMENT',
+  'INVALID_PAGE_RANGE',
+  'PAGE_OUT_OF_RANGE',
+  'DUPLICATE_PAGE',
+  'PROCESSING_FAILED',
+  'CANCELLED',
+  'UNSUPPORTED_FORMAT',
+  'IO_ERROR',
+  'INVALID_INPUT',
+  'INVALID_OPTIONS',
+  'INTERNAL',
+]);
+
 export function errorData(code: string, message: string, details?: string | null): EngineErrorData {
+  if (!KNOWN_ERROR_CODES.has(code)) {
+    const unknown = `unknown error code: ${code}`;
+    return {
+      code: 'INTERNAL',
+      message,
+      details: details == null ? unknown : `${details} (${unknown})`,
+    };
+  }
   return {
     code: code as ErrorCode,
     message,

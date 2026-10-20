@@ -278,7 +278,10 @@ export function ContinueCard({
   const parts: DownloadPart[] = useMemo(
     () =>
       outputs.map((out, i) => ({
-        key: `${i}-${out.byteLength}`,
+        // Stable per-position key (never byteLength: equal-size outputs and
+        // re-runs collide on it, freezing stale row state — see PartRow's
+        // resync effect in DownloadCard, which owns content updates).
+        key: `part-${i}`,
         blob: blobs[i],
         suggestedName:
           out.name.trim() !== ''
@@ -297,7 +300,7 @@ export function ContinueCard({
         <h2
           ref={headingRef}
           tabIndex={-1}
-          className="font-display text-lg font-semibold tracking-tight text-ink-900 focus:outline-none dark:text-paper-100"
+          className="font-display text-lg font-semibold tracking-tight text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/40 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-100 dark:text-paper-100 dark:focus-visible:ring-offset-ink-950"
         >
           No output to continue with
         </h2>
@@ -390,7 +393,7 @@ export function ContinueCard({
       <h2
         ref={headingRef}
         tabIndex={-1}
-        className="font-display text-lg font-semibold tracking-tight text-ink-900 focus:outline-none dark:text-paper-100"
+        className="font-display text-lg font-semibold tracking-tight text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/40 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-100 dark:text-paper-100 dark:focus-visible:ring-offset-ink-950"
       >
         Done — what&apos;s next?
       </h2>

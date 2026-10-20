@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { studioShare } from '../services/folio';
+import { sanitizeFileName } from './downloadNaming';
 
 export function Button({
   children,
@@ -18,7 +19,7 @@ export function Button({
   type?: 'button' | 'submit';
 }) {
   const base =
-    'inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/40 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-100 dark:focus-visible:ring-offset-ink-950';
+    'inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-medium transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/40 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-100 dark:focus-visible:ring-offset-ink-950';
   const styles = {
     primary:
       'bg-ink-900 text-paper-50 hover:bg-ink-800 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200 shadow-sm hover:shadow-md active:shadow-sm',
@@ -231,7 +232,7 @@ export function FileChip({
         onClick={onRemove}
         whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.92 }}
-        className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+        className="w-11 h-11 min-w-[44px] min-h-[44px] rounded-lg flex items-center justify-center text-ink-400 dark:text-ink-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-800"
         aria-label={`Remove ${name}`}
       >
         <svg
@@ -252,9 +253,13 @@ export function FileChip({
 }
 
 export function Spinner({ label }: { label?: string }) {
+  // role="status" announces the loading text on mount (implicit
+  // aria-live="polite"). No aria-busy: it would stay true forever and
+  // suppress the very announcement this region exists for. The unlabeled
+  // case keeps an sr-only name so the region is never an empty status.
   return (
-    <div className="flex flex-col items-center justify-center gap-4 py-10">
-      <span className="relative w-10 h-10">
+    <div role="status" className="flex flex-col items-center justify-center gap-4 py-10">
+      <span aria-hidden className="relative w-10 h-10">
         <span className="absolute inset-0 rounded-full border-[3px] border-paper-200 dark:border-ink-700" />
         <motion.span
           animate={{ rotate: 360 }}
@@ -262,7 +267,11 @@ export function Spinner({ label }: { label?: string }) {
           className="absolute inset-0 rounded-full border-[3px] border-transparent border-t-brass-500"
         />
       </span>
-      {label && <p className="text-sm text-ink-400 dark:text-ink-300">{label}</p>}
+      {label ? (
+        <p className="text-sm text-ink-400 dark:text-ink-300">{label}</p>
+      ) : (
+        <span className="sr-only">Loading</span>
+      )}
     </div>
   );
 }
@@ -415,6 +424,19 @@ export function isStaleChunkError(error: unknown): boolean {
   return STALE_CHUNK_RE.test(message);
 }
 
+/**
+ * Secondary engine detail is diagnostic, never layout: cap long values
+ * (filenames, engine messages, raw chunk URLs) so one runaway string can't
+ * blow the card. The full value stays available via `title`. Primary
+ * messages and codes are never truncated.
+ */
+const MAX_ERROR_SECONDARY_LENGTH = 240;
+
+function truncateErrorSecondary(value: string): string {
+  if (value.length <= MAX_ERROR_SECONDARY_LENGTH) return value;
+  return `${value.slice(0, MAX_ERROR_SECONDARY_LENGTH - 1)}…`;
+}
+
 export function ErrorBlock({
   error,
   fallback = 'Something went wrong. Please try again.',
@@ -425,6 +447,7 @@ export function ErrorBlock({
   if (error === null || error === undefined) return null;
   if (isStaleChunkError(error)) {
     const raw = error instanceof Error ? error.message : fallback;
+    const shownRaw = truncateErrorSecondary(raw);
     return (
       <div
         className="mt-5 rounded-xl border border-red-600/30 bg-red-600/[0.06] px-4 py-3.5"
@@ -443,8 +466,11 @@ export function ErrorBlock({
         >
           Reload app
         </button>
-        <p className="mt-2 font-mono text-[11px] text-ink-400/80 break-words dark:text-ink-300/70">
-          {raw}
+        <p
+          className="mt-2 font-mono text-[11px] text-ink-400/80 break-words dark:text-ink-300/70"
+          title={shownRaw === raw ? undefined : raw}
+        >
+          {shownRaw}
         </p>
       </div>
     );
@@ -458,6 +484,8 @@ export function ErrorBlock({
   );
   // Avoid repeating the primary message in the secondary line.
   const deduped = secondary.filter((part) => part !== message);
+  const shownSecondary = deduped.map(truncateErrorSecondary).join(' — ');
+  const fullSecondary = deduped.join(' — ');
   return (
     <div
       className="mt-5 rounded-xl border border-red-600/30 bg-red-600/[0.06] px-4 py-3.5"
@@ -465,8 +493,11 @@ export function ErrorBlock({
     >
       <p className="text-sm font-medium text-red-700 dark:text-red-400">{message}</p>
       {deduped.length > 0 && (
-        <p className="mt-1 text-xs text-ink-400 dark:text-ink-300 break-words">
-          {deduped.join(' — ')}
+        <p
+          className="mt-1 text-xs text-ink-400 dark:text-ink-300 break-words"
+          title={shownSecondary === fullSecondary ? undefined : fullSecondary}
+        >
+          {shownSecondary}
         </p>
       )}
       {code !== undefined && code !== 'CANCELLED' && (
@@ -525,8 +556,14 @@ export function DoneBanner({
     };
   }, [blob, externalUrl]);
   const url = externalUrl ?? internalUrl;
+  // Last-mile filename defense: callers pass display names that may carry
+  // illegal characters — the `download` attribute and the share sheet always
+  // get the sanitized form (`sanitizeFileName` is idempotent, so already-clean
+  // names pass through byte-identical).
+  const safeName = sanitizeFileName(name);
   return (
     <motion.div
+      role="status"
       initial={{ opacity: 0, y: 6, scale: 0.99 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: 'spring', stiffness: 380, damping: 24 }}
@@ -548,9 +585,10 @@ export function DoneBanner({
           </svg>
         </span>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-forest-600 dark:text-forest-300">{name}</p>
+          <p className="text-sm font-semibold text-forest-600 dark:text-forest-300">{safeName}</p>
           <p className="text-xs text-forest-600/80 dark:text-forest-300/80 mt-0.5 break-all">
-            Ready — tap “Save to device” to save it again.
+            Download started — check your downloads shelf. Tap “Save to device” again if it didn’t
+            come through.
           </p>
         </div>
       </div>
@@ -558,7 +596,7 @@ export function DoneBanner({
         {url && (
           <a
             href={url}
-            download={name}
+            download={safeName}
             className="inline-flex items-center gap-2 rounded-lg bg-forest-600 hover:bg-forest-500 text-white px-4 py-2.5 text-sm font-semibold shadow-sm transition-colors min-h-[44px]"
           >
             <svg
@@ -582,7 +620,7 @@ export function DoneBanner({
           <button
             type="button"
             onClick={async () => {
-              const r = await studioShare(blob, name);
+              const r = await studioShare(blob, safeName);
               if (r === 'shared') setShared(true);
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-forest-500/40 text-forest-600 dark:text-forest-300 px-4 py-2.5 text-sm font-medium hover:bg-forest-500/[0.08] transition-colors min-h-[44px]"

@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::copy::{copy_pages_with_map, find_invalid_page};
 use crate::processing::pdf::core::{load_pdf, PageNumber, PdfDocument};
 
@@ -154,15 +155,22 @@ impl Operation for DeletePagesOperation {
         // Surviving pages occupy the 10–95% band. The request was validated
         // against the cached page map, which the copy reuses.
         let total = remaining.len() as u64;
+        let mut throttle = ProgressThrottle::new();
         let document = copy_pages_with_map(&source, source.page_map(), &remaining, |done, _| {
             ctx.check_cancellation()?;
-            let completed = 10 + (done as u64 * 85) / total.max(1);
-            ctx.report_progress(
-                Some("deleting pages"),
-                completed.min(95),
-                100,
-                Some(&format!("page {done} of {total}")),
-            );
+            let completed = (10 + (done as u64 * 85) / total.max(1)).min(95);
+            // Source-side throttle mirroring the glue sink rule (phase
+            // changes always pass here — one phase per loop; Δ≥1 pp or
+            // every N pages otherwise). Same shape, fewer messages;
+            // cancellation stays per page above.
+            if throttle.should_report(completed, done as u64) {
+                ctx.report_progress(
+                    Some("deleting pages"),
+                    completed,
+                    100,
+                    Some(&format!("page {done} of {total}")),
+                );
+            }
             Ok(())
         })?;
 
@@ -604,5 +612,75 @@ mod tests {
             out.save_to_bytes().expect("serializes")
         };
         assert_eq!(run(), run());
+    }
+
+    /// Context recording every reported event, for throttle assertions.
+    struct RecordingCtx {
+        id: JobId,
+        events: std::cell::RefCell<Vec<(Option<String>, u64, u64)>>,
+    }
+
+    impl OperationContext for RecordingCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.delete_pages"
+        }
+        fn report_progress(
+            &self,
+            phase: Option<&str>,
+            completed: u64,
+            total: u64,
+            _message: Option<&str>,
+        ) {
+            self.events
+                .borrow_mut()
+                .push((phase.map(str::to_string), completed, total));
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn progress_is_throttled_but_monotonic_to_100() {
+        // 199 surviving pages through one deletion: the source-side
+        // throttle must emit strictly fewer per-page events than pages,
+        // while every emitted event keeps the historical shape (phase +
+        // completed/total band) and the run still ends at exactly 100,
+        // monotonically.
+        let labels: Vec<String> = (1..=200).map(|n| format!("PAGE {n}")).collect();
+        let texts: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let bytes = fixtures::text_pages_pdf(&texts);
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = DeletePagesOperation
+            .execute(&ctx, input(bytes), DeletePagesOptions::new(vec![200]))
+            .expect("deletion succeeds");
+        assert_eq!(out.output_page_count, 199);
+        let events = ctx.events.borrow();
+        // Unthrottled history: validating + preparing + 199 pages +
+        // finalizing. The throttle must cut the per-page reports.
+        assert!(
+            events.len() < 199 + 3,
+            "throttle must drop redundant events: {}",
+            events.len()
+        );
+        assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
+        assert!(
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
+        );
+        assert_eq!(*completed.last().expect("events"), 100);
     }
 }

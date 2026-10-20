@@ -176,11 +176,35 @@ let persistedCameraDeviceId: string | null = null;
 /** Cross-session camera pick (the user's eventual explicit choice). */
 export const CAMERA_STORAGE_KEY = 'folio.scan.cameraId';
 
+/**
+ * Length cap for a stored camera pick. Real `deviceId` values are short
+ * opaque tokens (tens of chars); 256 is generous headroom that still bounds
+ * what a same-origin-writable `localStorage` value can push into
+ * `deviceId: { exact }` constraints.
+ */
+export const MAX_STORED_CAMERA_ID_LENGTH = 256;
+
+/**
+ * Length/charset clamp for a stored camera pick (pure, unit-tested).
+ * `localStorage` is same-origin writable (devtools, older builds, pasted
+ * values), so the stored id is untrusted on read: overlong values and
+ * anything carrying C0/C1 controls or DEL is rejected to `null` and the
+ * session falls back to the default facingMode flow. Printable ids —
+ * including non-ASCII labels some platforms emit — pass through untouched.
+ */
+export function clampStoredCameraId(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw === '') return null;
+  if (raw.length > MAX_STORED_CAMERA_ID_LENGTH) return null;
+  for (const ch of raw) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 32 || code === 127 || (code >= 128 && code < 160)) return null;
+  }
+  return raw;
+}
+
 function readStoredCameraId(): string | null {
   try {
-    const raw = globalThis.localStorage?.getItem(CAMERA_STORAGE_KEY);
-    if (typeof raw === 'string' && raw !== '') return raw;
-    return null;
+    return clampStoredCameraId(globalThis.localStorage?.getItem(CAMERA_STORAGE_KEY));
   } catch {
     return null;
   }
@@ -932,6 +956,27 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const idRef = useRef(0);
   const entriesRef = useRef<QueueEntry[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
+  /**
+   * Retained video node: React clears host refs (`videoRef`) before passive
+   * unmount cleanups flush, so an unmount cleanup that reads `videoRef`
+   * can never reach the node to drop its stream binding. This mirror keeps
+   * the last attached node until the detach callback itself releases it —
+   * detach (unmount or phase leave) is the reliable disconnect moment.
+   */
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const setVideoEl = useCallback((el: HTMLVideoElement | null) => {
+    if (el !== null) {
+      videoRef.current = el;
+      videoElRef.current = el;
+      return;
+    }
+    const prev = videoElRef.current;
+    videoRef.current = null;
+    videoElRef.current = null;
+    // Still holding the node: drop the stream binding now (tracks are
+    // stopped by stopTracks on the same paths).
+    if (prev !== null) prev.srcObject = null;
+  }, []);
   const streamRef = useRef<MediaStream | null>(null);
   /** Session ref mirror of the camera choice (survives effect remounts within the session). */
   const chosenDeviceIdRef = useRef<string | null>(initialCameraChoice());
@@ -966,13 +1011,25 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    */
   const drainStartedRef = useRef(new Set<number>());
   /**
-   * Per-entry warp generation: Apply spam bumps the seq and terminates the
-   * in-flight warp; stale continuations (wrong seq, or `cancelled`) drop
-   * silently so only the latest quad's warp can commit.
+   * Per-entry warp generation: Apply spam bumps the seq and terminates that
+   * entry's in-flight warp; stale continuations (wrong seq) drop silently so
+   * only the latest quad's warp can commit. A `cancelled` warp whose seq is
+   * still current (worker loss raced it) is never swallowed: it clears the
+   * entry's eager attempt and schedules a visible retry so the page cannot
+   * strand on "Processing auto-crop…".
    */
   const warpSeqRef = useRef(new Map<number, number>());
-  /** Warp generations with a worker request outstanding (terminate guard). */
-  const warpInflightRef = useRef(new Set<number>());
+  /**
+   * Per-entry in-flight warp marker (entry id → seq with a worker request
+   * outstanding). Keyed by entry, never a shared seq set: two entries' seq
+   * values collide (both start at 1), and a cross-entry terminate would
+   * strand the victim with its eager attempt already spent.
+   */
+  const warpInflightRef = useRef(new Map<number, number>());
+  /** Sync guard against double-tap Re-detect (entriesRef mirrors async). */
+  const redetectingIdsRef = useRef(new Set<number>());
+  /** Bumped to refire the eager warp after an interrupted attempt. */
+  const [warpRetryTick, setWarpRetryTick] = useState(0);
   const warpedBlobsRef = useRef(new Map<number, Blob>());
   const objectUrlsRef = useRef(new Set<string>());
   /** Last shutter time (manual or auto) — the auto cooldown gates on this. */
@@ -1009,10 +1066,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     }, CAPTURE_FLASH_MS + 50);
   }, []);
 
+  const stopTracks = useCallback(() => {
+    const stream = streamRef.current;
+    streamRef.current = null;
+    if (stream) for (const track of stream.getTracks()) track.stop();
+    // Retained node: `videoRef` may already be detached (unmount), so read
+    // the mirror that survives until the detach callback releases it.
+    const video = videoElRef.current ?? videoRef.current;
+    if (video) video.srcObject = null;
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // The camera dies with the mount: stop tracks + drop the video binding
+      // so no live track outlives the scanner (phase-leave and tab-hide call
+      // stopTracks too; unmount must not rely on them having run first).
+      stopTracks();
       for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
       objectUrlsRef.current.clear();
       // Owned drain lanes die with the mount; the retained lane survives
@@ -1029,7 +1100,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       warpClientRef.current?.terminate();
       warpClientRef.current = null;
     };
-  }, []);
+  }, [stopTracks]);
 
   /**
    * Mount-lifetime retained detect client for single detection (Re-detect).
@@ -1194,6 +1265,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    */
   const redetectEntry = useCallback(
     async (entry: QueueEntry) => {
+      // Sync double-tap guard (entriesRef mirrors setEntries async, so a
+      // second tap can race the `detecting` settle below).
+      if (redetectingIdsRef.current.has(entry.id)) return;
+      // The review drain owns `queued`/`detecting` entries: Re-detect runs
+      // only for settled pages, so it can never duplicate the drain's lane-0
+      // detect for the same entry (the button stays disabled until ready).
+      const snap = entriesRef.current.find((e) => e.id === entry.id);
+      if (!snap || snap.status !== 'ready') return;
+      redetectingIdsRef.current.add(entry.id);
+      // Invalidate this entry's in-flight warp NOW (synchronous, before the
+      // first await): its quad is stale the moment fresh corners land, and
+      // only the post-redetect warp may commit. The warp worker itself is
+      // NOT terminated — other entries' warps are never victims.
+      warpSeqRef.current.set(entry.id, (warpSeqRef.current.get(entry.id) ?? 0) + 1);
       setRedetecting(true);
       setCardError(null);
       setEntries((prev) =>
@@ -1300,6 +1385,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           );
         }
       } finally {
+        redetectingIdsRef.current.delete(entry.id);
         if (mountedRef.current) setRedetecting(false);
       }
     },
@@ -1307,13 +1393,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
 
   /* ---------------- camera session ---------------- */
-
-  const stopTracks = useCallback(() => {
-    const stream = streamRef.current;
-    streamRef.current = null;
-    if (stream) for (const track of stream.getTracks()) track.stop();
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }, []);
 
   /**
    * Camera picker choice: stops the old tracks immediately, persists the
@@ -1541,6 +1620,26 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       } catch (e) {
         if (cancelled) return;
         const kind = classifyCameraError(e);
+        // Persistent OverconstrainedError against an exact stored pick:
+        // reaching here with an exact pick means BOTH the exact-device open
+        // AND the default-camera fallback failed constraint resolution, so
+        // the saved deviceId is implicated in a failure loop — drop it
+        // (session + storage + state) so the next open starts from defaults
+        // instead of re-failing. The state reset re-runs this effect once
+        // with defaults; a repeated failure there lands here with no exact
+        // pick and stops (no retry loop).
+        const failedPick = chosenDeviceIdRef.current ?? selectedDeviceId;
+        if (
+          kind === 'overconstrained' &&
+          failedPick !== null &&
+          failedPick !== undefined &&
+          failedPick !== ''
+        ) {
+          persistedCameraDeviceId = null;
+          chosenDeviceIdRef.current = null;
+          clearStoredCameraId();
+          setSelectedDeviceId(null);
+        }
         setCamErrorKind(kind);
         if (kind === 'denied') setCamState('denied');
         else setCamState('unavailable');
@@ -1551,6 +1650,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (stream) {
         for (const track of stream.getTracks()) track.stop();
         if (streamRef.current === stream) streamRef.current = null;
+        // Disconnect path: drop the video binding when the detached stream
+        // is the attached one, so no stopped track lingers on the element.
+        const video = videoElRef.current ?? videoRef.current;
+        if (video && video.srcObject === stream) video.srcObject = null;
       }
     };
   }, [phase, facing, selectedDeviceId, paused, retryNonce]);
@@ -1568,8 +1671,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * by a clearly-sharper pixel rule (>25% more pixels) — a one-tap
    * `[data-camera-suggest]` note, never an auto-switch. Skipped when
    * <2 cameras are listed, on any error, or once the user has picked (the
-   * persisted pick wins overall). StrictMode-safe: `probeFiredRef` fires once
-   * per mount and the generation guard drops the late double-mount result.
+   * persisted pick wins overall). StrictMode-safe: `probeFiredRef` is set
+   * inside the timer callback (never before it), so the double-effect
+   * cleanup — which clears the first timer — cannot poison the remount's
+   * probe; the generation guard drops any late double-mount result.
    */
   useEffect(() => {
     if (phase !== 'camera' || paused) return;
@@ -1584,12 +1689,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     // once the user is already capturing, and start 600ms past live so the
     // mount burst and the first tap never race it.
     if (entriesRef.current.length > 0 || capturingRef.current) return;
-    probeFiredRef.current = true;
     const gen = (probeGenRef.current += 1);
     let alive = true;
     const timer = window.setTimeout(() => {
       if (!alive || probeGenRef.current !== gen) return;
       if (entriesRef.current.length > 0 || capturingRef.current) return;
+      if (probeFiredRef.current) return;
+      probeFiredRef.current = true;
       void (async () => {
         try {
           const liveTrack = streamRef.current?.getVideoTracks()[0] ?? null;
@@ -2147,10 +2253,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (lastWarpedQuadRef.current.get(id) === quadKey) return;
       const seq = (warpSeqRef.current.get(id) ?? 0) + 1;
       warpSeqRef.current.set(id, seq);
-      // Cancel the ACTUAL in-flight warp, if any (eager or an earlier
-      // Apply): terminate is skipped when no warp request is outstanding, so
-      // a lone warp never pays a worker re-init. Detection is untouched.
-      if (warpInflightRef.current.size > 0) getWarpClient().terminate();
+      // Cancel the ACTUAL in-flight warp for THIS entry only (eager or an
+      // earlier Apply): terminate is skipped when this entry has no warp
+      // request outstanding, so a lone warp never pays a worker re-init —
+      // and another entry's warp is never a victim (its eager attempt stays
+      // valid, so paging mid-warp cannot strand it). Detection is untouched.
+      if (warpInflightRef.current.get(id) !== undefined) getWarpClient().terminate();
       setCardError(null);
       let image: ImageData;
       try {
@@ -2165,7 +2273,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (!mountedRef.current) return;
       if (warpSeqRef.current.get(id) !== seq) return;
       if (!entriesRef.current.some((e) => e.id === id)) return;
-      warpInflightRef.current.add(seq);
+      warpInflightRef.current.set(id, seq);
       try {
         const warped = await getWarpClient().extract(image, corners);
         if (!mountedRef.current) return;
@@ -2185,13 +2293,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         );
       } catch (error) {
         if (!mountedRef.current) return;
-        // Superseded (a newer Apply bumped the generation) or worker-side
-        // cancel: silent — the newer warp owns the outcome now.
+        // Superseded (a newer Apply — or a Re-detect — bumped the
+        // generation): silent — the newer warp owns the outcome now.
         if (warpSeqRef.current.get(id) !== seq) return;
-        if (error instanceof ScanicClientError && error.code === 'cancelled') return;
+        if (!entriesRef.current.some((e) => e.id === id)) return;
+        if (error instanceof ScanicClientError && error.code === 'cancelled') {
+          // Interrupted but still current (worker loss raced the warp): never
+          // swallow — clear the spent eager attempt and schedule a visible
+          // retry so the page cannot strand on "Processing auto-crop…". The
+          // retry re-enters through the eager effect (warpRetryTick), which
+          // clears the note on start and commits on success.
+          eagerAttemptRef.current.delete(id);
+          setCardError('Auto-crop was interrupted — retrying…');
+          setWarpRetryTick((t) => t + 1);
+          return;
+        }
         setCardError('Warp failed on this page — nothing changed. Use the original instead.');
       } finally {
-        warpInflightRef.current.delete(seq);
+        if (warpInflightRef.current.get(id) === seq) warpInflightRef.current.delete(id);
       }
     },
     [getWarpClient, revokeUrl, trackUrl],
@@ -2210,6 +2329,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         revokeUrl(target.warpedUrl);
         warpedBlobsRef.current.delete(id);
         warpSeqRef.current.delete(id);
+        warpInflightRef.current.delete(id);
+        redetectingIdsRef.current.delete(id);
         lastWarpedQuadRef.current.delete(id);
         eagerAttemptRef.current.delete(id);
         visitedIdsRef.current.delete(id);
@@ -2243,6 +2364,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       warpedBlobsRef.current.delete(entry.id);
     }
     warpSeqRef.current.clear();
+    warpInflightRef.current.clear();
+    redetectingIdsRef.current.clear();
     lastWarpedQuadRef.current.clear();
     eagerAttemptRef.current.clear();
     visitedIdsRef.current.clear();
@@ -2259,7 +2382,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * `rewrapEntry` core — no verdict change, ML-first / null-fallback /
    * commit paths untouched. Loop guard: one attempt per (entry, quad); skip
    * when the current `warpedUrl` was already built for these exact corners.
-   * Runs for both verdicts so toggling back to warped is instant.
+   * Runs for both verdicts so toggling back to warped is instant. An
+   * interrupted warp clears its attempt and bumps `warpRetryTick`, so the
+   * retry re-enters here instead of stranding the page.
    */
   const eagerCornersKey = current?.corners ? JSON.stringify(current.corners) : null;
   useEffect(() => {
@@ -2270,7 +2395,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (eagerAttemptRef.current.get(current.id) === eagerCornersKey) return;
     eagerAttemptRef.current.set(current.id, eagerCornersKey);
     void rewrapEntry(current.id, current.corners);
-  }, [phase, current, eagerCornersKey, rewrapEntry]);
+  }, [phase, current, eagerCornersKey, rewrapEntry, warpRetryTick]);
 
   /**
    * Visited marking: viewing a page (reviewIndex change incl. filmstrip tap,
@@ -2577,7 +2702,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             {camState === 'live' || camState === 'requesting' ? (
               <div data-viewfinder className="absolute inset-0 overflow-hidden bg-black">
                 <video
-                  ref={videoRef}
+                  ref={setVideoEl}
                   muted
                   playsInline
                   autoPlay
@@ -2863,7 +2988,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             onUseOriginal={() => toggleVerdict(current.id)}
             onDiscard={() => discardEntry(current.id)}
             onRedetect={() => void redetectEntry(current)}
-            redetecting={redetecting}
+            // Disabled until this page settles `ready`: the review drain owns
+            // detecting pages, and Re-detect shares its lane-0 client — an
+            // early tap would only duplicate the drain's detect.
+            redetecting={redetecting || current.status !== 'ready'}
             verdict={current.decision}
             // Pure navigation beside Apply: advance reviewIndex only — no
             // warp, no decision change, no verdict touch. Visited marking
@@ -2898,7 +3026,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     className="h-full w-full object-cover"
                   />
                 ) : (
-                  <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700">
+                  <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700 dark:text-ink-300">
                     {i + 1}
                   </span>
                 )}

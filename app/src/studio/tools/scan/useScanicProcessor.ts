@@ -180,9 +180,11 @@ async function encodeImageDataToPng(image: ImageData): Promise<Blob> {
 
 export function useScanicProcessor(options: ScanicProcessorOptions = {}): ScanicProcessor {
   // Construction-time seam capture: the client owns its lazy worker; the
-  // decode/encode functions are platform capabilities.
+  // decode/encode functions are platform capabilities. `ownedClient` marks
+  // the hook-created client (the only one this hook may terminate).
   const [seams] = useState(() => ({
     client: options.client ?? new ScanicClient(),
+    ownedClient: options.client === undefined,
     decode: options.decode ?? decodeFileToImageData,
     encodePng: options.encodePng ?? encodeImageDataToPng,
   }));
@@ -324,13 +326,22 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
 
   // Mount lifecycle: restore `aliveRef` on every setup (StrictMode) and stop
   // new work on cleanup. keepQueue: no queue clearing, no URL revocation.
+  // The hook-created worker client is terminated here (a caller-supplied
+  // client stays the caller's — never terminated by this hook).
   useEffect(() => {
     aliveRef.current = true;
     void pump();
     return () => {
       aliveRef.current = false;
+      if (seams.ownedClient) {
+        try {
+          (seams.client as unknown as { terminate?: () => void }).terminate?.();
+        } catch {
+          // Termination is best-effort; the flag is already flipped.
+        }
+      }
     };
-  }, [pump]);
+  }, [pump, seams]);
 
   const enqueueCapture = useCallback(
     (file: File): void => {
@@ -358,8 +369,12 @@ export function useScanicProcessor(options: ScanicProcessorOptions = {}): Scanic
 
   const buildNow = useCallback(async (): Promise<ScanicEntry[]> => {
     // Join/start the drainer and wait until no work is left — including
-    // entries enqueued while waiting.
+    // entries enqueued while waiting. Alive-guarded: after unmount no new
+    // work starts and the call resolves promptly with the current snapshot
+    // instead of joining (or pumping) a dead drain.
+    if (!aliveRef.current) return recordsRef.current.slice();
     for (;;) {
+      if (!aliveRef.current) return recordsRef.current.slice();
       const active = drainPromiseRef.current ?? pump();
       await active;
       if (drainPromiseRef.current === null) break;

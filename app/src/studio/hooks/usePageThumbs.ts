@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  getThumbGeneration,
   studioPreview,
   studioThumbWindow,
   subscribeThumbEvictions,
@@ -176,8 +177,20 @@ export function usePageThumbs() {
           wi += 1;
           const pages = window.filter((n) => !arrRef.current[n - 1] && !failedRef.current.has(n));
           if (pages.length > 0) {
+            // Capture the eviction generation before the await: an LRU or
+            // per-doc-cap evict mid-flight revokes URLs and blanks `arrRef`
+            // via the subscription above. The post-await recheck drops the
+            // superseded window so revoked URLs never repopulate state.
+            const thumbGen = getThumbGeneration(docId);
             const map = await runWindow(ac, gen, docId, pages);
             if (map === null) return;
+            if (
+              ac.signal.aborted ||
+              gen !== genRef.current ||
+              docRef.current !== docId ||
+              getThumbGeneration(docId) !== thumbGen
+            )
+              return;
             markFailures(pages, map);
             const dirty: number[] = [];
             for (const [p2, url] of map) {
@@ -209,6 +222,12 @@ export function usePageThumbs() {
       initialCount: number = THUMB_INITIAL,
       box?: number,
     ): Promise<string[]> => {
+      // Box validation is a true no-op: it runs before `stop()` so an
+      // invalid call neither cancels in-flight work nor marks pages failed
+      // (a poisoned `failedRef` would break every later load of the doc).
+      if (box !== undefined && (typeof box !== 'number' || !Number.isFinite(box) || box <= 0)) {
+        throw new Error(`Invalid thumbnail box: ${String(box)}`);
+      }
       stop();
       const ac = new AbortController();
       abortRef.current = ac;
@@ -236,7 +255,12 @@ export function usePageThumbs() {
           first,
         );
         const map = await runWindow(ac, gen, docId, firstPages);
-        if (map === null) return [];
+        if (map === null) {
+          // Aborted/superseded: only the still-current load owns the
+          // spinner — a newer load keeps it, cancel() already dropped it.
+          if (gen === genRef.current && abortRef.current === ac) setLoading(false);
+          return [];
+        }
         markFailures(firstPages, map);
         for (const [p2, url] of map) arrRef.current[p2 - 1] = url;
         doneRef.current += map.size;
@@ -251,6 +275,11 @@ export function usePageThumbs() {
         }
         return [...arrRef.current];
       } catch {
+        // Superseded or cancelled: the newer load (or cancel()) owns the
+        // spinner — never clobber it. A still-current abort or failure
+        // drops the spinner here so it can never stick.
+        if (gen !== genRef.current || abortRef.current !== ac) return [];
+        setLoading(false);
         if ((ac.signal as AbortSignal).aborted) return [];
         throw new Error('Could not render page previews.');
       }
@@ -263,7 +292,24 @@ export function usePageThumbs() {
     const ac = abortRef.current;
     const docId = docRef.current;
     if (ac === null || docId === null || ac.signal.aborted) return;
+    // Mutual exclusion with the detached background fill: both loops issue
+    // concurrency-2 engine windows, so running both would double the render
+    // concurrency. Bumping the generation supersedes the background loop
+    // (its next liveness check drops it); a second fillAll supersedes the
+    // first the same way. The first wave (load) is superseded too when it
+    // is still in flight — this loop renders every hole anyway.
+    genRef.current += 1;
     const gen = genRef.current;
+    // Free the engine slots now: the superseded background window keeps
+    // rendering until its promise settles unless its job is cancelled.
+    // (Its late result is still dropped by the generation checks.)
+    for (const job of liveJobs.current) {
+      try {
+        job.cancel();
+      } catch {
+        // Best effort.
+      }
+    }
     const total = totalRef.current;
     for (const window of pageWindows(total, WAVE)) {
       if (ac.signal.aborted || gen !== genRef.current) return;
@@ -272,8 +318,16 @@ export function usePageThumbs() {
       );
       if (pages.length === 0) continue;
       try {
+        const thumbGen = getThumbGeneration(docId);
         const map = await runWindow(ac, gen, docId, pages);
         if (map === null) return;
+        if (
+          ac.signal.aborted ||
+          gen !== genRef.current ||
+          docRef.current !== docId ||
+          getThumbGeneration(docId) !== thumbGen
+        )
+          return;
         markFailures(pages, map);
         const dirty: number[] = [];
         for (const [p2, url] of map) {
@@ -287,7 +341,10 @@ export function usePageThumbs() {
         return;
       }
     }
-    if (!ac.signal.aborted && gen === genRef.current && doneRef.current >= total) setProgress(null);
+    if (gen !== genRef.current || ac.signal.aborted) return;
+    // Owns the spinner when it superseded an in-flight first wave.
+    setLoading(false);
+    if (doneRef.current >= total) setProgress(null);
   }, [markFailures, publishDirty, runWindow]);
 
   const cancel = useCallback(() => {

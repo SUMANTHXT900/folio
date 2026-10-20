@@ -323,4 +323,83 @@ describe('createUpdateManager (auto-apply, no confirm)', () => {
       restoreUa();
     }
   });
+
+  it('one budget for the whole apply: two under-budget halves that sum over still time out', async () => {
+    // 6s skip-waiting + 6s activation gate = 12s against an 8s budget.
+    // Sequential per-step timeouts would pass both halves (6s < 8s each);
+    // the single whole-apply budget must fail into the retry path instead.
+    const delayed = (ms: number) =>
+      new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
+    const reload = vi.fn();
+    const manager = createUpdateManager({
+      register: () =>
+        Promise.resolve({ update: () => Promise.resolve(), applyUpdate: () => delayed(6000) }),
+      env: () => onlineHost,
+      reload,
+      waitForActivation: () => delayed(6000),
+      applyTimeoutMs: 8000,
+    });
+    manager.init();
+    await vi.advanceTimersByTimeAsync(0);
+    const applying = manager.applyUpdate();
+    await vi.advanceTimersByTimeAsync(8500);
+    await applying;
+    expect(reload).not.toHaveBeenCalled();
+    expect(manager.snapshot().phase).toBe('error');
+    expect(manager.snapshot().canCheck).toBe(true);
+  });
+
+  it('defaultWaitForActivation resolves at once when handover already happened', async () => {
+    // Controlled page, no worker left waiting: skip-waiting handed over
+    // before the listener attached, so no controllerchange will ever fire.
+    // The default gate must resolve immediately (never hang to timeout).
+    const { defaultWaitForActivation } = await import('./updateManager');
+    const addEventListener = vi.fn();
+    const descriptor = Object.getOwnPropertyDescriptor(window.navigator, 'serviceWorker');
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: {
+        controller: {},
+        getRegistration: () => Promise.resolve({ waiting: null }),
+        addEventListener,
+      },
+      configurable: true,
+    });
+    try {
+      await expect(defaultWaitForActivation()).resolves.toBeUndefined();
+      expect(addEventListener).not.toHaveBeenCalled();
+    } finally {
+      if (descriptor) Object.defineProperty(window.navigator, 'serviceWorker', descriptor);
+      else delete (window.navigator as unknown as Record<string, unknown>).serviceWorker;
+    }
+  });
+
+  it('defaultWaitForActivation still gates on controllerchange while a worker waits', async () => {
+    const { defaultWaitForActivation } = await import('./updateManager');
+    let onChange: (() => void) | null = null;
+    const descriptor = Object.getOwnPropertyDescriptor(window.navigator, 'serviceWorker');
+    Object.defineProperty(window.navigator, 'serviceWorker', {
+      value: {
+        controller: {},
+        getRegistration: () => Promise.resolve({ waiting: {} }),
+        addEventListener: (_: string, fn: () => void) => {
+          onChange = fn;
+        },
+      },
+      configurable: true,
+    });
+    try {
+      let settled = false;
+      const pending = defaultWaitForActivation().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      onChange!();
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      if (descriptor) Object.defineProperty(window.navigator, 'serviceWorker', descriptor);
+      else delete (window.navigator as unknown as Record<string, unknown>).serviceWorker;
+    }
+  });
 });

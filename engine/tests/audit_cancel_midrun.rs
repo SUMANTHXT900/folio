@@ -23,10 +23,24 @@ use folio_engine::execution::cancellation::{CancellationSource, CancellationToke
 use folio_engine::execution::progress::{ProgressEvent, ProgressSink};
 use folio_engine::execution::scheduler::ExecutionEngine;
 use folio_engine::processing::pdf::core::loader::load_pdf;
+use folio_engine::processing::pdf::delete::{
+    DeletePagesInput, DeletePagesOperation, DeletePagesOptions,
+};
+use folio_engine::processing::pdf::extract::{
+    ExtractPagesInput, ExtractPagesOperation, ExtractPagesOptions,
+};
 use folio_engine::processing::pdf::images_to_pdf::{
     ImageInput, ImagesToPdfInput, ImagesToPdfOperation, ImagesToPdfOptions,
 };
+use folio_engine::processing::pdf::inspect::{InspectInput, InspectOperation, InspectOptions};
 use folio_engine::processing::pdf::merge::{MergeInput, MergeOperation, MergeOptions};
+use folio_engine::processing::pdf::metadata::{
+    FieldPatch, MetadataPatch, ReadMetadataInput, ReadMetadataOperation, ReadMetadataOptions,
+    SetMetadataInput, SetMetadataOperation, SetMetadataOptions,
+};
+use folio_engine::processing::pdf::reorder::{ReorderInput, ReorderOperation, ReorderOptions};
+use folio_engine::processing::pdf::rotate::{RotateInput, RotateOperation, RotateOptions};
+use folio_engine::processing::pdf::split::{SplitInput, SplitOperation, SplitOptions, SplitPart};
 use folio_engine::testing::pdf::{assert_lifecycle_complete, expect_error};
 
 /// Cancels its token the first time it observes `phase`, counting how
@@ -125,4 +139,186 @@ fn merge_stops_mid_copy_when_sink_cancels() {
     // The first per-page event fired (one page copied), then the next
     // page callback observed cancellation: 8 pages in, stopped after 1.
     assert_eq!(sink.seen(), 1, "cancellation must land mid-copy");
+}
+
+#[test]
+fn extract_stops_mid_copy_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "extracting pages");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &ExtractPagesOperation,
+        ExtractPagesInput::from_bytes(common::mixed_pages_pdf()).expect("input builds"),
+        ExtractPagesOptions::new(vec![1, 2, 3]),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.extract_pages"));
+    // The first per-page event fired (one page copied), then the next
+    // page callback observed cancellation: 3 pages in, stopped after 1.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-copy");
+}
+
+#[test]
+fn delete_stops_mid_copy_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "deleting pages");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &DeletePagesOperation,
+        DeletePagesInput::from_bytes(common::five_page_pdf()).expect("input builds"),
+        DeletePagesOptions::new(vec![5]),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.delete_pages"));
+    // Four pages survive the deletion; the first copied page fired, then
+    // the next page callback observed cancellation.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-copy");
+}
+
+#[test]
+fn reorder_stops_mid_copy_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "reordering pages");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &ReorderOperation,
+        ReorderInput::from_bytes(common::five_page_pdf()).expect("input builds"),
+        ReorderOptions::new(vec![5, 4, 3, 2, 1]),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.reorder"));
+    // The first per-page event fired (one page copied), then the next
+    // page callback observed cancellation: 5 pages in, stopped after 1.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-copy");
+}
+
+#[test]
+fn rotate_stops_mid_plan_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "planning rotations");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &RotateOperation,
+        RotateInput::from_bytes(common::five_page_pdf()).expect("input builds"),
+        RotateOptions::new(vec![1, 2, 3, 4, 5], 90),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.rotate"));
+    // The first planned page fired, then the next planning iteration
+    // observed cancellation: 5 pages selected, stopped after 1.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-plan");
+}
+
+#[test]
+fn split_stops_mid_copy_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "splitting");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &SplitOperation,
+        SplitInput::from_bytes(common::five_page_pdf()).expect("input builds"),
+        SplitOptions::new(vec![
+            SplitPart::new(vec![1, 2, 3]),
+            SplitPart::new(vec![4, 5]),
+        ]),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.split"));
+    // The first per-page event fired (one page copied), then the next
+    // page callback observed cancellation: 5 pages in, stopped after 1.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-copy");
+}
+
+#[test]
+fn inspect_detailed_stops_mid_loop_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "inspecting pages");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &InspectOperation,
+        InspectInput::from_bytes(common::mixed_pages_pdf()).expect("input builds"),
+        InspectOptions::detailed(),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.inspect"));
+    // The first per-page event fired (one page inspected), then the next
+    // loop iteration observed cancellation: 3 pages in, stopped after 1.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-loop");
+}
+
+#[test]
+fn read_metadata_stops_after_load_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "loading");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &ReadMetadataOperation,
+        ReadMetadataInput::from_bytes(common::single_page_pdf()).expect("input builds"),
+        ReadMetadataOptions::new(),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.read_metadata"));
+    // The load event fired (real parse work done), then the next
+    // checkpoint observed cancellation before any result escaped.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-run");
+}
+
+#[test]
+fn set_metadata_stops_after_load_when_sink_cancels() {
+    let source = CancellationSource::new();
+    let sink = CancellingSink::watched(source.token(), "loading");
+    let engine = ExecutionEngine::new().with_progress(sink.clone());
+
+    let result = engine.execute_with_cancellation(
+        &SetMetadataOperation,
+        SetMetadataInput::from_bytes(common::single_page_pdf()).expect("input builds"),
+        SetMetadataOptions::new(MetadataPatch {
+            title: FieldPatch::Set("Cancelled Title".to_string()),
+            ..MetadataPatch::default()
+        }),
+        source.token(),
+    );
+
+    assert_eq!(result.status(), CompletionStatus::Cancelled);
+    assert_lifecycle_complete(&result);
+    let err = expect_error(result, ErrorCode::Cancelled);
+    assert_eq!(err.operation(), Some("pdf.set_metadata"));
+    // The load event fired (real parse work done), then the next
+    // checkpoint observed cancellation before any mutation escaped.
+    assert_eq!(sink.seen(), 1, "cancellation must land mid-run");
 }

@@ -243,3 +243,19 @@ describe('UpdateCard what-changed notes', () => {
     );
   });
 });
+
+describe('Version tree channel gating', () => {
+  it('strips the dev suffix on production (no dev leak in the version tree)', () => {
+    stubHostname('folio-pdf.pages.dev');
+    render(<About />);
+    const tree = screen.getByLabelText('Version history');
+    expect(tree.textContent).not.toMatch(/·\s*dev/);
+  });
+
+  it('keeps the dev suffix off-production (dev-preview still shows the working version)', () => {
+    stubHostname('dev-folio-pdf.pages.dev');
+    render(<About />);
+    const tree = screen.getByLabelText('Version history');
+    expect(tree.textContent).toMatch(/·\s*dev/);
+  });
+});

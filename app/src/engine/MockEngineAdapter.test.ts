@@ -34,7 +34,7 @@ describe('MockEngineAdapter', () => {
     const adapter = new MockEngineAdapter();
     const seen: EngineEvent[] = [];
     const { jobId, done } = adapter.execute(inspectRequest());
-    expect(jobId).toMatch(/^job-\d+$/);
+    expect(jobId).toMatch(/^mock-\d+$/);
     const unsubscribe = adapter.subscribe(jobId, (event) => seen.push(event));
     const finished = await done;
     unsubscribe();
@@ -155,7 +155,7 @@ describe('MockEngineAdapter', () => {
     const adapter = new MockEngineAdapter();
     const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 9, 9, 9, 9]);
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9, 9]);
-    const { done } = adapter.execute({
+    const { jobId, done } = adapter.execute({
       operation: 'pdf.images_to_pdf',
       inputs: [
         { name: 'a.png', bytes: png },
@@ -163,10 +163,18 @@ describe('MockEngineAdapter', () => {
       ],
       options: { pageSize: 'fit', backgroundRgb: [255, 255, 255] },
     });
+    expect(jobId).toMatch(/^mock-\d+$/);
     const finished = await done;
     expect(finished.status).toBe('completed');
     expect(finished.result?.summary).toMatchObject({ pageCount: 2 });
     expect(finished.result?.outputs).toHaveLength(1);
+    // Phase identifiers are snake_case (no spaces): the image pass is
+    // `processing_images`, matching every other mock phase.
+    const phases = finished.events
+      .map((event) => event.phase)
+      .filter((phase) => phase !== undefined);
+    expect(phases).toContain('processing_images');
+    expect(phases.some((phase) => phase?.includes(' '))).toBe(false);
   });
 
   it('fails non-image bytes with UNSUPPORTED_FORMAT', async () => {

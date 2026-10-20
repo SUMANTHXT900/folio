@@ -235,14 +235,22 @@ export function platformNeedsFullClose(): boolean {
  * (exactly-once `controllerchange`, per page load). Resolves at once where
  * no Service Worker container exists. A skip-waiting post that already
  * handed over control before this listener attaches also resolves at once
- * instead of waiting for a change that already happened.
+ * instead of waiting for a change that already happened: on a controlled
+ * page with no worker left waiting, there is nothing left to wait for.
  */
-function defaultWaitForActivation(): Promise<void> {
+export async function defaultWaitForActivation(): Promise<void> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
-    return Promise.resolve();
+    return;
   }
   const container = navigator.serviceWorker;
-  return new Promise<void>((resolve) => {
+  try {
+    const reg = await container.getRegistration();
+    if (container.controller && !reg?.waiting) return;
+  } catch {
+    // Registration probe failed — fall through to the event gate below,
+    // whose timeout still fails loudly instead of hanging.
+  }
+  await new Promise<void>((resolve) => {
     container.addEventListener('controllerchange', () => resolve(), { once: true });
   });
 }
@@ -463,27 +471,23 @@ export function createUpdateManager(options: UpdateManagerOptions = {}) {
     // shows only briefly — but the run must acknowledge before the reload.
     setPhase('applying');
     try {
-      // Invoked synchronously (not deferred): a throwing registrar fails
-      // fast into the retry path below instead of an unhandled rejection.
-      const activation = active.applyUpdate();
-      await withTimeout(
-        Promise.resolve(activation),
-        applyTimeoutMs,
-        'Activating the waiting worker',
-      );
-      // Gate the reload on activation: the new worker must control this
-      // page before we navigate, or the early navigation is served by the
-      // still-active OLD worker ("reloaded but old"). Bounded by the same
-      // apply timeout; a timeout unlatches into the retry path below.
-      // Single timed path: the plugin client also reloads on its own
-      // controlling event, but both calls land in the same task and commit
-      // as one navigation, while this latch guarantees the manager
-      // contributes exactly one reload.
-      await withTimeout(
-        waitForActivation(),
-        applyTimeoutMs,
-        'Waiting for the new worker to take control',
-      );
+      // Single budget for the WHOLE apply: skip-waiting plus the
+      // activation gate share one timeout, so a slow-each/under-budget
+      // pair can never stack into 2× the advertised wait. (Invoked
+      // synchronously inside the wrapper: a throwing registrar fails fast
+      // into the retry path below instead of an unhandled rejection.)
+      const applyAll = (async () => {
+        await active.applyUpdate();
+        // Gate the reload on activation: the new worker must control this
+        // page before we navigate, or the early navigation is served by the
+        // still-active OLD worker ("reloaded but old"). A timeout unlatches
+        // into the retry path below. Single timed path: the plugin client
+        // also reloads on its own controlling event, but both calls land in
+        // the same task and commit as one navigation, while this latch
+        // guarantees the manager contributes exactly one reload.
+        await waitForActivation();
+      })();
+      await withTimeout(applyAll, applyTimeoutMs, 'Applying the update');
       try {
         sessionStorage.setItem(APPLIED_FLAG, String(Date.now()));
         const fromVersion = readVersion();

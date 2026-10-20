@@ -44,6 +44,7 @@ use lopdf::{dictionary, Stream};
 
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::PdfDocument;
 
 /// Default DPI when an image carries no valid DPI information.
@@ -251,6 +252,7 @@ impl Operation for ImagesToPdfOperation {
         let total = input.images.len() as u64;
         let page_count = input.images.len() as u32;
         let mut pdf = PdfBuild::begin(input.images.len());
+        let mut throttle = ProgressThrottle::new();
         // Drained, not borrowed: each input moves into decode, so the JPEG
         // passthrough path embeds the original bytes without cloning them.
         for (index, image) in input.images.into_iter().enumerate() {
@@ -260,13 +262,20 @@ impl Operation for ImagesToPdfOperation {
             // this iteration: peak decoded retention is one image
             // (passthrough clones are bounded JPEG bytes, not raw RGB).
             pdf.append(item, options.page_size)?;
-            let completed = 10 + ((index as u64 + 1) * 80) / total.max(1);
-            ctx.report_progress(
-                Some("processing images"),
-                completed.min(90),
-                100,
-                Some(&format!("image {} of {total}", index + 1)),
-            );
+            let done = index as u64 + 1;
+            let completed = (10 + (done * 80) / total.max(1)).min(90);
+            // Source-side throttle mirroring the glue sink rule (phase
+            // changes always pass here — one phase per loop; Δ≥1 pp or
+            // every N pages otherwise). Same shape, fewer messages;
+            // cancellation stays per item above.
+            if throttle.should_report(completed, done) {
+                ctx.report_progress(
+                    Some("processing images"),
+                    completed,
+                    100,
+                    Some(&format!("image {} of {total}", index + 1)),
+                );
+            }
         }
 
         ctx.check_cancellation()?;
@@ -569,11 +578,11 @@ fn map_image_error(bytes: &[u8], reason: &str, image_number: usize, name: &str) 
 
 fn truncate_reason(reason: &str) -> String {
     const LIMIT: usize = 300;
-    let flat: String = reason.chars().take(LIMIT + 1).collect();
-    if flat.len() > LIMIT {
-        format!("{}…", &flat[..LIMIT])
+    if reason.chars().count() > LIMIT {
+        let kept: String = reason.chars().take(LIMIT).collect();
+        format!("{kept}…")
     } else {
-        flat
+        reason.to_string()
     }
 }
 
@@ -1254,7 +1263,7 @@ mod tests {
 
     struct RecordingCtx {
         id: JobId,
-        events: std::cell::RefCell<Vec<u64>>,
+        events: std::cell::RefCell<Vec<(Option<String>, u64, u64)>>,
     }
 
     impl OperationContext for RecordingCtx {
@@ -1266,12 +1275,14 @@ mod tests {
         }
         fn report_progress(
             &self,
-            _phase: Option<&str>,
+            phase: Option<&str>,
             completed: u64,
-            _total: u64,
+            total: u64,
             _message: Option<&str>,
         ) {
-            self.events.borrow_mut().push(completed);
+            self.events
+                .borrow_mut()
+                .push((phase.map(str::to_string), completed, total));
         }
         fn is_cancelled(&self) -> bool {
             false
@@ -2286,11 +2297,57 @@ mod tests {
             .expect("succeeds");
         let events = ctx.events.borrow();
         assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
         assert!(
-            events.windows(2).all(|pair| pair[0] <= pair[1]),
-            "{events:?}"
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
         );
-        assert_eq!(*events.last().expect("events"), 100);
+        assert_eq!(*completed.last().expect("events"), 100);
+    }
+
+    #[test]
+    fn progress_is_throttled_but_monotonic_to_100() {
+        // 200 images through one run: the source-side throttle must emit
+        // strictly fewer per-image events than images, while every emitted
+        // event keeps the historical shape (phase + completed/total band)
+        // and the run still ends at exactly 100, monotonically.
+        let images: Vec<(String, Vec<u8>)> = (0..200)
+            .map(|n| (format!("img{n:03}.png"), solid_rgb_png(8, 8, [1, 2, 3])))
+            .collect();
+        let borrowed: Vec<(&str, Vec<u8>)> = images
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect();
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = ImagesToPdfOperation
+            .execute(&ctx, input_many(borrowed), opts())
+            .expect("images_to_pdf succeeds");
+        assert_eq!(out.page_count, 200);
+        let events = ctx.events.borrow();
+        // Unthrottled history: validating + preparing + 200 images +
+        // writing output + finalizing. The throttle must cut the per-image
+        // reports.
+        assert!(
+            events.len() < 200 + 4,
+            "throttle must drop redundant events: {}",
+            events.len()
+        );
+        assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
+        assert!(
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
+        );
+        assert_eq!(*completed.last().expect("events"), 100);
     }
 
     #[test]
@@ -2305,6 +2362,26 @@ mod tests {
             )
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn truncate_reason_does_not_split_multibyte_char() {
+        // 299 ASCII chars place a 2-byte `é` across byte 300: the old
+        // `&flat[..300]` byte slice panicked here.
+        let reason = format!("{}é{}", "a".repeat(299), "b".repeat(50));
+        let out = truncate_reason(&reason);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 300 + 1);
+    }
+
+    #[test]
+    fn truncate_reason_keeps_ascii_behavior() {
+        assert_eq!(
+            truncate_reason(&"x".repeat(400)),
+            format!("{}…", "x".repeat(300))
+        );
+        assert_eq!(truncate_reason("short"), "short");
+        assert_eq!(truncate_reason(&"y".repeat(300)), "y".repeat(300));
     }
 
     #[test]

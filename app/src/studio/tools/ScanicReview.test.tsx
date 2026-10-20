@@ -776,3 +776,67 @@ describe('ScanicReview overlay gating + scroll ownership', () => {
     expect(root?.className).not.toMatch('max-h-');
   });
 });
+
+describe('ScanicReview loupe source-bitmap LRU', () => {
+  class MockSourceImage {
+    static instances: MockSourceImage[] = [];
+    srcValue = '';
+    complete = false;
+    naturalWidth = 0;
+    naturalHeight = 0;
+    constructor() {
+      MockSourceImage.instances.push(this);
+    }
+    set src(v: string) {
+      this.srcValue = v;
+    }
+    get src(): string {
+      return this.srcValue;
+    }
+  }
+
+  it('caps the source-bitmap cache at 3: evicted bitmaps release (src="") and unmount releases the rest', () => {
+    const RealImage = globalThis.Image;
+    MockSourceImage.instances = [];
+    vi.stubGlobal('Image', MockSourceImage);
+    try {
+      const { rerender, unmount } = render(
+        <ScanicReview {...baseProps({ photoUrl: 'photo-1.jpg' })} />,
+      );
+      rerender(<ScanicReview {...baseProps({ photoUrl: 'photo-2.jpg' })} />);
+      rerender(<ScanicReview {...baseProps({ photoUrl: 'photo-3.jpg' })} />);
+      // At cap: 3 bitmaps, none released.
+      expect(MockSourceImage.instances).toHaveLength(3);
+      expect(MockSourceImage.instances.map((i) => i.srcValue)).toEqual([
+        'photo-1.jpg',
+        'photo-2.jpg',
+        'photo-3.jpg',
+      ]);
+      // Fourth photo evicts the oldest (photo-1) and releases its bitmap.
+      rerender(<ScanicReview {...baseProps({ photoUrl: 'photo-4.jpg' })} />);
+      expect(MockSourceImage.instances).toHaveLength(4);
+      expect(MockSourceImage.instances[0].srcValue).toBe('');
+      expect(MockSourceImage.instances.slice(1).map((i) => i.srcValue)).toEqual([
+        'photo-2.jpg',
+        'photo-3.jpg',
+        'photo-4.jpg',
+      ]);
+      // Fifth evicts the next-oldest (photo-2).
+      rerender(<ScanicReview {...baseProps({ photoUrl: 'photo-5.jpg' })} />);
+      expect(MockSourceImage.instances).toHaveLength(5);
+      expect(MockSourceImage.instances[1].srcValue).toBe('');
+      // Revisiting a cached url creates nothing (has-check).
+      const before = MockSourceImage.instances.length;
+      rerender(<ScanicReview {...baseProps({ photoUrl: 'photo-4.jpg' })} />);
+      expect(MockSourceImage.instances).toHaveLength(before);
+      // Unmount releases every retained bitmap so no decoded page outlives review.
+      unmount();
+      for (const img of MockSourceImage.instances) {
+        expect(img.srcValue).toBe('');
+      }
+    } finally {
+      globalThis.Image = RealImage;
+      vi.unstubAllGlobals();
+    }
+  });
+});

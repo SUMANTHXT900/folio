@@ -1,13 +1,28 @@
 /**
  * Shared UI primitive tests: the stale-chunk recovery path must turn an
  * undebuggable deploy-skew failure into an actionable reload prompt.
+ *
+ * DoneBanner / Spinner / ErrorBlock honesty + a11y: success banners announce
+ * via role="status" without claiming a verified save, filenames are
+ * sanitized at the last mile, spinners never render an empty status, and
+ * long engine secondary values truncate instead of blowing the card.
  */
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DropZone, ErrorBlock, Progress, isStaleChunkError } from './ui';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DoneBanner, DropZone, ErrorBlock, Progress, Spinner, isStaleChunkError } from './ui';
+
+beforeEach(() => {
+  let counter = 0;
+  URL.createObjectURL = vi.fn(() => {
+    counter += 1;
+    return `blob:ui-${counter}`;
+  }) as unknown as typeof URL.createObjectURL;
+  URL.revokeObjectURL = vi.fn();
+});
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 describe('isStaleChunkError', () => {
@@ -83,5 +98,65 @@ describe('DropZone single labelled control', () => {
     const tabbables = container.querySelectorAll('button, input, a[href], [tabindex]');
     expect(tabbables).toHaveLength(1);
     expect(container.querySelector('button')).toBeNull();
+  });
+});
+
+describe('DoneBanner honest success', () => {
+  it('announces via role="status" without claiming a verified save', () => {
+    const blob = new Blob(['a'], { type: 'application/pdf' });
+    render(<DoneBanner name="report.pdf" blob={blob} />);
+    const status = screen.getByRole('status');
+    expect(status.textContent).toMatch(/report\.pdf/);
+    expect(status.textContent).toMatch(/Download started/);
+    expect(status.textContent).not.toMatch(/save it again/i);
+  });
+
+  it('sanitizes the download attribute at the last mile', () => {
+    const blob = new Blob(['a'], { type: 'application/pdf' });
+    render(<DoneBanner name="a/b:c" blob={blob} />);
+    const anchor = screen.getByText('Save to device').closest('a');
+    expect(anchor?.getAttribute('download')).toBe('a-b-c.pdf');
+    expect(screen.getByRole('status').textContent).toMatch(/a-b-c\.pdf/);
+  });
+});
+
+describe('Spinner status announcement', () => {
+  it('exposes role="status" with the visible label', () => {
+    render(<Spinner label="Rotating…" />);
+    const status = screen.getByRole('status');
+    expect(status.textContent).toMatch(/Rotating…/);
+  });
+
+  it('keeps an sr-only name when no visible label is given', () => {
+    const { container } = render(<Spinner />);
+    const status = screen.getByRole('status');
+    expect(status.textContent).toBe('Loading');
+    expect(container.querySelector('.sr-only')).toBeTruthy();
+  });
+});
+
+describe('ErrorBlock secondary truncation', () => {
+  it('truncates long secondary values but keeps the primary and code', () => {
+    const longDetails = `source=${'d'.repeat(500)}.pdf`;
+    const error = Object.assign(new Error('Those page numbers are not valid'), {
+      code: 'INVALID_PAGE_RANGE',
+      details: longDetails,
+    });
+    render(<ErrorBlock error={error} />);
+    expect(screen.getByText('Those page numbers are not valid')).toBeTruthy();
+    expect(screen.getByText('INVALID_PAGE_RANGE')).toBeTruthy();
+    const secondary = screen.getByTitle(longDetails);
+    expect(secondary.textContent ?? '').toMatch(/…$/);
+    expect((secondary.textContent ?? '').length).toBeLessThanOrEqual(240);
+  });
+
+  it('leaves short secondary values untouched (no title)', () => {
+    const error = Object.assign(new Error('Primary line'), {
+      code: 'INTERNAL',
+      details: 'short detail',
+    });
+    const { container } = render(<ErrorBlock error={error} />);
+    expect(screen.getByText(/short detail/)).toBeTruthy();
+    expect(container.querySelector('[title]')).toBeNull();
   });
 });

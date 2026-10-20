@@ -112,6 +112,13 @@ impl ProgressSink for NoopProgressSink {
 /// Job 0–100%
 /// └── Worker mapped 20–90% via SubProgressMapper { parent_start: 20, parent_end: 90 }
 /// ```
+///
+/// Range ends are parent percentages in `0.0..=100.0`. They are validated
+/// on [`SubProgressMapper::map`]: `NaN` ends saturate to `0.0`, infinite or
+/// out-of-range ends clamp to `0.0..=100.0`, inverted ranges (`start > end`)
+/// are ordered (swapped) so mapping stays monotonic, and the mapped output
+/// itself clamps to `0.0..=100.0` — mapping can never yield `NaN` or escape
+/// the parent percentage domain.
 #[derive(Debug, Clone, Copy)]
 pub struct SubProgressMapper {
     parent_start: f64,
@@ -128,14 +135,41 @@ impl SubProgressMapper {
         }
     }
 
-    /// Maps child progress to a parent percentage.
+    /// Sanitizes one range end: `NaN` saturates to `0.0`, anything else
+    /// clamps to the parent percentage domain `0.0..=100.0`.
+    fn sanitize_end(value: f64) -> f64 {
+        if value.is_nan() {
+            0.0
+        } else {
+            value.clamp(0.0, 100.0)
+        }
+    }
+
+    /// Returns the validated `(start, end)` pair with `start <= end`.
+    fn ordered_range(&self) -> (f64, f64) {
+        let (mut start, mut end) = (
+            Self::sanitize_end(self.parent_start),
+            Self::sanitize_end(self.parent_end),
+        );
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        (start, end)
+    }
+
+    /// Maps child progress to a parent percentage in `0.0..=100.0`.
+    ///
+    /// Indeterminate child progress (`total == 0`) reports the validated
+    /// range start; degenerate ranges (equal ends after validation) report
+    /// that single point for any input.
     #[must_use]
     pub fn map(&self, completed: u64, total: u64) -> f64 {
+        let (start, end) = self.ordered_range();
         if total == 0 {
-            return self.parent_start;
+            return start;
         }
         let ratio = (completed as f64 / total as f64).clamp(0.0, 1.0);
-        self.parent_start + ratio * (self.parent_end - self.parent_start)
+        (start + ratio * (end - start)).clamp(0.0, 100.0)
     }
 }
 
@@ -194,5 +228,67 @@ mod tests {
         assert!((mapper.map(0, 10) - 20.0).abs() < f64::EPSILON);
         assert!((mapper.map(5, 10) - 55.0).abs() < f64::EPSILON);
         assert!((mapper.map(10, 10) - 90.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn mapper_saturates_nan_ends_to_finite_bounded_output() {
+        for mapper in [
+            SubProgressMapper::new(f64::NAN, 90.0),
+            SubProgressMapper::new(20.0, f64::NAN),
+            SubProgressMapper::new(f64::NAN, f64::NAN),
+        ] {
+            for (completed, total) in [(0, 10), (5, 10), (10, 10), (0, 0)] {
+                let value = mapper.map(completed, total);
+                assert!(
+                    value.is_finite(),
+                    "NaN range end must saturate to finite output, got {value}"
+                );
+                assert!(
+                    (0.0..=100.0).contains(&value),
+                    "mapped output {value} escapes 0..=100"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mapper_orders_inverted_ranges_monotonically() {
+        let mapper = SubProgressMapper::new(90.0, 20.0);
+        let (lo, mid, hi) = (mapper.map(0, 10), mapper.map(5, 10), mapper.map(10, 10));
+        assert!(
+            lo <= mid && mid <= hi,
+            "inverted range must map monotonically, got {lo}, {mid}, {hi}"
+        );
+        assert!(
+            (lo - 20.0).abs() < 1e-9,
+            "inverted start saturates, got {lo}"
+        );
+        assert!(
+            (mid - 55.0).abs() < 1e-9,
+            "inverted middle saturates, got {mid}"
+        );
+        assert!((hi - 90.0).abs() < 1e-9, "inverted end saturates, got {hi}");
+    }
+
+    #[test]
+    fn mapper_clamps_out_of_range_ends_and_output() {
+        let clamped = SubProgressMapper::new(-50.0, 500.0);
+        assert!(
+            (clamped.map(5, 10) - 50.0).abs() < 1e-9,
+            "ends must clamp to 0..=100, got {}",
+            clamped.map(5, 10)
+        );
+        let infinite = SubProgressMapper::new(f64::NEG_INFINITY, f64::INFINITY);
+        assert!(
+            (infinite.map(5, 10) - 50.0).abs() < 1e-9,
+            "infinite ends must saturate, got {}",
+            infinite.map(5, 10)
+        );
+        let normal = SubProgressMapper::new(20.0, 90.0);
+        assert_eq!(
+            normal.map(u64::MAX, 10),
+            90.0,
+            "overflowing child progress must saturate at the range end"
+        );
     }
 }

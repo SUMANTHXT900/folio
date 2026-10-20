@@ -223,7 +223,10 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     this.destroyWorker(message);
     for (const [jobId, record] of this.jobs) {
       if (!record.settled) {
-        this.sealFailed(record, jobId, 'IO_ERROR', message);
+        // Same code as every other dead-worker seal (INTERNAL): the
+        // `details` origin tag — not the code — distinguishes a worker
+        // error-event crash from an orphan fatal.
+        this.sealFailed(record, jobId, 'INTERNAL', message, 'origin=worker-error-event');
       }
     }
   }
@@ -234,13 +237,53 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
    * for an already-settled/unknown job. The worker instance is poisoned,
    * so it is destroyed (which also rejects the pending ready waiter — no
    * 60s hang) and every unsettled job fails fast with INTERNAL. Pipelines
-   * still awaiting readiness hit the settled guard in their catch.
+   * still awaiting readiness hit the settled guard in their catch. The
+   * `details` origin tag pairs with the crash path: one code (INTERNAL)
+   * for every dead worker, origin in details.
    */
   private handleOrphanFatal(message: string): void {
     this.destroyWorker(message);
     for (const [jobId, record] of this.jobs) {
       if (!record.settled) {
-        this.sealFailed(record, jobId, 'INTERNAL', message);
+        this.sealFailed(record, jobId, 'INTERNAL', message, 'origin=orphan-fatal');
+      }
+    }
+  }
+
+  /**
+   * Worker spoke an unsupported protocol version: the message cannot be
+   * trusted, but when it names a live unsettled job that job's `done`
+   * must settle (never hang). A worker that mismatches once will mismatch
+   * every later message too, so it is treated as poisoned: destroyed, and
+   * every unsettled job fails fast with INTERNAL carrying the mismatch
+   * detail (same poisoned-worker discipline as orphan fatals). Ghost
+   * messages (no live job to blame) are still ignored — they must not
+   * kill a healthy worker.
+   */
+  private handleProtocolMismatch(msg: WorkerToMain): void {
+    const framed =
+      msg !== null && typeof msg === 'object' ? (msg as unknown as Record<string, unknown>) : null;
+    const clientJobId = framed?.['clientJobId'];
+    if (typeof clientJobId !== 'string') {
+      return; // Unroutable ghost: ignore, never throw.
+    }
+    const record = this.jobs.get(clientJobId);
+    if (record === undefined || record.settled) {
+      return; // Nothing live to settle: ignore.
+    }
+    const detail =
+      `worker-protocol-mismatch: received protocol ${String(framed?.['protocol'])}` +
+      `, expected ${WORKER_PROTOCOL_VERSION}`;
+    this.destroyWorker(detail);
+    for (const [jobId, other] of this.jobs) {
+      if (!other.settled) {
+        this.sealFailed(
+          other,
+          jobId,
+          'INTERNAL',
+          'worker spoke an unsupported protocol version',
+          detail,
+        );
       }
     }
   }
@@ -346,7 +389,11 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
 
   private route(msg: WorkerToMain): void {
     if (msg === null || typeof msg !== 'object' || msg.protocol !== WORKER_PROTOCOL_VERSION) {
-      return; // Malformed framing: ignore, never throw (adapter bug, not engine data).
+      // Version mismatch (stale worker code, or a test double speaking the
+      // wrong framing): the message is unroutable, but an attributable
+      // in-flight job must never hang `done` forever — settle it fast.
+      this.handleProtocolMismatch(msg);
+      return;
     }
     if (msg.kind === 'ready') {
       return; // Consumed by the one-shot readiness waiter.
@@ -546,6 +593,7 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
     jobId: string,
     code: 'IO_ERROR' | 'INTERNAL',
     message: string,
+    details?: string,
   ): void {
     this.emit(record, {
       kind: 'lifecycle',
@@ -562,7 +610,7 @@ export class WasmWorkerEngineAdapter implements EngineAdapter {
       completedAt: new Date().toISOString(),
       engineDurationMs: 0,
       progress: lastProgress(record),
-      error: { code, message },
+      error: details === undefined ? { code, message } : { code, message, details },
       events: [...record.events],
       simulated: false,
     });

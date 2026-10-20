@@ -73,6 +73,17 @@ export function folioChannel(hostname: string): FolioChannel {
   return 'dev-preview';
 }
 
+/**
+ * Version-tree display version: the `latest` entry carries a `· dev` suffix
+ * (it tracks package.json on a dev branch). Production must never render
+ * that leak — strip it there, keep it everywhere else (parity with
+ * DevChannelCard, which renders only off-production).
+ */
+export function versionTreeVersion(version: string, channel: FolioChannel): string {
+  if (channel === 'production') return version.replace(/\s*·\s*dev\s*$/, '');
+  return version;
+}
+
 const CHANNEL_BADGE: Record<Exclude<FolioChannel, 'production'>, string> = {
   'dev-preview': 'Dev preview',
   local: 'Local build',
@@ -425,6 +436,7 @@ function UpdateCard() {
 }
 
 export default function About() {
+  const channel = folioChannel(typeof window !== 'undefined' ? window.location.hostname : '');
   return (
     <div className="py-2">
       <ToolHeading
@@ -571,7 +583,7 @@ export default function About() {
                   Read the code that handles your files.
                 </p>
               </div>
-              <span className="w-9 h-9 rounded-full border border-paper-200 dark:border-ink-700 flex items-center justify-center text-ink-400 group-hover:text-brass-500 group-hover:border-brass-400/40 transition-colors shrink-0">
+              <span className="w-9 h-9 rounded-full border border-paper-200 dark:border-ink-700 flex items-center justify-center text-ink-400 dark:text-ink-300 group-hover:text-brass-500 group-hover:border-brass-400/40 transition-colors shrink-0">
                 <svg
                   width="16"
                   height="16"
@@ -643,7 +655,7 @@ export default function About() {
                 >
                   <div className="flex items-center gap-2.5 flex-wrap mb-2.5">
                     <span className="font-mono text-sm font-semibold text-brass-600 dark:text-brass-300 tabular-nums">
-                      {e.version}
+                      {versionTreeVersion(e.version, channel)}
                     </span>
                     <span
                       className={

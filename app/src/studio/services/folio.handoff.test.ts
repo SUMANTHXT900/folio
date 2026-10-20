@@ -86,8 +86,11 @@ import {
   closeStudioDoc,
   consumePendingTransfer,
   getStudioBytes,
+  hasStudioDoc,
   peekPendingTransfer,
+  releaseStagedBytes,
   setPendingTransfer,
+  stageStudioBytes,
   type PendingTransfer,
   type StudioOutput,
 } from './folio';
@@ -135,8 +138,11 @@ describe('adoptOutputsAsDocs', () => {
     expect(doc.sizeBytes).toBe(out.bytes.length);
     expect(doc.pageCount).toBe(7);
     expect(doc.id.startsWith('studio-')).toBe(true);
-    // Zero copies: the store holds the exact same view the output carried.
-    expect(getStudioBytes(doc.id)).toBe(out.bytes);
+    // Readers get a defensive COPY (never the live store view): equal
+    // bytes, distinct identity — so a retained reader cannot corrupt the
+    // store or a sibling view. Zero-copy still holds at intake (below).
+    expect(getStudioBytes(doc.id)).toEqual(out.bytes);
+    expect(getStudioBytes(doc.id)).not.toBe(out.bytes);
     // The intake saw the same view too — the defensive copy for PDF.js
     // lives inside the real render engine (L-2), not at this layer.
     expect(handoffMock.loads).toHaveLength(1);
@@ -151,7 +157,8 @@ describe('adoptOutputsAsDocs', () => {
     const ids = docs.map((d) => d.id);
     expect(new Set(ids).size).toBe(3);
     for (let i = 0; i < outs.length; i += 1) {
-      expect(getStudioBytes(ids[i])).toBe(outs[i].bytes);
+      expect(getStudioBytes(ids[i])).toEqual(outs[i].bytes);
+      expect(getStudioBytes(ids[i])).not.toBe(outs[i].bytes);
     }
     expect(handoffMock.loads.map((l) => l.name)).toEqual([
       'part-a.pdf',
@@ -202,6 +209,23 @@ describe('adoptOutputsAsDocs', () => {
     expect(error).toMatchObject({ code: 'CANCELLED' });
     expect(__studioBinariesForTests.size()).toBe(0);
     expect(handoffMock.closed).toHaveLength(1);
+  });
+
+  it('attributes the producer operation on adopt/intake failures', async () => {
+    const bad: StudioOutput = {
+      name: 'bad.pdf',
+      bytes: new Uint8Array([1, 2, 3]),
+      byteLength: 3,
+      pageCount: null,
+    };
+    const error = await adoptOutputsAsDocs(
+      [output('ok.pdf', 50), bad],
+      'src.pdf',
+      'pdf.merge',
+    ).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'INVALID_DOCUMENT', operation: 'pdf.merge' });
+    const empty = await adoptOutputsAsDocs([], 'r.pdf', 'pdf.split').catch((e: unknown) => e);
+    expect(empty).toMatchObject({ code: 'INVALID_INPUT', operation: 'pdf.split' });
   });
 
   it('closing an adopted doc frees its bytes (P5-1 hygiene)', async () => {
@@ -306,5 +330,92 @@ describe('pending transfer', () => {
     expect(peekPendingTransfer()).toBeNull();
     handoffMock.loads.length = 0;
     handoffMock.closed.length = 0;
+  });
+
+  it('overwrite closes the orphaned prior transfer docs (prior slot has no owner)', async () => {
+    const first = await adoptOutputsAsDocs([output('first.pdf', 32)], 'a.pdf');
+    const second = await adoptOutputsAsDocs([output('second.pdf', 33)], 'b.pdf');
+    setPendingTransfer(first, 'a.pdf', 'merge');
+    expect(__studioBinariesForTests.size()).toBe(2);
+    setPendingTransfer(second, 'b.pdf', 'split');
+    // The orphan close is fire-and-forget: wait until the first doc's
+    // bytes are gone, while the new slot stays live.
+    await vi.waitFor(() => {
+      expect(getStudioBytes(first[0].id)).toBeUndefined();
+    });
+    expect(hasStudioDoc(second[0].id)).toBe(true);
+    expect(__studioBinariesForTests.size()).toBe(1);
+    expect(handoffMock.closed).toContain('renderdoc-mock-1');
+    await closeStudioDoc(second[0].id);
+    // Flush the orphan's trailing continuations so no stray close bleeds
+    // into later tests' render-close accounting.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it('overwrite keeps docs re-staged in the new transfer (no double-close)', async () => {
+    const docs = await adoptOutputsAsDocs([output('a.pdf', 34)], 'a.pdf');
+    setPendingTransfer(docs, 'a.pdf', 'merge');
+    setPendingTransfer(docs, 'a.pdf', 'split');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hasStudioDoc(docs[0].id)).toBe(true);
+    expect(peekPendingTransfer()?.producedBy).toBe('split');
+    await closeStudioDoc(docs[0].id);
+  });
+});
+
+describe('staged bytes lifecycle', () => {
+  it('closeStudioDoc clears the staged transfer flag (releaseStagedBytes parity)', async () => {
+    const staged = stageStudioBytes('img.png', pdfBytes(40));
+    expect(__studioBinariesForTests.has(staged)).toBe(true);
+    expect(__studioBinariesForTests.isStaged(staged)).toBe(true);
+    await closeStudioDoc(staged);
+    expect(__studioBinariesForTests.has(staged)).toBe(false);
+    expect(__studioBinariesForTests.isStaged(staged)).toBe(false);
+  });
+
+  it('releaseStagedBytes still releases staged ids', () => {
+    const staged = stageStudioBytes('img2.png', pdfBytes(41));
+    releaseStagedBytes(staged);
+    expect(__studioBinariesForTests.has(staged)).toBe(false);
+    expect(__studioBinariesForTests.isStaged(staged)).toBe(false);
+  });
+});
+
+describe('handoff clear-without-take byte accounting', () => {
+  it('abandoned transfer keeps caller-owned bytes until eventual close frees them', async () => {
+    const docs = await adoptOutputsAsDocs([output('abandoned.pdf', 60)], 'a.pdf');
+    const id = docs[0].id;
+    const byteLen = docs[0].sizeBytes;
+    expect(__studioBinariesForTests.size()).toBe(1);
+    setPendingTransfer(docs, 'a.pdf', 'merge');
+    // Drop the slot without taking: ownership stays with the caller, so
+    // the clear itself must free nothing.
+    clearPendingTransfer();
+    expect(peekPendingTransfer()).toBeNull();
+    expect(consumePendingTransfer()).toBeNull();
+    expect(__studioBinariesForTests.size()).toBe(1);
+    expect(hasStudioDoc(id)).toBe(true);
+    expect(getStudioBytes(id)).toBeDefined();
+    expect(getStudioBytes(id)?.length).toBe(byteLen);
+    // Eventual close frees the abandoned bytes.
+    await closeStudioDoc(id);
+    expect(__studioBinariesForTests.size()).toBe(0);
+    expect(hasStudioDoc(id)).toBe(false);
+    expect(getStudioBytes(id)).toBeUndefined();
+  });
+
+  it('staged-then-abandoned bytes free on eventual close', async () => {
+    const bytes = pdfBytes(61);
+    const staged = stageStudioBytes('staged.png', bytes);
+    expect(__studioBinariesForTests.size()).toBe(1);
+    expect(__studioBinariesForTests.isStaged(staged)).toBe(true);
+    expect(getStudioBytes(staged)?.length).toBe(bytes.length);
+    // Abandoned (never released, never transferred): the eventual close
+    // frees the bytes and clears the transfer flag.
+    await closeStudioDoc(staged);
+    expect(__studioBinariesForTests.size()).toBe(0);
+    expect(hasStudioDoc(staged)).toBe(false);
+    expect(getStudioBytes(staged)).toBeUndefined();
+    expect(__studioBinariesForTests.isStaged(staged)).toBe(false);
   });
 });

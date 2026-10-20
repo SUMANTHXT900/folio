@@ -195,3 +195,32 @@ describe('getPageDimensions cache', () => {
     expect(state.getPageCalls).toEqual([1, 1]);
   });
 });
+
+describe('loadDocument input validation', () => {
+  it('rejects non-buffer input with RENDER_INVALID_INPUT (never a raw TypeError)', async () => {
+    const engine = new PdfJsRenderEngine();
+    for (const bad of ['not-a-buffer', 42, null, undefined, {}, [1, 2, 3]]) {
+      const failure = await engine
+        .loadDocument({ data: bad as unknown as Uint8Array })
+        .promise.catch((error) => error);
+      expect(failure).toMatchObject({ name: 'RenderError', code: 'RENDER_INVALID_INPUT' });
+      expect(failure).not.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it('rejects empty buffers with RENDER_INVALID_INPUT', async () => {
+    const engine = new PdfJsRenderEngine();
+    await expect(engine.loadDocument({ data: new Uint8Array(0) }).promise).rejects.toMatchObject({
+      code: 'RENDER_INVALID_INPUT',
+    });
+    await expect(engine.loadDocument({ data: new ArrayBuffer(0) }).promise).rejects.toMatchObject({
+      code: 'RENDER_INVALID_INPUT',
+    });
+  });
+
+  it('accepts a non-empty ArrayBuffer', async () => {
+    const engine = new PdfJsRenderEngine();
+    const loaded = await engine.loadDocument({ data: new Uint8Array([1, 2, 3]).buffer }).promise;
+    expect(loaded.document.pageCount).toBe(3);
+  });
+});

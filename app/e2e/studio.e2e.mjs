@@ -21,6 +21,7 @@
  *   2. Terminal B: node e2e/studio.e2e.mjs [--dev http://localhost:5199]
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
@@ -35,7 +36,18 @@ function flag(name, fallback) {
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 }
 const DEV_URL = flag('--dev', 'http://localhost:5199');
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME =
+  process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+// Security: `--no-sandbox` disables the Chrome sandbox — a compromised
+// renderer then runs with the user's full privileges instead of contained.
+// It is only justified in throwaway CI containers running as root, where
+// the sandbox cannot initialize. Gate: pass it only when CI needs it
+// (`FOLIO_CHROME_NO_SANDBOX=1`, or the standard `CI=true`); local runs
+// keep the sandbox, which works on dev machines. Never enable it locally
+// for convenience.
+const NO_SANDBOX_ARGS =
+  process.env.FOLIO_CHROME_NO_SANDBOX === '1' || process.env.CI === 'true' ? ['--no-sandbox'] : [];
 
 const SMALL_NAME = '1.2.pdf';
 const RICH_NAME = '2. EWTL-Uniform Plane Wave.pdf';
@@ -107,59 +119,119 @@ function skip(name, reason) {
 }
 
 /**
- * Installs the download-capture patch: anchors with a `download`
- * attribute record `{href, name}` into `window.__downloads` and do NOT
- * trigger a real browser download. This keeps every test artifact
- * in-page (bytes, magic, size asserted via fetch) so no OS download
- * ever fires — external download managers (IDM) can never intercept,
- * stall, or pop up during a run.
+ * Real-download capture (D48 + worktree CSP): completion anchors perform
+ * REAL browser downloads into a per-run temp dir — no in-page fetch of the
+ * object URL. Two stacked reasons: (1) the worktree CSP (`connect-src
+ * 'self'`, no `blob:` — app/index.html + public/_headers) rejects
+ * `fetch(blob:)` page-wide, so the old fetch-the-href probe dies with
+ * "Failed to fetch" on every download; (2) a real download exercises the
+ * true user path (anchor → file on disk, exact suggested name) instead of
+ * a synthetic read. Headless runs `--disable-extensions`, so no external
+ * download manager can intercept, stall, or pop up during a run.
  */
+const RUN_DL_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'folio-e2e-dl-'));
+
 function installDownloadCapture(page) {
-  return page.evaluateOnNewDocument(() => {
-    localStorage.clear();
-    const origClick = HTMLAnchorElement.prototype.click;
-    HTMLAnchorElement.prototype.click = function () {
-      if (this.hasAttribute('download') && this.href) {
-        (window.__downloads = window.__downloads || []).push({
-          href: this.href,
-          name: this.getAttribute('download') || 'download',
-        });
-        return;
-      }
-      return origClick.call(this);
-    };
-  });
+  return Promise.all([
+    page.evaluateOnNewDocument(() => {
+      localStorage.clear();
+    }),
+    page
+      .createCDPSession()
+      .then((cdp) =>
+        cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: RUN_DL_DIR }),
+      ),
+  ]);
 }
 
-const downloadCursors = new WeakMap();
+const consumedDownloads = new Set();
 
-/** Waits for the next captured download and probes it fully in-page. */
+/**
+ * Waits for the next real download file to land complete on disk and
+ * probes it ({name, size, magic}). Files are consumed once by basename, so
+ * sequential downloads across pages/browsers never double-count. A file
+ * must be size-stable across two 120 ms polls (guards straggler writes;
+ * Chrome normally renames out of .crdownload only on completion).
+ */
 async function waitForCapturedDownload(page, timeoutMs) {
+  void page;
   const start = Date.now();
-  const cursor = downloadCursors.get(page) ?? 0;
+  const seen = new Map();
   for (;;) {
-    const probe = await page.evaluate(async (index) => {
-      const entries = window.__downloads || [];
-      if (entries.length <= index) return null;
-      const entry = entries[index];
-      const res = await fetch(entry.href);
-      const buf = new Uint8Array(await res.arrayBuffer());
-      return {
-        name: entry.name,
-        size: buf.length,
-        magic: String.fromCharCode(...buf.slice(0, 5)),
-      };
-    }, cursor);
-    if (probe !== null) {
-      downloadCursors.set(page, cursor + 1);
-      return probe;
+    let files = [];
+    try {
+      files = fs.readdirSync(RUN_DL_DIR);
+    } catch {
+      files = [];
+    }
+    for (const f of files) {
+      if (f.endsWith('.crdownload') || f.endsWith('.tmp') || consumedDownloads.has(f)) continue;
+      const full = path.join(RUN_DL_DIR, f);
+      let size = -1;
+      try {
+        size = fs.statSync(full).size;
+      } catch {
+        continue;
+      }
+      if (seen.get(f) === size) {
+        consumedDownloads.add(f);
+        const buf = fs.readFileSync(full);
+        return {
+          name: f,
+          size: buf.length,
+          magic: String.fromCharCode(...buf.subarray(0, 5)),
+        };
+      }
+      seen.set(f, size);
     }
     if (Date.now() - start > timeoutMs) {
-      console.log('[download-capture] timed out with no captured download');
+      console.log('[download-capture] timed out with no downloaded file');
       return null;
     }
     await new Promise((r) => setTimeout(r, 120));
   }
+}
+
+// D48 ContinueCard fallout: every tool's completion now lands on the choose
+// branch ("Done — what's next?") with "Use in another tool" / "Download"
+// toggles — the download anchor only renders inside the Download branch.
+// L-16: wait for the card's toggle group, open its exact Download toggle
+// (idempotent — an already-open branch is never re-toggled), wait for the
+// branch group, then the section's existing anchor wait resolves
+// immediately.
+async function openDownloadBranch(page, timeoutMs = 120000) {
+  await waitTotal(
+    page,
+    () => {
+      try {
+        return document.querySelector('[aria-label="Next step"]') !== null;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: timeoutMs },
+  );
+  await page.evaluate(() => {
+    try {
+      const toggle = [...document.querySelectorAll('button')].find(
+        (b) => (b.textContent ?? '').trim() === 'Download',
+      );
+      if (toggle && toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
+    } catch {
+      /* noop */
+    }
+  });
+  await waitTotal(
+    page,
+    () => {
+      try {
+        return document.querySelector('[aria-label="Download"]') !== null;
+      } catch {
+        return false;
+      }
+    },
+    { timeout: 30000 },
+  );
 }
 
 async function newPage(browser) {
@@ -207,7 +279,32 @@ async function bodyText(page) {
   return page.evaluate(() => document.body.innerText);
 }
 
-// ---- Scanner helpers (every waitForFunction predicate is total: try/catch, never
+// L-11 total-predicate choke point: EVERY in-page wait predicate in this
+// suite routes through waitTotal(). Puppeteer serializes the predicate into
+// an in-page poller where a throw kills the loop silently (full-timeout
+// hang, no cause). total() re-wraps the predicate source so ANY exception
+// (a null find dereferenced, a renamed hook, a phase-timing gap) resolves
+// the poll tick to false instead of murdering the poller — the wait then
+// either trips honestly or times out on a still-false condition, never on
+// a dead loop. Predicates stay self-contained (params + DOM only — closures
+// never survived serialization anyway), so source-level rewrapping is
+// behavior-preserving; options/args pass through untouched.
+function total(predicate) {
+  const src = Function.prototype.toString.call(predicate);
+  // eslint-disable-next-line no-new-func
+  const factory = new Function(
+    'return async (...args) => { try { return await (' +
+      src +
+      ')(...args); } catch { return false; } };',
+  );
+  return factory();
+}
+
+function waitTotal(page, predicate, options, ...args) {
+  return page.waitForFunction(total(predicate), options, ...args);
+}
+
+// ---- Scanner helpers (every wait goes through waitTotal: total predicates,
 // dereferences a possibly-null query result) ----
 function writeFakeY4M(filePath, width = 640, height = 480, frames = 12) {
   const header = `YUV4MPEG2 W${width} H${height} F30:1 Ip A1:1 C420\n`;
@@ -252,7 +349,8 @@ async function scanOpen(page) {
       /* noop */
     }
   });
-  await page.waitForFunction(
+  await waitTotal(
+    page,
     () => {
       try {
         return document.querySelector('[data-scanner-root]') !== null;
@@ -267,7 +365,8 @@ async function scanOpen(page) {
   // without this wait the opened-evaluate sees shutter:null and the first
   // capture click no-ops, which reads as a dead scanner (E2E-only timing;
   // the app itself goes live ~1s later).
-  await page.waitForFunction(
+  await waitTotal(
+    page,
     () => {
       try {
         return document.querySelector('[data-scan-capture]') !== null;
@@ -280,7 +379,8 @@ async function scanOpen(page) {
 }
 
 async function scanCaptureOnce(page) {
-  await page.waitForFunction(
+  await waitTotal(
+    page,
     () => {
       try {
         return document.querySelector('[data-scan-capture]') !== null;
@@ -300,7 +400,8 @@ async function scanCaptureOnce(page) {
 }
 
 async function waitForQueue(page, count, timeoutMs = 30000) {
-  await page.waitForFunction(
+  await waitTotal(
+    page,
     (expected) => {
       try {
         const q = document.querySelector('[data-scan-queue]');
@@ -317,7 +418,8 @@ async function waitForQueue(page, count, timeoutMs = 30000) {
 }
 
 async function waitForResultImg(page, timeoutMs = 30000) {
-  await page.waitForFunction(
+  await waitTotal(
+    page,
     () => {
       try {
         const img = document.querySelector('[data-crop-result-img]');
@@ -331,13 +433,14 @@ async function waitForResultImg(page, timeoutMs = 30000) {
   );
 }
 
-async function waitForStripThumbs(page, count, timeoutMs = 30000) {
-  await page.waitForFunction(
+async function waitForStripCount(page, count, timeoutMs = 30000) {
+  await waitTotal(
+    page,
     (expected) => {
       try {
-        const s = document.querySelector('[data-scan-strip]');
-        if (!s) return false;
-        return s.querySelectorAll('button').length >= expected;
+        const cta = document.querySelector('[data-scan-strip] [data-review-cta]');
+        if (!cta) return false;
+        return (cta.textContent ?? '').trim() === `View ${expected} pages`;
       } catch {
         return false;
       }
@@ -347,30 +450,27 @@ async function waitForStripThumbs(page, count, timeoutMs = 30000) {
   );
 }
 
-// Queue-only camera idle read: strip count + no preparing overlay + no
-// per-thumb `…` detecting badge (the badge rendered only when an entry's
-// status was 'detecting'; queue-only entries sit 'queued') + idle finder
-// text. Single evaluate = the L-12 measure step (callers dispatch, then
-// waitForFunction the strip post-condition, then call this).
+// Queue-only camera idle read: strip CTA text + gallery count badge + no
+// preparing overlay + quiet pill. D52: the strip slot holds ONE slim CTA
+// (`View N pages`), never per-capture thumbs; the finder pill renders ONLY
+// when actionable (quiet Manual idle shows NO pill — the only honest
+// camera-phase pill text is the 900ms captured flash after a tap).
+// Single evaluate = the L-12 measure step (callers dispatch, then
+// waitTotal the strip post-condition, then call this).
 async function readCameraIdle(page) {
   return page.evaluate(() => {
     try {
       const preparing = document.querySelector('[data-review-preparing]');
       const pill = document.querySelector('[data-finder-status]');
       const text = pill?.textContent?.trim() ?? '';
-      const strip = document.querySelector('[data-scan-strip]');
-      const thumbs = strip === null ? -1 : strip.querySelectorAll('button').length;
-      const badge =
-        strip === null
-          ? false
-          : [...strip.querySelectorAll('button')].some((b) => (b.textContent ?? '').includes('…'));
+      const cta = document.querySelector('[data-scan-strip] [data-review-cta]');
+      const galleryCount = document.querySelector('[data-gallery-count]');
       return {
-        stripThumbs: thumbs,
+        stripCta: cta?.textContent?.trim() ?? null,
+        galleryCount: galleryCount?.textContent?.trim() ?? null,
         noPreparing: preparing === null,
-        noDetectingBadge: badge === false,
-        finderText: text.slice(0, 80),
-        idle: /Point at the page|Starting camera/i.test(text),
-        notScanning: !/hold steady|scanning/i.test(text),
+        pillQuiet: pill === null || /captured/i.test(text),
+        neverScanning: !/hold steady|scanning/i.test(text),
       };
     } catch {
       return null;
@@ -385,7 +485,8 @@ async function readCameraIdle(page) {
 // hold-steady wait this flow replaces).
 async function waitForPreparingGone(page, timeoutMs = 90000) {
   try {
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => {
         try {
           return document.querySelector('[data-review-preparing]') === null;
@@ -431,7 +532,8 @@ async function readPreparingDetail(page) {
 // itself is asserted (present/enabled/label) without a second navigation.
 async function clickCTAAndAwaitReview(page, expectedCount) {
   try {
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => {
         try {
           return document.querySelector('[data-review-cta]') !== null;
@@ -452,7 +554,8 @@ async function clickCTAAndAwaitReview(page, expectedCount) {
     }
   });
   try {
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       (expected) => {
         try {
           if (document.querySelector('[data-review-preparing]') !== null) return true;
@@ -520,7 +623,8 @@ async function exerciseScanicHandles(page, handle = 'tr', key = 'ArrowRight') {
   );
   let settled = false;
   try {
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       (h, bx, by) => {
         try {
           const el = document.querySelector(`[data-crop-handle="${h}"]`);
@@ -565,7 +669,7 @@ async function main() {
     executablePath: CHROME,
     headless: 'shell',
     protocolTimeout: 600000,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--mute-audio', '--disable-extensions'],
+    args: [...NO_SANDBOX_ARGS, '--disable-dev-shm-usage', '--mute-audio', '--disable-extensions'],
   });
 
   // ---- Home: tool cards for all 7 tools ----
@@ -594,13 +698,13 @@ async function main() {
   {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'about');
-    await page.waitForFunction(() => document.body.innerText.includes('App updates'), {
+    await waitTotal(page, () => document.body.innerText.includes('App updates'), {
       timeout: 30000,
     });
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Update')?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Preview build'), {
+    await waitTotal(page, () => document.body.innerText.includes('Preview build'), {
       timeout: 30000,
     });
     const updateCard = await page.evaluate(() => {
@@ -659,7 +763,8 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'merge');
     await upload(page, 'input[type="file"]', [SMALL_22, RICH_80]);
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => document.body.innerText.includes('2 files selected — ready to merge'),
       {
         timeout: 60000,
@@ -671,16 +776,19 @@ async function main() {
       /2 files selected — ready to merge/.test(count),
       count.split('\n')[0],
     );
-    // Start merge; the naming card's Download anchor is captured in-page (no OS download).
+    // Start merge; the completion card's Download anchor performs a real
+    // download into the run dir (asserted from disk below).
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent?.startsWith('Merge '))
         ?.click();
     });
-    await page.waitForFunction(
-      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
-      { timeout: 300000 },
-    );
+    // D48 ContinueCard: the run lands on the choose branch — open its
+    // Download branch so the anchor wait below resolves.
+    await openDownloadBranch(page, 300000);
+    await waitTotal(page, () => document.querySelector('a[aria-label="Download PDF"]') !== null, {
+      timeout: 300000,
+    });
     await page.evaluate(() => {
       document.querySelector('a[aria-label="Download PDF"]')?.click();
     });
@@ -700,7 +808,7 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'split');
     await upload(page, 'input[type="file"]', [SMALL_22]);
-    await page.waitForFunction(() => document.body.innerText.match(/[1-9][0-9]*\/[0-9]+ kept/), {
+    await waitTotal(page, () => document.body.innerText.match(/[1-9][0-9]*\/[0-9]+ kept/), {
       timeout: 300000,
     });
     const imgs = await page.evaluate(() => document.querySelectorAll('img').length);
@@ -714,7 +822,7 @@ async function main() {
     });
     let splitPreviewShown = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, {
+      await waitTotal(page, () => document.querySelector('[role="dialog"]') !== null, {
         timeout: 10000,
       });
       splitPreviewShown = true;
@@ -764,7 +872,7 @@ async function main() {
     });
     let splitPreviewClosed = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null, {
+      await waitTotal(page, () => document.querySelector('[role="dialog"]') === null, {
         timeout: 10000,
       });
       splitPreviewClosed = true;
@@ -787,8 +895,10 @@ async function main() {
         .find((b) => b.textContent?.startsWith('Create PDF'))
         ?.click();
     });
-    // Pick-mode shows a DoneBanner (no auto-download): click its save link.
-    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+    // D48 ContinueCard: "Create PDF" lands on the choose branch — open its
+    // Download branch so the save-link wait below resolves.
+    await openDownloadBranch(page);
+    await waitTotal(page, () => document.querySelector('a[download]') !== null, {
       timeout: 300000,
     });
     await page.evaluate(() => {
@@ -813,7 +923,7 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'split');
     await upload(page, 'input[type="file"]', [SMALL_22]);
-    await page.waitForFunction(() => document.body.innerText.match(/[1-9][0-9]*\/[0-9]+ kept/), {
+    await waitTotal(page, () => document.body.innerText.match(/[1-9][0-9]*\/[0-9]+ kept/), {
       timeout: 300000,
     });
     await page.evaluate(() => {
@@ -825,10 +935,9 @@ async function main() {
         .find((b) => b.textContent === 'Extract pages')
         ?.click();
     });
-    await page.waitForFunction(
-      () => /Enter at least one page or range/i.test(document.body.innerText),
-      { timeout: 60000 },
-    );
+    await waitTotal(page, () => /Enter at least one page or range/i.test(document.body.innerText), {
+      timeout: 60000,
+    });
     const text = await bodyText(page);
     check('split shows structured range error', /Enter at least one page or range/.test(text));
     if (consoleErrors.length > 0)
@@ -841,13 +950,16 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'rearrange');
     await upload(page, 'input[type="file"]', [SMALL_22]);
-    await page.waitForFunction(() => document.body.innerText.includes('Page 2'), {
+    await waitTotal(page, () => document.body.innerText.includes('Page 2'), {
       timeout: 300000,
     });
-    // Move page 1 down via its ↓ button (first row's second arrow).
+    // Move page 1 down via its titled ↓ button (exact aria-label "Move down"
+    // kept; the additive title carries the page: "Move Page 1 later").
     await page.evaluate(() => {
-      const downs = [...document.querySelectorAll('button[aria-label="Move down"]')];
-      downs[0]?.click();
+      const titled = document.querySelector('button[title="Move Page 1 later"]');
+      if (titled) titled.click();
+      // Fallback pre-rename selector — remove after this run proves titled:
+      else [...document.querySelectorAll('button[aria-label="Move down"]')][0]?.click();
     });
     await new Promise((r) => setTimeout(r, 400));
     await page.evaluate(() => {
@@ -855,7 +967,10 @@ async function main() {
         .find((b) => b.textContent === 'Save rearranged PDF')
         ?.click();
     });
-    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+    // D48 ContinueCard: the run lands on the choose branch — open its
+    // Download branch so the anchor wait below resolves.
+    await openDownloadBranch(page);
+    await waitTotal(page, () => document.querySelector('a[download]') !== null, {
       timeout: 300000,
     });
     await page.evaluate(() => {
@@ -877,14 +992,19 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'rotate');
     await upload(page, 'input[type="file"]', [SMALL_22]);
-    // NOTE: the button text renders before thumbnails arrive — the button
-    // stays disabled until thumbs.length > 0, so wait for ENABLED state.
-    await page.waitForFunction(
+    // P2 no-op honesty: Download stays DISABLED until a rotation exists, so
+    // spin FIRST (the per-page control renders with its thumbnail), then wait
+    // for the ENABLED download. Waiting for enabled-before-spin idles to
+    // timeout with zero rotation selected. L-16: gate on the exact control
+    // each step touches.
+    await waitTotal(
+      page,
       () => {
-        const btn = [...document.querySelectorAll('button')].find(
-          (b) => b.textContent === 'Download rotated PDF',
-        );
-        return btn !== undefined && !btn.disabled;
+        try {
+          return document.querySelector('button[aria-label="Rotate right (page 1)"]') !== null;
+        } catch {
+          return false;
+        }
       },
       { timeout: 300000 },
     );
@@ -893,12 +1013,29 @@ async function main() {
         .find((b) => b.getAttribute('aria-label') === 'Rotate right (page 1)')
         ?.click();
     });
+    await waitTotal(
+      page,
+      () => {
+        try {
+          const btn = [...document.querySelectorAll('button')].find(
+            (b) => b.textContent === 'Download rotated PDF',
+          );
+          return btn !== undefined && !btn.disabled;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 300000 },
+    );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.textContent === 'Download rotated PDF')
         ?.click();
     });
-    await page.waitForFunction(() => document.querySelector('a[download]') !== null, {
+    // D48 ContinueCard: the run lands on the choose branch — open its
+    // Download branch so the anchor wait below resolves.
+    await openDownloadBranch(page);
+    await waitTotal(page, () => document.querySelector('a[download]') !== null, {
       timeout: 300000,
     });
     await page.evaluate(() => {
@@ -920,7 +1057,7 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'metadata');
     await upload(page, 'input[type="file"]', [RICH_80]);
-    await page.waitForFunction(() => document.body.innerText.includes('PowerPoint Presentation'), {
+    await waitTotal(page, () => document.body.innerText.includes('PowerPoint Presentation'), {
       timeout: 60000,
     });
     const metaRead = await bodyText(page);
@@ -931,7 +1068,7 @@ async function main() {
         .find((b) => b.textContent === 'Save metadata')
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('Studio E2E Title'), {
+    await waitTotal(page, () => document.body.innerText.includes('Studio E2E Title'), {
       timeout: 60000,
     });
     const metaPatched = await bodyText(page);
@@ -962,7 +1099,8 @@ async function main() {
     await upload(page, 'input[type="file"]', [red, blue]);
     // Uploads normalize sequentially (PNG→JPEG conversion included):
     // wait for BOTH commits, not just the Build button (first commit).
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
       { timeout: 120000 },
     );
@@ -990,7 +1128,8 @@ async function main() {
     );
     // Guaranteed reorder mechanism: move blue earlier → blue first.
     await clickButton('Move blue-tall.jpg earlier');
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () =>
         document
           .querySelector('ul[aria-label="Pages in PDF order"] > li')
@@ -1013,7 +1152,7 @@ async function main() {
     });
     let previewShown = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, {
+      await waitTotal(page, () => document.querySelector('[role="dialog"]') !== null, {
         timeout: 10000,
       });
       previewShown = true;
@@ -1064,7 +1203,7 @@ async function main() {
     });
     let previewClosed = false;
     try {
-      await page.waitForFunction(() => document.querySelector('[role="dialog"]') === null, {
+      await waitTotal(page, () => document.querySelector('[role="dialog"]') === null, {
         timeout: 10000,
       });
       previewClosed = true;
@@ -1078,7 +1217,8 @@ async function main() {
     // FIRST (mid-animation transforms made a measured pitch negative),
     // and MEASURE the pitch (row heights change with layout) rather
     // than using a fixed pixel distance.
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => {
         const rows = [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')];
         if (rows.length < 2) return false;
@@ -1109,7 +1249,8 @@ async function main() {
       await new Promise((r) => setTimeout(r, 400));
       await page.mouse.up();
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () =>
             document
               .querySelector('ul[aria-label="Pages in PDF order"] > li')
@@ -1127,7 +1268,7 @@ async function main() {
     await clickButton('Rotate red-wide.jpg 90 degrees clockwise');
     let rotated = false;
     try {
-      await page.waitForFunction(() => document.body.innerText.includes('90°'), {
+      await waitTotal(page, () => document.body.innerText.includes('90°'), {
         timeout: 10000,
       });
       rotated = true;
@@ -1137,12 +1278,14 @@ async function main() {
     check('images rotate marks the page', rotated);
     // Remove blue → one page; add red-wide again → two pages.
     await clickButton('Remove blue-tall.jpg');
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 1,
       { timeout: 10000 },
     );
     await upload(page, 'input[type="file"]', [red]);
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 2,
       { timeout: 10000 },
     );
@@ -1157,32 +1300,24 @@ async function main() {
         .find((b) => b.textContent?.startsWith('Build PDF'))
         ?.click();
     });
-    await page.waitForFunction(
-      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
-      { timeout: 300000 },
-    );
-    await page.evaluate(() => {
-      document.querySelector('a[aria-label="Download PDF"]')?.click();
+    // D48 ContinueCard: the build lands on the choose branch — open its
+    // Download branch so the anchor waits below resolve (idempotent
+    // helper: an already-open branch is never re-toggled).
+    await openDownloadBranch(page);
+    await waitTotal(page, () => document.querySelector('a[aria-label="Download PDF"]') !== null, {
+      timeout: 300000,
     });
-    const imagesOut = await waitForCapturedDownload(page, 120000);
-    check(
-      'images tool builds a PDF',
-      imagesOut !== null && imagesOut.magic === '%PDF-',
-      imagesOut ? imagesOut.name : null,
-    );
-    check(
-      'images smart default name ends .pdf with plus (multi-page)',
-      imagesOut !== null && imagesOut.name.endsWith('.pdf') && imagesOut.name.includes('plus'),
-      imagesOut ? imagesOut.name : null,
-    );
-    // Custom name on the same card (anchor clicks are captured in-page,
-    // so the card stays up): switch to Custom, type a name, download.
+    // Custom name FIRST on the fresh naming card: the first anchor download
+    // flips the card to its DoneBanner (the naming UI unmounts), so Custom
+    // must be consumed before any download. L-16: gate on the exact
+    // controls each step touches.
     await page.evaluate(() => {
       [...document.querySelectorAll('button')]
         .find((b) => b.getAttribute('aria-label') === 'Custom name')
         ?.click();
     });
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => {
         const input = document.querySelector('input[aria-label="File name"]');
         return input !== null && input.value === '';
@@ -1199,18 +1334,17 @@ async function main() {
       imagesCustom !== null && imagesCustom.name === 'e2e-custom-name.pdf',
       imagesCustom ? imagesCustom.name : null,
     );
-    // Sharded build (P3, threshold 8 pages): 6 more uploads → 8 pages take
-    // the multi-worker path; output must keep every page in order.
-    await upload(page, 'input[type="file"]', [red, red, red, blue, blue, blue]);
-    await page.waitForFunction(
-      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 8,
-      { timeout: 120000 },
-    );
-    // Rebuild race (L-12 family): the prior completion card clears on the
-    // pages-change effect, so the Build button may lag the 8th row by a
-    // render — wait for the button itself before clicking (a click into the
-    // still-mounted card no-ops and hangs the completion wait below).
-    await page.waitForFunction(
+    // Back to edit keeps the 2-page collection intact (ImagesTool.backToEdit
+    // only clears the completion) and brings Build PDF back; the rebuild
+    // below lands on a fresh choose branch, so the smart-default download
+    // re-opens it via the helper.
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Back to edit')
+        ?.click();
+    });
+    await waitTotal(
+      page,
       () =>
         [...document.querySelectorAll('button')].some((b) =>
           b.textContent?.startsWith('Build PDF'),
@@ -1222,13 +1356,59 @@ async function main() {
         .find((b) => b.textContent?.startsWith('Build PDF'))
         ?.click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('8 images → 8-page PDF'), {
+    await openDownloadBranch(page);
+    await waitTotal(page, () => document.querySelector('a[aria-label="Download PDF"]') !== null, {
       timeout: 300000,
     });
-    await page.waitForFunction(
-      () => document.querySelector('a[aria-label="Download PDF"]') !== null,
+    await page.evaluate(() => {
+      document.querySelector('a[aria-label="Download PDF"]')?.click();
+    });
+    const imagesOut = await waitForCapturedDownload(page, 120000);
+    check(
+      'images tool builds a PDF',
+      imagesOut !== null && imagesOut.magic === '%PDF-',
+      imagesOut ? imagesOut.name : null,
+    );
+    check(
+      'images smart default name ends .pdf with plus (multi-page)',
+      imagesOut !== null && imagesOut.name.endsWith('.pdf') && imagesOut.name.includes('plus'),
+      imagesOut ? imagesOut.name : null,
+    );
+    // Sharded build (P3, threshold 8 pages): 6 more uploads → 8 pages take
+    // the multi-worker path; output must keep every page in order.
+    await upload(page, 'input[type="file"]', [red, red, red, blue, blue, blue]);
+    await waitTotal(
+      page,
+      () => document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length === 8,
+      { timeout: 120000 },
+    );
+    // Rebuild race (L-12 family): the prior completion card clears on the
+    // pages-change effect, so the Build button may lag the 8th row by a
+    // render — wait for the button itself before clicking (a click into the
+    // still-mounted card no-ops and hangs the completion wait below).
+    await waitTotal(
+      page,
+      () =>
+        [...document.querySelectorAll('button')].some((b) =>
+          b.textContent?.startsWith('Build PDF'),
+        ),
       { timeout: 30000 },
     );
+    await page.evaluate(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.startsWith('Build PDF'))
+        ?.click();
+    });
+    // Fresh outputs reset the naming card; the branch may already be open
+    // (same card instance) or back on choose (remount) — the idempotent
+    // helper covers both before the anchor wait. (The old 'N images →
+    // N-page PDF' summary text is gone with the ContinueCard completion —
+    // the card's own Next-step group is the readiness gate, with the full
+    // engine timeout.)
+    await openDownloadBranch(page, 300000);
+    await waitTotal(page, () => document.querySelector('a[aria-label="Download PDF"]') !== null, {
+      timeout: 30000,
+    });
     await page.evaluate(() => {
       document.querySelector('a[aria-label="Download PDF"]')?.click();
     });
@@ -1258,7 +1438,7 @@ async function main() {
         headless: 'shell',
         protocolTimeout: 600000,
         args: [
-          '--no-sandbox',
+          ...NO_SANDBOX_ARGS,
           '--disable-dev-shm-usage',
           '--mute-audio',
           '--disable-extensions',
@@ -1351,12 +1531,11 @@ async function main() {
         }
       });
       check(
-        'scanner viewfinder shows live video + finder frame + status + mirror toggle',
+        'scanner viewfinder shows live video + finder frame + quiet pill + mirror toggle',
         finderDetail !== null &&
           finderDetail.video &&
           finderDetail.frame &&
-          finderDetail.status !== null &&
-          finderDetail.status.length > 0 &&
+          finderDetail.status === null &&
           finderDetail.mirror &&
           (finderDetail.mirrorPressed === 'true' || finderDetail.mirrorPressed === 'false'),
         JSON.stringify(finderDetail),
@@ -1448,6 +1627,36 @@ async function main() {
           orientationHonest.forced916 === false,
         JSON.stringify(orientationHonest),
       );
+      // More-sheet chrome (D52 sheet-first): Flash/Flip/Mirror, the camera
+      // select, and the capture mode live in `[data-scan-sheet]` — mounted
+      // but `hidden` until the More trigger opens it. L-16: open the sheet
+      // via its exact trigger first, then gate every sheet-chrome read/click
+      // on the VISIBLE panel — hidden rows have zero rects, and clicks into
+      // `display:none` prove nothing about the rendered phase. The mirror,
+      // camera-select, sheet-geometry, and mode blocks below all run while
+      // the sheet is open; it closes again before the shutter/pill/capture
+      // reads.
+      await page.evaluate(() => {
+        try {
+          document.querySelector('[data-scan-more]')?.click();
+        } catch {
+          /* noop */
+        }
+      });
+      await waitTotal(
+        page,
+        () => {
+          try {
+            const s = document.querySelector('[data-scan-sheet]');
+            if (!s || s.classList.contains('hidden')) return false;
+            const r = s.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 10000 },
+      );
       // Mirror gating (D43): the fake camera opens environment-facing, so
       // the toggle is disabled by design. Assert that honest back-lens
       // state first, then Flip to the front lens (facing='user') where the
@@ -1481,7 +1690,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const toggle = document.querySelector('[data-mirror-toggle]');
@@ -1512,7 +1722,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (was) => {
             try {
               const now = document
@@ -1587,7 +1798,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 return (
@@ -1650,22 +1862,18 @@ async function main() {
         topBar !== null && topBar.closePresent && topBar.titlePresent,
         JSON.stringify(topBar),
       );
-      // Top-bar non-overlap contract: close, truncating title, labeled
-      // Flash/Flip/Mirror toggles, and the camera select sit pairwise
-      // disjoint, all inside the viewport, and clear of the finder TICKS.
-      // Flash/Flip/Mirror match by VISIBLE text label only (icon-only buttons
-      // fail honestly — the label is the contract). Flash is torch-gated in
-      // the app (fake-camera devices expose no torch, same as the probe
-      // above), so it joins the disjoint set only when rendered — its absence
-      // is reported, never failed on. `[data-finder-frame]` itself is a
-      // full-bleed positioning wrapper (inset-0, pointer-events-none), so the
-      // overlap bar is its INNER tick box (firstElementChild): chrome
-      // overlapping a transparent full-screen wrapper is meaningless, chrome
-      // covering the visible ticks is the real defect. All predicates total.
-      const topBarGeometry = await page.evaluate(() => {
+      // (More sheet opens before the mirror block above — sheet-first per L-16.)
+      // Sheet-row chrome contract: every rendered row carries its VISIBLE
+      // text label (icon-only rows fail honestly — the label is the
+      // contract), rows are pairwise disjoint, all inside the viewport, and
+      // every interactive row clears 44px. Flash is torch-gated in the app
+      // (fake-camera devices expose no torch, same as the probe above), so
+      // it joins only when rendered — absence is reported, never failed on.
+      // All predicates total.
+      const sheetGeometry = await page.evaluate(() => {
         try {
-          const root = document.querySelector('[data-scanner-root]');
-          if (!root) return null;
+          const sheet = document.querySelector('[data-scan-sheet]');
+          if (!sheet) return null;
           const rectOf = (el) => {
             if (!el) return null;
             const r = el.getBoundingClientRect();
@@ -1677,97 +1885,86 @@ async function main() {
               bottom: Math.round(r.top + r.height),
             };
           };
-          const close = root.querySelector('[aria-label="Close scanner"]');
-          const title =
-            [...root.querySelectorAll('p')].find((p) =>
-              /Scan documents/.test(p.textContent ?? ''),
-            ) ?? null;
-          const byVisibleText = (re) =>
-            [...root.querySelectorAll('button')].find((b) => re.test(b.textContent ?? '')) ?? null;
-          const flash = byVisibleText(/flash/i);
-          const flip = byVisibleText(/flip/i);
-          const mirrorRaw = root.querySelector('[data-mirror-toggle]');
-          const mirror =
-            mirrorRaw !== null && /mirror/i.test(mirrorRaw.textContent ?? '') ? mirrorRaw : null;
-          const select = root.querySelector('[data-camera-select]');
-          const selectRow = root.querySelector('[data-camera-select-row]');
-          const finder = root.querySelector('[data-finder-frame]');
-          const finderTicks = finder?.firstElementChild ?? null;
-          const bar = close?.parentElement ?? null;
+          const byAria = (label) => sheet.querySelector(`[aria-label="${label}"]`);
+          const flash = byAria('Toggle torch');
+          const flip = byAria('Switch camera');
+          const mirror = byAria('Mirror front-camera preview');
+          const select = sheet.querySelector('[data-camera-select]');
+          const selectRow = sheet.querySelector('[data-camera-select-row]');
+          const mode = sheet.querySelector('[data-scan-mode]');
           return {
-            close: rectOf(close),
-            title: rectOf(title),
             flash: rectOf(flash),
             flashRendered: flash !== null,
+            flashLabeled: flash !== null && /flash/i.test(flash.textContent ?? ''),
             flip: rectOf(flip),
+            flipLabeled: flip !== null && /flip/i.test(flip.textContent ?? ''),
             mirror: rectOf(mirror),
+            mirrorLabeled: mirror !== null && /mirror/i.test(mirror.textContent ?? ''),
             select: rectOf(select),
             selectRow: rectOf(selectRow),
-            bar: rectOf(bar),
-            finderTicks: rectOf(finderTicks),
+            mode: rectOf(mode),
             viewport: { w: window.innerWidth, h: window.innerHeight },
           };
         } catch {
           return null;
         }
       });
-      let topBarDisjoint = false;
-      let selectBelowBar = false;
-      if (topBarGeometry !== null) {
+      let sheetDisjoint = false;
+      if (sheetGeometry !== null) {
         const required = [
-          topBarGeometry.close,
-          topBarGeometry.title,
-          topBarGeometry.flip,
-          topBarGeometry.mirror,
-          topBarGeometry.select,
+          sheetGeometry.flip,
+          sheetGeometry.mirror,
+          sheetGeometry.select,
+          sheetGeometry.mode,
         ];
         // Flash joins only when the device exposes torch (fake camera does
         // not — same environmental gate as the probe above).
         const controls =
-          topBarGeometry.flash !== null ? [...required, topBarGeometry.flash] : required;
+          sheetGeometry.flash !== null ? [...required, sheetGeometry.flash] : required;
         const hits = (a, b) =>
           a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-        const allPresent = required.every((r) => r !== null) && topBarGeometry.finderTicks !== null;
+        const allPresent = required.every((r) => r !== null);
         const inViewport = allPresent
           ? controls.every(
               (r) =>
                 r.left >= 0 &&
                 r.top >= 0 &&
-                r.right <= topBarGeometry.viewport.w &&
-                r.bottom <= topBarGeometry.viewport.h,
+                r.right <= sheetGeometry.viewport.w &&
+                r.bottom <= sheetGeometry.viewport.h,
             )
           : false;
+        const tallTargets = allPresent ? controls.every((r) => r.bottom - r.top >= 44) : false;
         let pairwise = allPresent;
         if (allPresent) {
           for (let i = 0; i < controls.length && pairwise; i += 1) {
             for (let j = i + 1; j < controls.length && pairwise; j += 1) {
               if (hits(controls[i], controls[j])) pairwise = false;
             }
-            if (pairwise && hits(controls[i], topBarGeometry.finderTicks)) pairwise = false;
           }
         }
-        topBarDisjoint = allPresent && inViewport && pairwise;
-        selectBelowBar =
-          topBarGeometry.bar !== null &&
-          topBarGeometry.select !== null &&
-          topBarGeometry.selectRow !== null &&
-          topBarGeometry.select.top >= topBarGeometry.bar.bottom &&
-          topBarGeometry.selectRow.top >= topBarGeometry.bar.bottom;
+        sheetDisjoint = allPresent && inViewport && pairwise && tallTargets;
       }
       check(
-        'scanner top bar controls never overlap (close/title/flip/mirror/select + torch-gated flash pairwise disjoint, in viewport, clear of finder ticks)',
-        topBarDisjoint,
-        JSON.stringify(topBarGeometry),
+        'scanner More sheet lists labeled rows without overlap (Flip/Mirror/Camera/Mode + torch-gated Flash pairwise disjoint, in viewport, ≥44px targets)',
+        sheetDisjoint &&
+          sheetGeometry !== null &&
+          sheetGeometry.flipLabeled === true &&
+          sheetGeometry.mirrorLabeled === true &&
+          (sheetGeometry.flashRendered === false || sheetGeometry.flashLabeled === true),
+        JSON.stringify(sheetGeometry),
       );
       check(
-        'scanner camera select sits on its own slim row below the top bar (select.top ≥ bar.bottom)',
-        selectBelowBar,
+        'scanner camera select sits on its own labeled row inside the More sheet',
+        sheetGeometry !== null &&
+          sheetGeometry.select !== null &&
+          sheetGeometry.selectRow !== null &&
+          sheetGeometry.select.top >= sheetGeometry.selectRow.top &&
+          sheetGeometry.select.bottom <= sheetGeometry.selectRow.bottom,
         JSON.stringify(
-          topBarGeometry
+          sheetGeometry
             ? {
-                bar: topBarGeometry.bar,
-                select: topBarGeometry.select,
-                selectRow: topBarGeometry.selectRow,
+                select: sheetGeometry.select,
+                selectRow: sheetGeometry.selectRow,
               }
             : null,
         ),
@@ -1815,7 +2012,8 @@ async function main() {
       });
       let autoWaited = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const seg = document.querySelector('[data-scan-mode]');
@@ -1858,7 +2056,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const seg = document.querySelector('[data-scan-mode]');
@@ -1883,6 +2082,29 @@ async function main() {
       } catch {
         /* measured implicitly by the captures below staying manual */
       }
+      // Sheet-first cleanup: close the More panel so every downstream
+      // camera-phase read (shutter size, quiet pill, strip dock, no-shift
+      // gate) measures the exact finder-clean state the suite otherwise saw.
+      await page.evaluate(() => {
+        try {
+          const more = document.querySelector('[data-scan-more]');
+          if (more !== null && more.getAttribute('aria-expanded') === 'true') more.click();
+        } catch {
+          /* noop */
+        }
+      });
+      await waitTotal(
+        page,
+        () => {
+          try {
+            const s = document.querySelector('[data-scan-sheet]');
+            return s !== null && s.classList.contains('hidden');
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 10000 },
+      );
       // Big shutter (live only — live-only absence is covered by the review
       // phase check asserting liveCaptureAbsent).
       const shutterSize = await page.evaluate(() => {
@@ -1910,37 +2132,43 @@ async function main() {
         }
       });
       check(
-        'scanner status pill is non-empty while live',
-        pillLive !== null && pillLive.present && pillLive.nonEmpty,
+        'scanner status pill stays quiet in Manual live idle (no pill)',
+        pillLive !== null && pillLive.present === false,
         JSON.stringify(pillLive),
       );
       await scanCaptureOnce(page);
       // Queue-only shutter (deferred review-time ML): the capture enqueues
       // instantly as 'queued' — no camera-phase detection, no dwell, no
-      // transient pill. The strip-thumb wait is the L-12 post-condition
-      // (dispatch → wait here → measure in the later evaluate below).
-      await waitForStripThumbs(page, 1);
-      // Camera-phase idle read (measure step): strip thumb present WITHOUT
-      // any detecting wait, no preparing overlay in the camera phase, no
-      // per-thumb detecting badge, finder idle (never Scanning… hold steady).
+      // hold-steady pill (only the 900ms captured flash may show). The
+      // strip-CTA wait is the L-12 post-condition (dispatch → wait here →
+      // measure in the later evaluate below).
+      await waitForStripCount(page, 1);
+      // Camera-phase idle read (measure step): strip CTA present WITHOUT
+      // any detecting wait, no preparing overlay in the camera phase, quiet
+      // pill (absent or captured-flash only — never hold-steady/scanning).
       const cameraIdle1 = await readCameraIdle(page);
       check(
-        'scanner capture queues instantly without detecting (strip thumb, no preparing overlay, no detecting badge)',
+        'scanner capture queues instantly without detecting (strip CTA View 1 pages, gallery badge 1, no preparing overlay, quiet pill)',
         cameraIdle1 !== null &&
-          cameraIdle1.stripThumbs >= 1 &&
+          cameraIdle1.stripCta === 'View 1 pages' &&
+          cameraIdle1.galleryCount === '1' &&
           cameraIdle1.noPreparing === true &&
-          cameraIdle1.noDetectingBadge === true,
+          cameraIdle1.pillQuiet === true &&
+          cameraIdle1.neverScanning === true,
         JSON.stringify(cameraIdle1),
       );
       check(
-        'scanner finder stays idle after capture (Point at the page, never Scanning… hold steady)',
-        cameraIdle1 !== null && cameraIdle1.idle === true && cameraIdle1.notScanning === true,
+        'scanner finder stays quiet after capture (no pill or captured-flash only, never hold-steady/scanning)',
+        cameraIdle1 !== null &&
+          cameraIdle1.pillQuiet === true &&
+          cameraIdle1.neverScanning === true,
         JSON.stringify(cameraIdle1),
       );
       // Gallery thumb after a capture (fails honestly when the reworked
       // capture screen omits it).
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const g = document.querySelector('[data-scan-gallery]');
@@ -1979,25 +2207,24 @@ async function main() {
         JSON.stringify(galleryState),
       );
       await scanCaptureOnce(page);
-      await waitForStripThumbs(page, 2);
+      await waitForStripCount(page, 2);
       const queueState = await page.evaluate(() => {
         try {
-          const s = document.querySelector('[data-scan-strip]');
+          const cta = document.querySelector('[data-scan-strip] [data-review-cta]');
           const alert = document.querySelector('[role="alert"]');
           const v = document.querySelector('[data-scanner-root] video');
           const live =
             v !== null && (v.readyState >= 2 || v.videoWidth > 0 || v.played !== undefined);
-          const thumbs = s === null ? -1 : s.querySelectorAll('button').length;
           const preparing = document.querySelector('[data-review-preparing]');
-          const finder = document.querySelector('[data-finder-status]')?.textContent?.trim() ?? '';
+          const pill = document.querySelector('[data-finder-status]');
+          const finder = pill?.textContent?.trim() ?? '';
           return {
-            header: `strip thumbs ${thumbs} of 2`,
+            cta: cta?.textContent?.trim() ?? null,
             silent: alert === null,
             live,
             noPreparing: preparing === null,
-            finder: finder.slice(0, 80),
-            idle: /Point at the page|Starting camera/i.test(finder),
-            notScanning: !/hold steady|scanning/i.test(finder),
+            pillQuiet: pill === null || /captured/i.test(finder),
+            neverScanning: !/hold steady|scanning/i.test(finder),
           };
         } catch {
           return null;
@@ -2006,12 +2233,12 @@ async function main() {
       check(
         'scanner fake-camera capture queues silently with camera live',
         queueState !== null &&
-          /of 2\b/.test(queueState.header) &&
+          queueState.cta === 'View 2 pages' &&
           queueState.silent &&
           queueState.live &&
           queueState.noPreparing === true &&
-          queueState.idle === true &&
-          queueState.notScanning === true,
+          queueState.pillQuiet === true &&
+          queueState.neverScanning === true,
         JSON.stringify(queueState),
       );
       // Strip docked-bottom contract: the camera-phase `[data-scan-strip]`
@@ -2211,7 +2438,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 return (
@@ -2234,7 +2462,8 @@ async function main() {
           // re-assert review readiness for the round-trip check.
           await clickCTAAndAwaitReview(page, 2);
           try {
-            await page.waitForFunction(
+            await waitTotal(
+              page,
               () => {
                 try {
                   return document.querySelector('[data-scan-queue]') !== null;
@@ -2330,7 +2559,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (prevSrc) => {
               try {
                 const body = document.body.innerText ?? '';
@@ -2569,7 +2799,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               return document.querySelector('[data-crop-adjust]') !== null;
@@ -2625,7 +2856,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (before) => {
               try {
                 const img = document.querySelector('[data-crop-result-img]');
@@ -2690,7 +2922,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (before) => {
               try {
                 const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src');
@@ -2717,7 +2950,8 @@ async function main() {
       });
       let filmAdvanced = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -2783,7 +3017,8 @@ async function main() {
       });
       let pagerBack = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -2847,7 +3082,8 @@ async function main() {
       });
       let pagerFwd = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -2930,7 +3166,8 @@ async function main() {
       });
       let emptiedToCamera = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const strip = document.querySelector('[data-scan-strip]');
@@ -2975,9 +3212,9 @@ async function main() {
       // (page 2 current, 1 accepted) and every downstream check still holds.
       if (emptiedToCamera) {
         await scanCaptureOnce(page);
-        await waitForStripThumbs(page, 1);
+        await waitForStripCount(page, 1);
         await scanCaptureOnce(page);
-        await waitForStripThumbs(page, 2);
+        await waitForStripCount(page, 2);
         // Fresh queue → unprocessed → the preparing overlay must run again
         // (same deferred flow as the main entry; readiness is gated by the
         // adjust/Apply checks below, so no extra check here).
@@ -3005,7 +3242,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               return (
@@ -3348,7 +3586,8 @@ async function main() {
         await page.mouse.move(loupeGrabStart.x, loupeGrabStart.y);
         await page.mouse.down();
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 const l = document.querySelector('[data-loupe]');
@@ -3417,7 +3656,8 @@ async function main() {
           : null;
         await page.mouse.move(loupeGrabStart.x + 40, loupeGrabStart.y + 30, { steps: 12 });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (sx, sy) => {
               try {
                 const el = document.querySelector('[data-crop-handle="tl"]');
@@ -3458,7 +3698,8 @@ async function main() {
         );
         await page.mouse.up();
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 const l = document.querySelector('[data-loupe]');
@@ -3523,7 +3764,8 @@ async function main() {
       });
       let loupeFocusVisible = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               const l = document.querySelector('[data-loupe]');
@@ -3590,7 +3832,8 @@ async function main() {
         await page.mouse.move(dragStart.x + 40, dragStart.y + 30, { steps: 12 });
         await page.mouse.up();
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (sx, sy) => {
               try {
                 const el = document.querySelector('[data-crop-handle="tl"]');
@@ -3661,7 +3904,8 @@ async function main() {
         await page.mouse.move(edgeBefore.mid.x, edgeBefore.mid.y + 30, { steps: 12 });
         await page.mouse.up();
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             (my) => {
               try {
                 const el = document.querySelector('[data-crop-handle-mid="top"]');
@@ -3724,7 +3968,8 @@ async function main() {
       });
       let appliedBack = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               return (
@@ -3750,7 +3995,8 @@ async function main() {
       // the warp (flake: same-src when the warp hasn't committed yet), so
       // wait for the src to actually CHANGE before measuring.
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src');
@@ -3837,7 +4083,8 @@ async function main() {
       await clickUseOriginal();
       let toggledToPhoto = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -3867,7 +4114,8 @@ async function main() {
       await clickUseOriginal();
       let toggledBack = false;
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (photo) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -3924,7 +4172,8 @@ async function main() {
         }
       });
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           (before) => {
             try {
               const img = document.querySelector('[data-crop-result-img]');
@@ -3959,7 +4208,8 @@ async function main() {
         });
       const waitDone = async (timeoutMs = 30000) => {
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
@@ -4014,7 +4264,8 @@ async function main() {
           }
         });
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 return document.querySelector('[data-scan-capture]') !== null;
@@ -4031,7 +4282,8 @@ async function main() {
         await clickCTAAndAwaitReview(page, 2);
         let roundTripped = false;
         try {
-          await page.waitForFunction(
+          await waitTotal(
+            page,
             () => {
               try {
                 return document.querySelector('[data-scan-queue]') !== null;
@@ -4079,7 +4331,8 @@ async function main() {
       // Done-screen Build PDF commits + exits to the Images tool; the tool's
       // own build button starts the engine job (same pattern as the main
       // Images section — the download link only exists after it).
-      await page.waitForFunction(
+      await waitTotal(
+        page,
         () => {
           try {
             return (
@@ -4101,8 +4354,12 @@ async function main() {
           /* noop */
         }
       });
+      // D48 ContinueCard: the build lands on the choose branch — open its
+      // Download branch so the anchor wait below resolves.
+      await openDownloadBranch(page);
       try {
-        await page.waitForFunction(
+        await waitTotal(
+          page,
           () => {
             try {
               return document.querySelector('a[aria-label="Download PDF"]') !== null;
@@ -4161,7 +4418,8 @@ async function main() {
       });
       let deniedHonest = false;
       try {
-        await denied.page.waitForFunction(
+        await waitTotal(
+          denied.page,
           () => {
             try {
               return /no camera found|denied|could-not-start|could not start/i.test(
@@ -4207,7 +4465,8 @@ async function main() {
       await upload(denied.page, 'input[type="file"]', [red]);
       let deniedUpload = false;
       try {
-        await denied.page.waitForFunction(
+        await waitTotal(
+          denied.page,
           () => {
             try {
               return (
@@ -4270,7 +4529,7 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'split');
     await upload(page, 'input[type="file"]', [LARGE]);
-    await page.waitForFunction(() => /[1-9][0-9]*\/[0-9]+ kept/.test(document.body.innerText), {
+    await waitTotal(page, () => /[1-9][0-9]*\/[0-9]+ kept/.test(document.body.innerText), {
       timeout: 300000,
     });
     const text = await bodyText(page);
@@ -4302,7 +4561,8 @@ async function main() {
     const { page, consoleErrors } = await newPage(browser);
     await gotoTool(page, 'merge');
     await upload(page, 'input[type="file"]', [LARGE, SMALL_22]);
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => document.body.innerText.includes('2 files selected — ready to merge'),
       {
         timeout: 300000,
@@ -4315,19 +4575,17 @@ async function main() {
     });
     // Cancel the moment the button appears: the 490 MB engine run is
     // still in flight, so cancellation deterministically wins the race.
-    await page.waitForFunction(
+    await waitTotal(
+      page,
       () => [...document.querySelectorAll('button')].some((b) => b.textContent === 'Cancel'),
       { timeout: 60000 },
     );
     await page.evaluate(() => {
       [...document.querySelectorAll('button')].find((b) => b.textContent === 'Cancel')?.click();
     });
-    await page.waitForFunction(
-      () => /cancelled|Something went wrong/i.test(document.body.innerText),
-      {
-        timeout: 300000,
-      },
-    );
+    await waitTotal(page, () => /cancelled|Something went wrong/i.test(document.body.innerText), {
+      timeout: 300000,
+    });
     const text = await bodyText(page);
     check('merge cancellation surfaces honestly in UI', /Merge cancelled\./.test(text));
     if (consoleErrors.length > 0)

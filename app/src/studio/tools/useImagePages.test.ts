@@ -274,5 +274,29 @@ describe('useImagePages', () => {
       expect(result.current.pages).toHaveLength(1);
       expect(revoked).toEqual([first.previewUrl, first.thumbUrl]);
     });
+
+    it('drops the batch when unmounted mid-import (no leaked URLs, no setState)', async () => {
+      stubDecode({ width: 1200, height: 800 });
+      const { result, unmount } = renderHook(() => useImagePages());
+      const createdBefore = created.length;
+      let settled = false;
+      const job = (async () => {
+        const summary = await result.current.importFiles(
+          [upload('a.jpg'), upload('b.jpg'), upload('c.jpg')],
+          'upload',
+        );
+        settled = true;
+        return summary;
+      })();
+      // Unmount while the sequential queue is still decoding.
+      unmount();
+      const summary = await job;
+      expect(settled).toBe(true);
+      // The mount guard dropped the commit: no URLs were minted after the
+      // sweep, so nothing leaked with no second sweep to collect it.
+      expect(created.length).toBe(createdBefore);
+      expect(revoked).toEqual([]);
+      expect(summary.added).toBe(3);
+    });
   });
 });

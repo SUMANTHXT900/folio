@@ -90,6 +90,47 @@ export function isPngFile(file: File): boolean {
   if (file.type === 'image/jpeg') return false;
   return /\.png$/i.test(file.name);
 }
+
+/**
+ * PNG 8-byte signature (`89 50 4E 47 0D 0A 1A 0A`): sniffed from file
+ * content so a PNG renamed to `.jpg` (wrong MIME/extension) still
+ * converts instead of embedding as raw RGB downstream.
+ */
+export const PNG_MAGIC_BYTES = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
+
+/** True when the leading bytes match the PNG signature. */
+export function isPngMagicBytes(bytes: Uint8Array | ArrayBuffer): boolean {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (view.length < PNG_MAGIC_BYTES.length) return false;
+  for (let i = 0; i < PNG_MAGIC_BYTES.length; i += 1) {
+    if (view[i] !== PNG_MAGIC_BYTES[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Content sniff for renamed PNGs: reads the first 8 bytes and checks the
+ * PNG signature. Never throws — unreadable files report non-PNG and let
+ * the decode path fail honestly with the file name.
+ */
+export async function sniffPngMagic(file: File | Blob): Promise<boolean> {
+  try {
+    const head = await file.slice(0, PNG_MAGIC_BYTES.length).arrayBuffer();
+    return isPngMagicBytes(head);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * PNG check with content-magic fallback: MIME/extension first (no I/O),
+ * then an 8-byte content sniff so renamed fixtures (`screenshot.png`
+ * saved as `photo.jpg`) still convert. Async only on the fallback path.
+ */
+export async function isPngFileWithMagic(file: File): Promise<boolean> {
+  if (isPngFile(file)) return true;
+  return sniffPngMagic(file);
+}
 /**
  * One decode's result: pixel dimensions plus the live decoder handle.
  * `resizeToJpeg` reads pixels from `bitmap`; the caller releases it via
@@ -160,6 +201,16 @@ let encodeWorker: Worker | null = null;
 let encodeWorkerReady: Promise<boolean> | null = null;
 /** Latched once the worker proves broken: later calls skip it outright. */
 let encodeWorkerDead = false;
+/**
+ * Bounded boot retry: the first boot-handshake failure clears the cached
+ * `false` once after a short delay so the next encode re-probes (transient
+ * worker-start races recover); a second failure keeps the cached `false`
+ * permanently (deterministic incapability pays at most two probes, never a
+ * per-encode retry loop).
+ */
+let encodeBootFailures = 0;
+/** Delay before the single boot re-probe is allowed. */
+export const ENCODE_WORKER_BOOT_RETRY_MS = 1000;
 let encodeWorkerSeq = 0;
 const pendingEncodes = new Map<number, PendingEncode>();
 /**
@@ -196,6 +247,7 @@ export function __resetEncodeWorkerForTests(): void {
   encodeWorker = null;
   encodeWorkerReady = null;
   encodeWorkerDead = false;
+  encodeBootFailures = 0;
   encodeDroppedMessages = 0;
   for (const [, job] of pendingEncodes) {
     clearTimeout(job.timer);
@@ -222,6 +274,7 @@ export function disposeEncodeWorker(): void {
   encodeWorker = null;
   encodeWorkerReady = null;
   encodeWorkerDead = false;
+  encodeBootFailures = 0;
   for (const [id, job] of pendingEncodes) {
     pendingEncodes.delete(id);
     clearTimeout(job.timer);
@@ -296,25 +349,41 @@ function routeEncodeResult(data: unknown): void {
 }
 
 /**
- * Resolves true once a usable encode worker exists. False is latched:
- * environments without workers (or without worker-side OffscreenCanvas)
- * pay exactly one failed attempt, then always take the main-thread path.
+ * Resolves true once a usable encode worker exists. False is latched after
+ * a bounded retry: the first boot-handshake failure clears the cached
+ * `false` once after `ENCODE_WORKER_BOOT_RETRY_MS` so the next encode
+ * re-probes (transient worker-start races recover); a second failure keeps
+ * the cached `false` permanently (deterministic incapability pays at most
+ * two probes, never a per-encode retry loop).
  */
 function ensureEncodeWorker(): Promise<boolean> {
   if (encodeWorkerDead) return Promise.resolve(false);
   if (encodeWorkerReady !== null) return encodeWorkerReady;
   encodeWorkerReady = new Promise<boolean>((resolve) => {
+    const failOnce = (value: false): void => {
+      const failures = encodeBootFailures;
+      encodeBootFailures += 1;
+      if (failures === 0) {
+        // Bounded: one re-probe after a delay, then latch. The cached
+        // `false` still serves immediate callers; the timer re-arms the
+        // probe for the NEXT encode past the delay.
+        setTimeout(() => {
+          if (encodeBootFailures === 1 && !encodeWorkerDead) encodeWorkerReady = null;
+        }, ENCODE_WORKER_BOOT_RETRY_MS);
+      }
+      resolve(value);
+    };
     // A test-installed factory bypasses the ambient `Worker` gate so
     // FakeWorker doubles run under jsdom (which has no `Worker`).
     if (typeof Worker === 'undefined' && !encodeWorkerFactoryOverride) {
-      resolve(false);
+      failOnce(false);
       return;
     }
     let worker: Worker;
     try {
       worker = encodeWorkerFactory();
     } catch {
-      resolve(false);
+      failOnce(false);
       return;
     }
     const timer = setTimeout(() => {
@@ -323,7 +392,7 @@ function ensureEncodeWorker(): Promise<boolean> {
       } catch {
         // Best effort.
       }
-      resolve(false);
+      failOnce(false);
     }, ENCODE_WORKER_READY_TIMEOUT_MS);
     worker.onmessage = (ev: MessageEvent) => {
       const data = ev.data as { kind?: unknown; offscreen?: unknown } | null;
@@ -339,7 +408,7 @@ function ensureEncodeWorker(): Promise<boolean> {
           } catch {
             // Best effort.
           }
-          resolve(false);
+          failOnce(false);
         }
         return;
       }
@@ -347,7 +416,7 @@ function ensureEncodeWorker(): Promise<boolean> {
     };
     worker.onerror = () => {
       clearTimeout(timer);
-      resolve(false);
+      failOnce(false);
     };
   });
   return encodeWorkerReady;
@@ -563,7 +632,12 @@ export async function prepareImportFile(
     // the import (the main resize below is the fallible path that matters).
     const thumb = await tryEncodeThumb(decoded, dims);
     const target = planNormalization(dims, maxLongEdge);
-    if (target === null && !isPngFile(file)) {
+    // PNG gate: MIME/extension fast path, plus an 8-byte content-magic
+    // sniff so a PNG renamed to `.jpg` still converts (engine has no DCT
+    // path for PNG — retained PNG bytes embed as raw RGB).
+    const pngByMeta = isPngFile(file);
+    const pngByMagic = pngByMeta ? false : await sniffPngMagic(file);
+    if (target === null && !pngByMeta && !pngByMagic) {
       return {
         file,
         name: file.name,

@@ -512,3 +512,56 @@ describe('ContinueCard step UX (polish lane)', () => {
     expect(screen.getByRole('button', { name: 'Continue in Rotate' })).toBeTruthy();
   });
 });
+
+describe('ContinueCard download rows (stable keys + resync)', () => {
+  it('resyncs row names when a re-run reuses output sizes', () => {
+    // Both completions carry byteLength 3: the old `${i}-${byteLength}` key
+    // collided here and froze the stale edit. Stable `part-N` keys plus the
+    // PartRow resync effect must show the new suggestion instead.
+    const { rerender } = render(
+      <ContinueCard
+        outputs={[
+          makeOutput({ name: 'a-p1.pdf', byteLength: 3 }),
+          makeOutput({ name: 'a-p2.pdf', byteLength: 3 }),
+        ]}
+        sourceName="a.pdf"
+        producedBy="split"
+        onBackToEdit={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /^download$/i }));
+    fireEvent.change(screen.getByLabelText('File name part 1'), {
+      target: { value: 'my-custom' },
+    });
+    expect((screen.getByLabelText('File name part 1') as HTMLInputElement).value).toBe('my-custom');
+
+    rerender(
+      <ContinueCard
+        outputs={[
+          makeOutput({ name: 'b-p1.pdf', byteLength: 3 }),
+          makeOutput({ name: 'b-p2.pdf', byteLength: 3 }),
+        ]}
+        sourceName="b.pdf"
+        producedBy="split"
+        onBackToEdit={() => {}}
+      />,
+    );
+    expect((screen.getByLabelText('File name part 1') as HTMLInputElement).value).toBe('b-p1.pdf');
+    expect((screen.getByLabelText('File name part 2') as HTMLInputElement).value).toBe('b-p2.pdf');
+  });
+
+  it('gives focus targets a visible Folio ring instead of outline-none', () => {
+    render(
+      <ContinueCard
+        outputs={[makeOutput()]}
+        sourceName="a.pdf"
+        producedBy="merge"
+        onBackToEdit={() => {}}
+      />,
+    );
+    const heading = screen.getByRole('heading', { name: /what's next/i });
+    expect(heading.className).toMatch(/focus-visible:ring-2/);
+    expect(heading.className).toMatch(/ring-brass-400\/40/);
+    expect(heading.className).not.toMatch(/focus:outline-none/);
+  });
+});

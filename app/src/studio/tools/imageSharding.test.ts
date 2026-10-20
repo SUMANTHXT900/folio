@@ -15,9 +15,12 @@ import type { StudioJob, StudioResult } from '../services/folio';
 import {
   MAX_SHARD_IN_FLIGHT_BYTES,
   MAX_SHARD_PIXELS,
+  SHARD_RAW_RGB_BYTES_PER_PIXEL,
   buildImagesPdf,
+  classifyStagedKind,
   estimateInFlightBytes,
   estimatePixelCost,
+  estimateShardOutputBytes,
   planShards,
   resolveShardCount,
   type ShardDeps,
@@ -311,6 +314,20 @@ describe('buildImagesPdf single path', () => {
     expect(run.calls[0].ids).toEqual(input(9).stagedIds);
     expect(temps.opened).toEqual([]);
   });
+
+  it('aborts before any engine call when the staging signal is pre-aborted', async () => {
+    const run = makeFakeRun();
+    const temps = makeFakeTemps();
+    const controller = new AbortController();
+    controller.abort();
+    const job = buildImagesPdf(
+      { ...input(9), signal: controller.signal },
+      { runOperation: run.runOperation, openBytes: temps.openBytes, closeDoc: temps.closeDoc },
+    );
+    await expect(job.done).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(run.calls).toHaveLength(0);
+    expect(temps.opened).toEqual([]);
+  });
 });
 
 describe('buildImagesPdf sharded path', () => {
@@ -501,5 +518,117 @@ describe('buildImagesPdf sharded path', () => {
       'shard:2:studio:run:wait',
       'studio:run:wait',
     ]);
+  });
+});
+
+describe('classifyStagedKind (P3 item 7)', () => {
+  it('prefers MIME over extension', () => {
+    expect(classifyStagedKind({ mime: 'image/jpeg', name: 'x.png' })).toBe('jpeg');
+    expect(classifyStagedKind({ mime: 'image/png', name: 'x.jpg' })).toBe('png');
+  });
+
+  it('falls back to extension case-insensitively', () => {
+    expect(classifyStagedKind({ name: 'photo.JPG' })).toBe('jpeg');
+    expect(classifyStagedKind({ name: 'shot.Jpeg' })).toBe('jpeg');
+    expect(classifyStagedKind({ name: 'screen.PNG' })).toBe('png');
+  });
+
+  it('reports unknown when neither MIME nor extension identifies the type', () => {
+    expect(classifyStagedKind({})).toBe('unknown');
+    expect(classifyStagedKind({ name: 'blob', mime: 'application/octet-stream' })).toBe('unknown');
+  });
+});
+
+describe('estimateShardOutputBytes (P3 item 7)', () => {
+  it('estimates JPEG near passthrough (input × factor, not input)', () => {
+    const kinds = ['jpeg', 'jpeg'] as const;
+    const out = estimateShardOutputBytes([1_000_000, 2_000_000], [...kinds]);
+    expect(out).toBeGreaterThan(3_000_000);
+    expect(out).toBeLessThan(3_000_000 * 1.2);
+  });
+
+  it('bounds PNG with known dims at pixels × 3 (raw-RGB embed)', () => {
+    const out = estimateShardOutputBytes([2_000_000], ['png'], [12_000_000]);
+    expect(out).toBe(12_000_000 * SHARD_RAW_RGB_BYTES_PER_PIXEL);
+  });
+
+  it('uses a conservative factor — never 0 — for unknown dims', () => {
+    const out = estimateShardOutputBytes([2_000_000], ['unknown'], [0]);
+    expect(out).toBe(2_000_000 * 8);
+    // Missing kinds/pixels arrays are equally conservative.
+    expect(estimateShardOutputBytes([2_000_000])).toBe(2_000_000 * 8);
+  });
+
+  it('clamps negatives and handles empty batches', () => {
+    expect(estimateShardOutputBytes([])).toBe(0);
+    expect(estimateShardOutputBytes([-5], ['jpeg'])).toBe(0);
+  });
+});
+
+describe('resolveShardCount output gate (P3 item 7)', () => {
+  it('stays single-worker when estimated outputs exceed the cap', () => {
+    expect(
+      resolveShardCount(9, {
+        hardwareConcurrency: 16,
+        totalBytes: 10 * 1024 * 1024,
+        totalOutputBytes: MAX_SHARD_IN_FLIGHT_BYTES + 1,
+      }),
+    ).toBe(1);
+  });
+
+  it('still shards JPEG batches whose outputs fit under the cap', () => {
+    expect(
+      resolveShardCount(9, {
+        hardwareConcurrency: 16,
+        totalBytes: 10 * 1024 * 1024,
+        totalOutputBytes: 11 * 1024 * 1024,
+      }),
+    ).toBe(3);
+  });
+
+  it('keeps small batches single-worker regardless of the output estimate', () => {
+    expect(
+      resolveShardCount(7, {
+        hardwareConcurrency: 16,
+        totalOutputBytes: MAX_SHARD_IN_FLIGHT_BYTES + 1,
+      }),
+    ).toBe(1);
+  });
+});
+
+describe('buildImagesPdf output gate (P3 item 7)', () => {
+  it('stays single-worker for unknown-kind batches with large conservative outputs', async () => {
+    const run = makeFakeRun();
+    const temps = makeFakeTemps();
+    const job = buildImagesPdf(
+      {
+        ...input(9),
+        // 9 × 40MB unknown-kind (no kinds threaded): 9 × 40MB × 8 ≫ cap.
+        stagedSizes: new Array<number>(9).fill(40 * 1024 * 1024),
+      },
+      { runOperation: run.runOperation, openBytes: temps.openBytes, closeDoc: temps.closeDoc },
+    );
+    await job.done;
+    expect(run.calls).toHaveLength(1);
+    expect(run.calls[0].operation).toBe('pdf.images_to_pdf');
+    expect(temps.opened).toEqual([]);
+  });
+
+  it('still shards JPEG batches of the same input bytes (passthrough estimate)', async () => {
+    const run = makeFakeRun();
+    const temps = makeFakeTemps();
+    const job = buildImagesPdf(
+      {
+        ...input(9),
+        // 9 × 5MB JPEG: outputs ≈ 9 × 5MB × 1.05 ≪ cap.
+        stagedSizes: new Array<number>(9).fill(5 * 1024 * 1024),
+        stagedKinds: new Array<'jpeg'>(9).fill('jpeg'),
+      },
+      { runOperation: run.runOperation, openBytes: temps.openBytes, closeDoc: temps.closeDoc },
+    );
+    await job.done;
+    // 3 shard builds + 1 ordered merge.
+    expect(run.calls).toHaveLength(4);
+    expect(run.calls[3].operation).toBe('pdf.merge');
   });
 });

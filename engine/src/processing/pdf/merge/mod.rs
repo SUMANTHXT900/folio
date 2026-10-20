@@ -128,7 +128,7 @@ impl Operation for MergeOperation {
     fn execute<C: OperationContext>(
         &self,
         ctx: &C,
-        input: Self::Input,
+        mut input: Self::Input,
         _options: Self::Options,
     ) -> Result<Self::Output, EngineError> {
         ctx.report_progress(Some("validating"), 5, 100, Some("validating merge inputs"));
@@ -173,7 +173,7 @@ impl Operation for MergeOperation {
         }
         // Combined-size gate: each input was capped individually by the
         // loader, but their sum is only visible here.
-        check_total_input_bytes(&input.documents)?;
+        check_total_input_bytes(&mut input.documents)?;
 
         ctx.report_progress(Some("preparing"), 10, 100, Some("preparing destination"));
         ctx.check_cancellation()?;
@@ -231,17 +231,23 @@ fn load_single(bytes: &[u8]) -> Result<PdfDocument, EngineError> {
 /// `InvalidInput` (a caller-input problem, reusing the existing per-input
 /// limit — not a new knob, not a malformed document).
 ///
-/// Only source lengths recorded by the loader count; documents built by
-/// earlier engine steps carry no recorded length and contribute zero. Each
-/// parsed input was already capped individually, so this gate only catches
-/// the combined size no single-input check can see.
-fn check_total_input_bytes(documents: &[PdfDocument]) -> Result<usize, EngineError> {
+/// File-backed inputs count their loader-recorded source length, unchanged.
+/// Documents built by earlier engine steps carry no recorded length, so
+/// they are serialized once here and counted at their output byte length:
+/// chaining engine operations must not smuggle unbounded bytes past the
+/// gate. Each parsed input was already capped individually, so this gate
+/// only catches the combined size no single-input check can see.
+fn check_total_input_bytes(documents: &mut [PdfDocument]) -> Result<usize, EngineError> {
     use crate::processing::pdf::core::loader::MAX_PDF_BYTES;
 
-    let total: usize = documents
-        .iter()
-        .filter_map(PdfDocument::source_byte_len)
-        .fold(0, usize::saturating_add);
+    let mut total: usize = 0;
+    for document in documents.iter_mut() {
+        let len = match document.source_byte_len() {
+            Some(recorded) => recorded,
+            None => document.save_to_bytes()?.len(),
+        };
+        total = total.saturating_add(len);
+    }
     if total > MAX_PDF_BYTES {
         return Err(EngineError::new(
             ErrorCode::InvalidInput,
@@ -904,13 +910,48 @@ mod tests {
     }
 
     #[test]
+    fn total_input_bytes_counts_serialized_length_for_engine_built_documents() {
+        // Engine-built documents carry no recorded source length; the gate
+        // must count their serialized bytes instead of treating them as
+        // free. (lopdf bakes write-time trailer bookkeeping on save, so the
+        // reference length is taken after the gate's measuring save: both
+        // are post-bookkeeping saves of the same bytes.)
+        let mut built = MergeOperation
+            .execute(
+                &ctx(),
+                input(vec![doc(fixtures::single_page_pdf())]),
+                MergeOptions::new(),
+            )
+            .expect("merge succeeds")
+            .document;
+        assert_eq!(built.source_byte_len(), None);
+        let counted = check_total_input_bytes(std::slice::from_mut(&mut built)).expect("under cap");
+        assert!(counted > 0, "engine-built input must count as non-zero");
+        // Reference length from a fresh identical build's first save (the
+        // gate measures the same first-save bytes; later saves carry 4
+        // bytes of stable lopdf trailer bookkeeping — verified stable,
+        // never growing).
+        let mut twin = MergeOperation
+            .execute(
+                &ctx(),
+                input(vec![doc(fixtures::single_page_pdf())]),
+                MergeOptions::new(),
+            )
+            .expect("merge succeeds")
+            .document;
+        let fresh_len = twin.save_to_bytes().expect("serializes").len();
+        assert_eq!(counted, fresh_len);
+    }
+
+    #[test]
     fn total_input_bytes_counts_only_recorded_lengths() {
-        // Loader-parsed documents contribute their byte length;
-        // engine-built documents (no recorded length) contribute zero.
-        let parsed = doc(fixtures::single_page_pdf());
+        // Loader-parsed documents contribute their recorded byte length;
+        // engine-built documents (no recorded length) contribute their
+        // serialized length (see the dedicated test above).
+        let mut parsed = doc(fixtures::single_page_pdf());
         let parsed_len = parsed.source_byte_len().expect("loader records length");
         assert_eq!(
-            check_total_input_bytes(&[parsed]).expect("under cap"),
+            check_total_input_bytes(std::slice::from_mut(&mut parsed)).expect("under cap"),
             parsed_len
         );
         let mut built = MergeOperation

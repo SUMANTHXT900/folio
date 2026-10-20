@@ -33,6 +33,31 @@ export interface ReviewDetectionSpan<T> {
   spanMs: number;
 }
 
+/** How one started queue item settled. */
+export type ReviewDetectionItemOutcome = 'completed' | 'failed' | 'cancelled';
+
+/**
+ * Per-item settle report for one started `process` call. Items never started
+ * (cancelled before scheduling) report no settle — the terminal `CANCELLED`
+ * rejection accounts for them. Collect-only, like `onItemSpan`.
+ */
+export interface ReviewDetectionSettle<T> {
+  /** The queued item that settled. */
+  item: T;
+  /** Stride-lane index that processed it (`0..laneCount-1`). */
+  workerIndex: number;
+  /** How this item settled. */
+  outcome: ReviewDetectionItemOutcome;
+  /** Completed items so far (excludes failures and cancels). */
+  completed: number;
+  /** Failed (non-cancel) items so far. */
+  failed: number;
+  /** Cancelled items so far. */
+  cancelled: number;
+  /** The queue total (frozen for the run). */
+  total: number;
+}
+
 /** Options for `runReviewDetectionQueue` (signature frozen — additive only). */
 export interface ReviewDetectionQueueOptions<T> {
   workerCount: number;
@@ -45,6 +70,13 @@ export interface ReviewDetectionQueueOptions<T> {
    * span. Collect-only — throwing here is caller error, not queue behavior.
    */
   onItemSpan?: (span: ReviewDetectionSpan<T>) => void;
+  /**
+   * Fires after every STARTED item settles with its outcome plus the
+   * completed/failed/cancelled tallies. Additive: `onProgress` keeps its
+   * completed-only meaning; this callback is what accounts failures and
+   * cancels honestly instead of letting progress drift. Collect-only.
+   */
+  onSettle?: (settle: ReviewDetectionSettle<T>) => void;
 }
 
 function cancelledError(): Error & { code: string } {
@@ -78,19 +110,48 @@ export async function runReviewDetectionQueue<T>(
   const requested = Math.floor(opts.workerCount);
   const laneCount = Math.max(1, Math.min(Number.isFinite(requested) ? requested : 1, total));
   if (opts.isCancelled?.()) throw cancelledError();
+  // `done` counts COMPLETED items only (failures and cancels never advance
+  // it); the separate tallies below let callers account every started item
+  // honestly instead of drifting progress on a cancel/failure.
   let done = 0;
+  let failed = 0;
+  let cancelled = 0;
   const runLane = async (workerIndex: number): Promise<void> => {
     for (let i = workerIndex; i < items.length; i += laneCount) {
       if (opts.isCancelled?.()) throw cancelledError();
       const item = items[i] as T;
       const start = nowMs();
+      let outcome: ReviewDetectionItemOutcome | null = null;
+      let failure: unknown = null;
       try {
         await opts.process(item, workerIndex);
+        done += 1;
+        outcome = 'completed';
+        opts.onProgress?.(done, total);
+      } catch (error) {
+        failure = error;
+        if ((error as { code?: unknown } | null)?.code === 'CANCELLED') {
+          cancelled += 1;
+          outcome = 'cancelled';
+        } else {
+          failed += 1;
+          outcome = 'failed';
+        }
       } finally {
         opts.onItemSpan?.({ item, workerIndex, spanMs: nowMs() - start });
+        if (outcome !== null) {
+          opts.onSettle?.({
+            item,
+            workerIndex,
+            outcome,
+            completed: done,
+            failed,
+            cancelled,
+            total,
+          });
+        }
       }
-      done += 1;
-      opts.onProgress?.(done, total);
+      if (failure !== null) throw failure;
     }
   };
   await Promise.all(Array.from({ length: laneCount }, (_, index) => runLane(index)));

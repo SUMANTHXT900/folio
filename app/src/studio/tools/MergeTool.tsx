@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useRef, useState } from 'react';
 import { Reorder, useDragControls, type DragControls } from 'framer-motion';
 import {
   ToolHeading,
@@ -12,15 +12,9 @@ import {
 import ContinueCard from '../components/ContinueCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
-import {
-  runStudioOperation,
-  consumePendingTransfer,
-  getStudioBytes,
-  closeStudioDoc,
-  type StudioDoc,
-  type StudioOutput,
-  type StudioJob,
-} from '../services/folio';
+import { runStudioOperation, type StudioOutput, type StudioJob } from '../services/folio';
+import { usePendingTransfer } from './usePendingTransfer';
+import { cancelledError, useCancelOnUnmount } from './studioJob';
 
 const MERGE_ICON = (
   <svg
@@ -44,10 +38,12 @@ const MergeDragRow = memo(function MergeDragRow({
   file,
   index,
   onRemove,
+  onMoveKey,
 }: {
   file: { id: string; name: string; sizeBytes: number; pageCount: number };
   index: number;
   onRemove: (id: string) => void;
+  onMoveKey: (index: number, dir: -1 | 1) => void;
 }) {
   const controls = useDragControls();
   return (
@@ -59,7 +55,13 @@ const MergeDragRow = memo(function MergeDragRow({
       style={{ touchAction: 'pan-y' }}
       whileDrag={{ scale: 1.015, boxShadow: '0 12px 28px -12px rgba(23,19,14,0.25)' }}
     >
-      <MergeRow file={file} index={index} onRemove={onRemove} dragControls={controls} />
+      <MergeRow
+        file={file}
+        index={index}
+        onRemove={onRemove}
+        onMoveKey={onMoveKey}
+        dragControls={controls}
+      />
     </Reorder.Item>
   );
 });
@@ -68,22 +70,40 @@ const MergeRow = memo(function MergeRow({
   file,
   index,
   onRemove,
+  onMoveKey,
   dragControls,
 }: {
   file: { id: string; name: string; sizeBytes: number; pageCount: number };
   index: number;
   onRemove: (id: string) => void;
+  onMoveKey: (index: number, dir: -1 | 1) => void;
   dragControls: DragControls;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-800 px-2 pl-3 py-3 select-none">
       {/* Drag handle — the ONLY touch point that starts a drag. The rest of
-          the row keeps the page's vertical scroll (pan-y). */}
-      <span
+          the row keeps the page's vertical scroll (pan-y). Keyboard: a real
+          button (Tab-reachable) — arrows nudge, Enter/Space moves later.
+          Pointer drag is unchanged. */}
+      <button
+        type="button"
         onPointerDown={(e) => dragControls.start(e)}
-        className="flex w-8 h-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-300 dark:text-ink-500 hover:text-brass-500 active:cursor-grabbing"
-        aria-label="Drag to reorder"
-        role="button"
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+            e.preventDefault();
+            onMoveKey(index, -1);
+          } else if (
+            e.key === 'ArrowDown' ||
+            e.key === 'ArrowRight' ||
+            e.key === 'Enter' ||
+            e.key === ' '
+          ) {
+            e.preventDefault();
+            onMoveKey(index, 1);
+          }
+        }}
+        className="flex w-11 h-11 min-w-[44px] min-h-[44px] shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-300 dark:text-ink-500 hover:text-brass-500 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-800"
+        aria-label={`Reorder ${file.name}: arrow keys move, Enter moves later`}
       >
         <svg
           width="18"
@@ -99,7 +119,7 @@ const MergeRow = memo(function MergeRow({
           <circle cx="12" cy="12" r="1.6" />
           <circle cx="12" cy="18" r="1.6" />
         </svg>
-      </span>
+      </button>
       <span className="w-6 text-sm font-mono text-brass-600 dark:text-brass-300 shrink-0 tabular-nums">
         {index + 1}
       </span>
@@ -126,7 +146,7 @@ const MergeRow = memo(function MergeRow({
       </div>
       <button
         onClick={() => onRemove(file.id)}
-        className="w-9 h-9 rounded-lg flex items-center justify-center text-ink-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors shrink-0"
+        className="w-11 h-11 min-w-[44px] min-h-[44px] rounded-lg flex items-center justify-center text-ink-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-800"
         aria-label={`Remove ${file.name}`}
       >
         <svg
@@ -149,9 +169,9 @@ const MergeRow = memo(function MergeRow({
 /* ------------------------------------------------------------------ */
 /* Cross-tool handoff (D-TOOLS-1): the shared `ContinueCard` + service  */
 /* pending-transfer slot (`services/folio.ts`) own the completion and   */
-/* staging side; this tool only consumes on mount (effect below) and    */
-/* passes its raw engine outputs through. Naming stays at the existing  */
-/* `smartOutputName` call site, unchanged.                              */
+/* staging side; this tool only consumes on mount (shared `usePendingTransfer` */
+/* hook below) and passes its raw engine outputs through. Naming stays at   */
+/* the existing `smartOutputName` call site, unchanged.                      */
 /* ------------------------------------------------------------------ */
 
 export default function MergeTool() {
@@ -167,22 +187,20 @@ export default function MergeTool() {
   const [stage, setStage] = useState<string | null>(null);
   const [fraction, setFraction] = useState<number | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
-  const [continuedFrom, setContinuedFrom] = useState<{
-    producedBy: string;
-    sourceName: string;
-  } | null>(null);
-  // Pending-transfer claim: docs handed off by another tool, referenced (never
-  // copied) into this mount's inputs. Released on unmount only when the user
-  // backs out without running (`ranRef`); `mountGenRef` + deferred release
-  // keep React StrictMode's fake unmount/remount from destroying the claim.
-  const claimedRef = useRef<StudioDoc[]>([]);
-  const ranRef = useRef(false);
-  const mountGenRef = useRef(0);
+  // Shared pending-transfer intake (claim + gen-guarded back-out release).
+  const { claimedRef, ranRef, continuedFrom, setContinuedFrom } = usePendingTransfer(
+    setFiles,
+    'multi',
+  );
 
   const handleRemove = useCallback(
     (id: string) => {
       claimedRef.current = claimedRef.current.filter((d) => d.id !== id);
       remove(id);
+      // Stale-result discipline (Split/Rearrange/Metadata parity): the
+      // completion card and any error describe the previous file set.
+      setDone(null);
+      setError(null);
     },
     [remove],
   );
@@ -191,40 +209,28 @@ export default function MergeTool() {
     claimedRef.current = [];
     setContinuedFrom(null);
     clear();
+    setDone(null);
+    setError(null);
   }, [clear]);
 
-  // Pending-transfer intake (mount once): a handed-off doc lands as the first
-  // input by reference — no re-upload, no bytes in state, only the handle is
-  // verified live (`getStudioBytes` existence check, result discarded).
-  useEffect(() => {
-    mountGenRef.current += 1;
-    const gen = mountGenRef.current;
-    const pending = consumePendingTransfer();
-    if (pending !== null) {
-      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
-      if (live.length > 0) {
-        claimedRef.current = live;
-        setFiles((prev) => {
-          const seen = new Set(prev.map((f) => f.id));
-          return [...live.filter((d) => !seen.has(d.id)), ...prev];
-        });
-        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
-      }
-    }
-    return () => {
-      // Back-out release, deferred one task: StrictMode's fake unmount is
-      // always superseded by a remount (generation check) before the timer
-      // fires, so only a real unmount releases the un-run claim (P5-1:
-      // `closeStudioDoc` frees bytes + render docs + thumb URLs).
-      const claimed = claimedRef.current;
-      window.setTimeout(() => {
-        if (mountGenRef.current !== gen) return;
-        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
-        if (ranRef.current) return;
-        for (const d of claimed) void closeStudioDoc(d.id);
-      }, 0);
-    };
-  }, [setFiles]);
+  // Keyboard reorder for the drag handles (AUD-4): swap the row at `index`
+  // one step in `dir`. Out-of-range nudges keep the previous array.
+  const moveFileKey = useCallback(
+    (index: number, dir: -1 | 1) => {
+      setFiles((prev) => {
+        const j = index + dir;
+        if (index < 0 || index >= prev.length || j < 0 || j >= prev.length) return prev;
+        const next = [...prev];
+        const a = next[index];
+        const b = next[j];
+        if (a === undefined || b === undefined) return prev;
+        next[index] = b;
+        next[j] = a;
+        return next;
+      });
+    },
+    [setFiles],
+  );
 
   const onMerge = async () => {
     if (files.length < 2) return;
@@ -266,7 +272,7 @@ export default function MergeTool() {
     } catch (e: unknown) {
       const code = e instanceof Error ? (e as { code?: string }).code : undefined;
       if (code === 'CANCELLED') {
-        setError(new Error('Merge cancelled.'));
+        setError(cancelledError('merge'));
       } else {
         setError(e);
       }
@@ -291,12 +297,7 @@ export default function MergeTool() {
   }, []);
 
   // Cancel the running job when the user navigates away
-  useEffect(
-    () => () => {
-      void jobRef.current?.cancel();
-    },
-    [],
-  );
+  useCancelOnUnmount(jobRef);
 
   return (
     <div>
@@ -325,7 +326,7 @@ export default function MergeTool() {
             </p>
             <button
               onClick={handleClear}
-              className="text-xs text-ink-400 hover:text-red-500 dark:text-ink-300 transition-colors px-2 py-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30"
+              className="text-xs text-ink-400 hover:text-red-500 dark:text-ink-300 transition-colors px-3 min-h-[44px] rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
             >
               Clear all
             </button>
@@ -356,7 +357,13 @@ export default function MergeTool() {
             className="flex flex-col gap-2 mb-6"
           >
             {files.map((f, i) => (
-              <MergeDragRow key={f.id} file={f} index={i} onRemove={handleRemove} />
+              <MergeDragRow
+                key={f.id}
+                file={f}
+                index={i}
+                onRemove={handleRemove}
+                onMoveKey={moveFileKey}
+              />
             ))}
           </Reorder.Group>
 

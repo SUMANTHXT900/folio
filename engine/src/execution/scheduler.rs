@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::core::error::EngineError;
+use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities};
 use crate::core::result::OperationResult;
 use crate::execution::cancellation::{CancellationSource, CancellationToken};
@@ -129,7 +129,7 @@ impl ExecutionEngine {
     where
         O: Operation,
     {
-        let _strategy = self.scheduler.strategy_for(&operation.capabilities());
+        let strategy = self.scheduler.strategy_for(&operation.capabilities());
 
         let job_id = JobId::new();
         let started_at = wall_now();
@@ -137,6 +137,18 @@ impl ExecutionEngine {
         // `wasm32-unknown-unknown`; the timer samples `performance.now()`
         // there with identical native behavior here.
         let timer = Timer::start();
+
+        // The strategy is intentionally never branched on here (`Inline`
+        // stays the only selected strategy): emit it at Debug so the
+        // discarded choice stays observable without changing behavior.
+        self.events.record(
+            EngineEvent::new(
+                LogLevel::Debug,
+                format!("{} scheduled with strategy {strategy:?}", operation.name()),
+            )
+            .with_job_id(job_id.clone())
+            .with_operation(operation.name()),
+        );
 
         self.events.record(
             EngineEvent::new(LogLevel::Info, format!("{} started", operation.name()))
@@ -148,10 +160,17 @@ impl ExecutionEngine {
             job_id.clone(),
             operation.name(),
             self.progress.clone(),
-            cancellation,
+            cancellation.clone(),
         );
 
-        let outcome: Result<O::Output, EngineError> = operation.execute(&ctx, input, options);
+        // Fail fast: an already-cancelled token never runs the operation;
+        // the outcome below reports it as `CANCELLED` like any other
+        // cancellation observed mid-execution.
+        let outcome: Result<O::Output, EngineError> = if cancellation.is_cancelled() {
+            Err(EngineError::cancelled(&job_id, operation.name()))
+        } else {
+            operation.execute(&ctx, input, options)
+        };
 
         let duration = timer.stop();
         let completed_at = wall_now();
@@ -170,10 +189,11 @@ impl ExecutionEngine {
             }
         });
 
-        let level = if outcome.is_ok() {
-            LogLevel::Info
-        } else {
-            LogLevel::Error
+        // Cancellations are routine control flow, not failures: Warn, not Error.
+        let level = match &outcome {
+            Ok(_) => LogLevel::Info,
+            Err(err) if err.code() == ErrorCode::Cancelled => LogLevel::Warn,
+            Err(_) => LogLevel::Error,
         };
         self.events.record(
             EngineEvent::new(
@@ -224,7 +244,14 @@ pub fn cancellation_source() -> CancellationSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::error::ErrorCode;
     use crate::core::operation::{OperationCapabilities, OperationContext};
+    use crate::core::result::CompletionStatus;
+    use crate::observability::logger::VecEventSink;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     struct OkOp;
 
@@ -267,5 +294,156 @@ mod tests {
         assert!(result.is_success());
         assert!(result.completed_at() >= result.started_at());
         assert_eq!(result.into_outcome().expect("ok"), 7);
+    }
+
+    struct FailOp;
+
+    impl Operation for FailOp {
+        type Input = ();
+        type Options = ();
+        type Output = u32;
+
+        fn name(&self) -> &'static str {
+            "test.fail"
+        }
+
+        fn capabilities(&self) -> OperationCapabilities {
+            OperationCapabilities::sequential_lightweight()
+        }
+
+        fn execute<C: OperationContext>(
+            &self,
+            _ctx: &C,
+            _input: (),
+            _options: (),
+        ) -> Result<u32, EngineError> {
+            Err(EngineError::new(
+                ErrorCode::ProcessingFailed,
+                "boom (test failure)",
+            ))
+        }
+    }
+
+    struct CancelOp;
+
+    impl Operation for CancelOp {
+        type Input = ();
+        type Options = ();
+        type Output = u32;
+
+        fn name(&self) -> &'static str {
+            "test.cancel"
+        }
+
+        fn capabilities(&self) -> OperationCapabilities {
+            OperationCapabilities::sequential_lightweight()
+        }
+
+        fn execute<C: OperationContext>(
+            &self,
+            _ctx: &C,
+            _input: (),
+            _options: (),
+        ) -> Result<u32, EngineError> {
+            Err(EngineError::new(ErrorCode::Cancelled, "cancelled by test"))
+        }
+    }
+
+    struct FlagOp {
+        ran: Arc<AtomicBool>,
+    }
+
+    impl Operation for FlagOp {
+        type Input = ();
+        type Options = ();
+        type Output = u32;
+
+        fn name(&self) -> &'static str {
+            "test.flag"
+        }
+
+        fn capabilities(&self) -> OperationCapabilities {
+            OperationCapabilities::sequential_lightweight()
+        }
+
+        fn execute<C: OperationContext>(
+            &self,
+            _ctx: &C,
+            _input: (),
+            _options: (),
+        ) -> Result<u32, EngineError> {
+            self.ran.store(true, Ordering::SeqCst);
+            Ok(1)
+        }
+    }
+
+    fn finish_event(sink: &VecEventSink) -> EngineEvent {
+        sink.snapshot()
+            .into_iter()
+            .find(|e| e.message().contains("finished"))
+            .expect("engine must emit a finish event")
+    }
+
+    #[test]
+    fn engine_emits_strategy_at_debug_level() {
+        let sink = Arc::new(VecEventSink::new());
+        let engine = ExecutionEngine::new().with_events(sink.clone());
+        let _ = engine.execute(&OkOp, (), ());
+        let matched = sink
+            .snapshot()
+            .into_iter()
+            .any(|e| e.level() == LogLevel::Debug && e.message().contains("Inline"));
+        assert!(
+            matched,
+            "expected a Debug-level strategy event mentioning Inline"
+        );
+    }
+
+    #[test]
+    fn pre_cancelled_token_fails_fast_without_running_operation() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let engine = ExecutionEngine::new();
+        let source = CancellationSource::new();
+        source.cancel();
+        let result =
+            engine.execute_with_cancellation(&FlagOp { ran: ran.clone() }, (), (), source.token());
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "already-cancelled job must not run the operation"
+        );
+        assert_eq!(result.status(), CompletionStatus::Cancelled);
+        assert_eq!(
+            result
+                .outcome()
+                .as_ref()
+                .expect_err("cancelled job must error")
+                .code(),
+            ErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancelled_outcome_logs_at_warn_level() {
+        let sink = Arc::new(VecEventSink::new());
+        let engine = ExecutionEngine::new().with_events(sink.clone());
+        let result = engine.execute(&CancelOp, (), ());
+        assert_eq!(result.status(), CompletionStatus::Cancelled);
+        assert_eq!(finish_event(&sink).level(), LogLevel::Warn);
+    }
+
+    #[test]
+    fn failed_outcome_logs_at_error_level() {
+        let sink = Arc::new(VecEventSink::new());
+        let engine = ExecutionEngine::new().with_events(sink.clone());
+        let _ = engine.execute(&FailOp, (), ());
+        assert_eq!(finish_event(&sink).level(), LogLevel::Error);
+    }
+
+    #[test]
+    fn successful_outcome_logs_at_info_level() {
+        let sink = Arc::new(VecEventSink::new());
+        let engine = ExecutionEngine::new().with_events(sink.clone());
+        let _ = engine.execute(&OkOp, (), ());
+        assert_eq!(finish_event(&sink).level(), LogLevel::Info);
     }
 }

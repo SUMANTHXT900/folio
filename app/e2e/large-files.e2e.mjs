@@ -51,6 +51,16 @@ function flag(name, fallback) {
 const DEV_URL = flag('--dev', 'http://localhost:5199');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
+// Security: `--no-sandbox` disables the Chrome sandbox — a compromised
+// renderer then runs with the user's full privileges instead of contained.
+// It is only justified in throwaway CI containers running as root, where
+// the sandbox cannot initialize. Gate: pass it only when CI needs it
+// (`FOLIO_CHROME_NO_SANDBOX=1`, or the standard `CI=true`); local runs
+// keep the sandbox, which works on dev machines. Never enable it locally
+// for convenience.
+const NO_SANDBOX_ARGS =
+  process.env.FOLIO_CHROME_NO_SANDBOX === '1' || process.env.CI === 'true' ? ['--no-sandbox'] : [];
+
 const FILE_NAMES = {
   small: 'generated.pdf',
   multi: '1.2.pdf',
@@ -150,7 +160,7 @@ async function main() {
     headless: 'shell',
     protocolTimeout: 600000,
     args: [
-      '--no-sandbox',
+      ...NO_SANDBOX_ARGS,
       '--disable-dev-shm-usage',
       '--mute-audio',
       '--disable-extensions',

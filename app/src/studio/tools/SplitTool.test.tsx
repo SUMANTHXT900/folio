@@ -303,6 +303,41 @@ describe('SplitTool completion handoff', () => {
   });
 });
 
+describe('SplitTool file errors (AUD: role=alert)', () => {
+  it('announces file intake errors assertively', async () => {
+    pdfFilesMock.error = 'Could not open that PDF.';
+    render(<SplitTool />);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toMatch('Could not open that PDF.');
+  });
+});
+
+describe('SplitTool preview dialog (AUD-6)', () => {
+  beforeEach(() => {
+    pdfFilesMock.files = [{ ...DOC }];
+    pageThumbsMock.thumbs = ['t1', 't2', 't3', 't4'];
+  });
+
+  it('moves focus in on open, closes on Escape, and marks aria-modal', async () => {
+    render(<SplitTool />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview Page 1' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    const close = screen.getByRole('button', { name: 'Close' });
+    expect(close.className).toMatch('min-h-[44px]');
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('keep/remove pills meet the 44px target', async () => {
+    render(<SplitTool />);
+    const pill = await screen.findByRole('button', { name: 'Remove Page 1' });
+    expect(pill.className).toMatch('min-h-[44px]');
+  });
+});
+
 describe('SplitTool thumbnail sharpness (F-23)', () => {
   beforeEach(() => {
     pdfFilesMock.files = [{ ...DOC }];

@@ -254,10 +254,16 @@ struct ProgressForwardState {
 /// - first percentage-bearing event of a phase → forward (sets the
 ///   phase baseline, so a new phase's 0% is never swallowed);
 /// - percentage advanced by ≥ 1.0 since the last forwarded one → forward;
+/// - same-phase percentage BELOW the last forwarded one (engine
+///   overlap/retry) → forward CLAMPED, never swallowed: the bar must not
+///   regress while work continues, and swallowing would stall the UI with
+///   no update at all. The cursor holds its high-water mark so the emit
+///   site can pin the wire percentage (see `ProgressSink::emit`);
 /// - `percentage == 100.0` → always forward, so the terminal 100% event
 ///   of a successful job can never be dropped by throttling.
 ///
-/// Returns `true` when the event is forwarded; `state` then advances to it.
+/// Returns `true` when the event is forwarded; `state` then advances to it,
+/// except for the clamped case, where it deliberately holds the mark.
 fn should_forward_progress(
     state: &mut ProgressForwardState,
     phase: Option<&str>,
@@ -267,10 +273,22 @@ fn should_forward_progress(
         return true;
     };
     let phase_changed = state.phase.as_deref() != phase;
+    if !phase_changed {
+        if let Some(last) = state.percentage {
+            if pct < last {
+                return true;
+            }
+        }
+    }
     let advanced = match state.percentage {
         Some(last) => pct - last >= 1.0,
         None => true,
     };
+    // Duplicate 100% always forwards (test-pinned): the glue cannot tell
+    // a redundant 100% from the terminal one — e.g. a `finalizing` 100%
+    // followed by a `completed` 100% — so dropping any 100% risks dropping
+    // the job's completion signal and stalling the UI at 99.x% forever. A
+    // repeated terminal event is harmless; a missing one is not.
     if phase_changed || advanced || pct >= 100.0 {
         state.phase = phase.map(str::to_string);
         state.percentage = Some(pct);
@@ -278,6 +296,16 @@ fn should_forward_progress(
     } else {
         false
     }
+}
+
+/// Pins a to-forward percentage to the cursor's high-water mark so the
+/// progress bar never regresses within a phase. Identity for normal
+/// forwards (the cursor already advanced to `pct`); pins a clamped
+/// backward jump to the mark. Cross-phase baselines are untouched — a new
+/// phase legitimately restarts its own percentage, and the cursor was
+/// already reset to it by the forwarding decision.
+fn clamp_to_high_water_mark(last: Option<f64>, pct: f64) -> f64 {
+    last.map(|mark| mark.max(pct)).unwrap_or(pct)
 }
 
 impl CallbackSink {
@@ -336,13 +364,21 @@ impl ProgressSink for CallbackSink {
         if !forward {
             return;
         }
+        // Clamp the wire percentage to the cursor's high-water mark: a
+        // same-phase backward jump forwards WITHOUT moving the cursor, so
+        // the bar pins instead of regressing. Counts and messages still
+        // carry the raw event values (facts); only the bar is clamped.
+        let percentage = event.percentage().map(|p| {
+            let state = self.progress_forward.lock().expect("glue progress lock");
+            clamp_to_high_water_mark(state.percentage, p) / 100.0
+        });
         self.send(json!({
             "timestamp_ms": system_millis(event.timestamp()),
             "kind": "progress",
             "phase": event.phase(),
             "completed": event.completed(),
             "total": event.total(),
-            "percentage": event.percentage().map(|p| p / 100.0),
+            "percentage": percentage,
             "message": event.message(),
             "engine_job_id": event.job_id().to_string(),
         }));
@@ -1133,6 +1169,52 @@ mod tests {
             Some("finalizing"),
             Some(100.0)
         ));
+    }
+
+    #[test]
+    fn same_phase_backward_jump_forwards_clamped_without_moving_cursor() {
+        // Engine overlap/retry reporting a lower percentage than already
+        // forwarded: still forwarded (the UI gets an update), but the
+        // cursor holds its high-water mark so the emit site can pin the
+        // wire percentage instead of regressing the bar.
+        let mut state = ProgressForwardState::default();
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(50.0)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(40.0)
+        ));
+        assert_eq!(
+            state,
+            ProgressForwardState {
+                phase: Some("copying".to_string()),
+                percentage: Some(50.0),
+            }
+        );
+        // The bar resumes from the mark: 50.5 is still redundant, 51.0
+        // advances.
+        assert!(!should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(50.5)
+        ));
+        assert!(should_forward_progress(
+            &mut state,
+            Some("copying"),
+            Some(51.0)
+        ));
+    }
+
+    #[test]
+    fn clamp_pins_backward_jumps_and_is_identity_otherwise() {
+        assert_eq!(clamp_to_high_water_mark(Some(50.0), 40.0), 50.0);
+        assert_eq!(clamp_to_high_water_mark(Some(50.0), 50.0), 50.0);
+        assert_eq!(clamp_to_high_water_mark(Some(50.0), 51.0), 51.0);
+        assert_eq!(clamp_to_high_water_mark(None, 40.0), 40.0);
     }
 
     #[test]

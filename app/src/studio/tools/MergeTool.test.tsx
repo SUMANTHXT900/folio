@@ -168,6 +168,96 @@ describe('MergeTool claim lifecycle (P5-1)', () => {
   });
 });
 
+describe('MergeTool keyboard reorder (AUD-4)', () => {
+  it('arrow keys on the handle reorder without a pointer drag', async () => {
+    const claimed = doc();
+    const second: StudioDoc = {
+      id: 'studio-10',
+      name: 'b.pdf',
+      sizeBytes: 50,
+      pageCount: 5,
+    };
+    consumeMock.mockReturnValue(transfer([claimed]));
+    bytesMock.mockImplementation((id) =>
+      id === claimed.id ? new Uint8Array([1, 2, 3]) : undefined,
+    );
+    openMock.mockResolvedValue([second]);
+    const bytes = new Uint8Array([37, 80, 68, 70, 45]);
+    runMock.mockReturnValue({
+      done: Promise.resolve({
+        summary: { inputDocumentCount: 2, inputPageCount: 9, outputPageCount: 9 },
+        outputs: [{ name: 'engine.pdf', bytes, byteLength: bytes.length, pageCount: 9 }],
+        durationMs: 7,
+      } satisfies StudioResult),
+      cancel: vi.fn(),
+    });
+
+    const { container } = render(createElement(MergeTool));
+    await screen.findByText(/Continued from Rearrange/);
+    const input = container.querySelector('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input as HTMLElement, {
+      target: { files: [new File(['%PDF-x'], 'b.pdf', { type: 'application/pdf' })] },
+    });
+    expect(await screen.findByText('2 files selected — ready to merge')).toBeTruthy();
+
+    // Native button: one tab stop, 44px hit area, visible focus ring.
+    const handle = screen.getByRole('button', { name: /Reorder report-rearranged/ });
+    expect(handle.tagName).toBe('BUTTON');
+    expect(handle.className).toMatch('min-h-[44px]');
+    fireEvent.keyDown(handle, { key: 'ArrowDown' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Merge 2 files' }));
+    await screen.findByTestId('continue-card');
+    // The keyboard nudge swapped the inputs: b.pdf now merges first.
+    expect(runMock).toHaveBeenCalledWith(
+      'pdf.merge',
+      ['studio-10', 'studio-9'],
+      {},
+      expect.anything(),
+    );
+  });
+});
+
+describe('MergeTool stale results', () => {
+  it('clear-all drops the completion card from the previous file set', async () => {
+    const claimed = doc();
+    const second: StudioDoc = {
+      id: 'studio-10',
+      name: 'b.pdf',
+      sizeBytes: 50,
+      pageCount: 5,
+    };
+    consumeMock.mockReturnValue(transfer([claimed]));
+    bytesMock.mockImplementation((id) =>
+      id === claimed.id ? new Uint8Array([1, 2, 3]) : undefined,
+    );
+    openMock.mockResolvedValue([second]);
+    const bytes = new Uint8Array([37, 80, 68, 70, 45]);
+    runMock.mockReturnValue({
+      done: Promise.resolve({
+        summary: { inputDocumentCount: 2, inputPageCount: 9, outputPageCount: 9 },
+        outputs: [{ name: 'engine.pdf', bytes, byteLength: bytes.length, pageCount: 9 }],
+        durationMs: 7,
+      } satisfies StudioResult),
+      cancel: vi.fn(),
+    });
+
+    const { container } = render(createElement(MergeTool));
+    await screen.findByText(/Continued from Rearrange/);
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input as HTMLElement, {
+      target: { files: [new File(['%PDF-x'], 'b.pdf', { type: 'application/pdf' })] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Merge 2 files' }));
+    await screen.findByTestId('continue-card');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    expect(screen.queryByTestId('continue-card')).toBeNull();
+    expect(await screen.findByText('Drop your PDFs here')).toBeTruthy();
+  });
+});
+
 describe('MergeTool completion handoff', () => {
   it('passes raw outputs with the existing smart name and keeps inputs on back-to-edit', async () => {
     const claimed = doc();

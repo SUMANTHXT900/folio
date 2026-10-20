@@ -27,9 +27,7 @@ export const RELEASE_NOTES: ReleaseNote[] = [
   {
     build: 'v1.12.1 release',
     date: '2026-10-18',
-    notes: [
-      'The scanner shutter answers instantly now — no more freeze when you tap to capture.',
-    ],
+    notes: ['The scanner shutter answers instantly now — no more freeze when you tap to capture.'],
   },
   {
     build: 'v1.12.0 release',

@@ -22,4 +22,27 @@ describe('InstallCard', () => {
     // nothing to spend, so no Install control renders.
     expect(screen.queryByRole('button', { name: 'Install app' })).toBeNull();
   });
+
+  it('after a dismissed prompt, points at the browser menu — never an in-place retry', async () => {
+    // The prompt is one-shot: Chromium spends the stashed event on the
+    // first prompt() and never re-fires it in-visit, so no retry button
+    // can exist here — the copy must say the menu, not "retry from here".
+    const { installPrompt } = await import('../pwa/usePwaInstall');
+    const event = new Event('beforeinstallprompt') as Event & {
+      prompt: () => Promise<void>;
+      userChoice: Promise<{ outcome: 'dismissed' }>;
+    };
+    event.prompt = async () => undefined;
+    event.userChoice = Promise.resolve({ outcome: 'dismissed' });
+    window.dispatchEvent(event);
+    await installPrompt.promptInstall();
+
+    render(<InstallCard />);
+    expect(
+      screen.getByText('Install prompt dismissed — install anytime from your browser menu.'),
+    ).toBeTruthy();
+    expect(screen.queryByText(/retry anytime from here/i)).toBeNull();
+    // Spent prompt: no button to offer.
+    expect(screen.queryByRole('button', { name: 'Install app' })).toBeNull();
+  });
 });

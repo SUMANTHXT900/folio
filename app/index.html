@@ -2,6 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- CSP meta fallback (report-first safe): mirrors the Content-Security-Policy
+         in public/_headers for transports that ignore it (e.g. file:// preview).
+         frame-ancestors is intentionally omitted — it is ignored in <meta> and
+         only enforced via the header. style-src 'unsafe-inline' covers the
+         React-injected view-transition <style> (StudioApp VT_CSS); script-src
+         'wasm-unsafe-eval' keeps WASM streaming compile working in Chrome. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; child-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; manifest-src 'self'; upgrade-insecure-requests"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#faf7f2" />
     <meta

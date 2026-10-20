@@ -16,12 +16,11 @@ import {
   closeStudioDoc,
   openStudioBytes,
   runStudioOperation,
-  consumePendingTransfer,
-  getStudioBytes,
-  type StudioDoc,
   type StudioOutput,
   type StudioJob,
 } from '../services/folio';
+import { usePendingTransfer } from './usePendingTransfer';
+import { cancelledError, useCancelOnUnmount } from './studioJob';
 import type { DocumentMetadataData, PdfDateData } from '../../types/engine';
 import { parseMetadataDate } from '../../utils/parse';
 
@@ -66,6 +65,13 @@ const DATE_FIELDS = [
   { key: 'modificationDate', label: 'Modification date' },
 ] as const;
 
+/**
+ * Client-side length convenience for the six free-text inputs. Never a
+ * security boundary (client-side caps are trivially bypassed): the engine
+ * rejects over-cap values with `INVALID_INPUT`, which is the real limit.
+ */
+const MAX_METADATA_TEXT_LENGTH = 500;
+
 type TextKey = (typeof TEXT_FIELDS)[number]['key'];
 type DateKey = (typeof DATE_FIELDS)[number]['key'];
 
@@ -104,51 +110,11 @@ export default function MetadataTool() {
     modificationDate: '',
   });
   const jobRef = useRef<StudioJob | null>(null);
-  const [continuedFrom, setContinuedFrom] = useState<{
-    producedBy: string;
-    sourceName: string;
-  } | null>(null);
-  // Pending-transfer claim: same back-out-release discipline as
-  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
-  // uploaded, never in state).
-  const claimedRef = useRef<StudioDoc[]>([]);
-  const ranRef = useRef(false);
-  const mountGenRef = useRef(0);
-
-  // Pending-transfer intake (mount once): the handed-off doc becomes the
-  // single input by reference — verified live, never re-uploaded.
-  useEffect(() => {
-    mountGenRef.current += 1;
-    const gen = mountGenRef.current;
-    const pending = consumePendingTransfer();
-    if (pending !== null) {
-      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
-      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
-      if (firstDoc !== undefined) {
-        claimedRef.current = [firstDoc];
-        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
-        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
-      }
-    }
-    return () => {
-      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
-      const claimed = claimedRef.current;
-      window.setTimeout(() => {
-        if (mountGenRef.current !== gen) return;
-        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
-        if (ranRef.current) return;
-        for (const d of claimed) void closeStudioDoc(d.id);
-      }, 0);
-    };
-  }, [setFiles]);
+  // Shared pending-transfer intake (claim + gen-guarded back-out release).
+  const { claimedRef, ranRef, continuedFrom } = usePendingTransfer(setFiles, 'single');
 
   // Cancel the running job when the user navigates away.
-  useEffect(
-    () => () => {
-      void jobRef.current?.cancel();
-    },
-    [],
-  );
+  useCancelOnUnmount(jobRef);
 
   useEffect(() => {
     setMeta(null);
@@ -274,7 +240,7 @@ export default function MetadataTool() {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
       if (code === 'CANCELLED') {
-        setError(new Error('Metadata save cancelled.'));
+        setError(cancelledError('metadata'));
       } else {
         setError(e);
       }
@@ -296,6 +262,15 @@ export default function MetadataTool() {
   const handleBackToEdit = useCallback(() => {
     setDone(null);
   }, []);
+
+  // No-op honesty: an empty patch would "succeed" without changing a byte
+  // — keep Save disabled with the reason inline instead of celebrating a
+  // Done card for doing nothing. Any keystroke (even whitespace, which the
+  // Clear-guidance error then explains) or Clear tick counts as a change.
+  const hasChanges =
+    TEXT_FIELDS.some(({ key }) => texts[key] !== '') ||
+    DATE_FIELDS.some(({ key }) => dates[key] !== '') ||
+    Object.values(clears).some(Boolean);
 
   const rows: Array<[string, string]> = meta
     ? [
@@ -350,6 +325,7 @@ export default function MetadataTool() {
               remove(file.id);
               setDone(null);
               setMeta(null);
+              setError(null);
             }}
           />
 
@@ -358,7 +334,7 @@ export default function MetadataTool() {
               Current properties
             </p>
             {reading ? (
-              <div className="flex items-center gap-2 text-sm text-ink-400">
+              <div className="flex items-center gap-2 text-sm text-ink-400 dark:text-ink-300">
                 <Spinner /> Reading…
               </div>
             ) : meta ? (
@@ -379,7 +355,7 @@ export default function MetadataTool() {
                 ))}
               </dl>
             ) : (
-              <p className="text-xs text-ink-400">No metadata yet.</p>
+              <p className="text-xs text-ink-400 dark:text-ink-300">No metadata yet.</p>
             )}
           </Card>
 
@@ -403,8 +379,9 @@ export default function MetadataTool() {
                     </label>
                     <input
                       id={`studio-meta-${key}`}
-                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
+                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400 focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-900"
                       value={texts[key]}
+                      maxLength={MAX_METADATA_TEXT_LENGTH}
                       onChange={(e) => setTexts((p) => ({ ...p, [key]: e.target.value }))}
                     />
                   </div>
@@ -429,7 +406,7 @@ export default function MetadataTool() {
                     </label>
                     <input
                       id={`studio-meta-${key}`}
-                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm font-mono text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
+                      className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2 min-h-[44px] text-sm font-mono text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400 focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-900"
                       value={dates[key]}
                       placeholder="2026-01-23 09:30:00 +0530"
                       onChange={(e) => setDates((p) => ({ ...p, [key]: e.target.value }))}
@@ -450,7 +427,11 @@ export default function MetadataTool() {
 
           {!done && (
             <div className="flex items-center gap-3">
-              <Button onClick={onSave} disabled={working || reading} className="w-full">
+              <Button
+                onClick={onSave}
+                disabled={working || reading || !hasChanges}
+                className="w-full"
+              >
                 {working ? 'Saving…' : 'Save metadata'}
               </Button>
               {working && (
@@ -459,6 +440,11 @@ export default function MetadataTool() {
                 </Button>
               )}
             </div>
+          )}
+          {!done && !working && !reading && !hasChanges && (
+            <p className="text-xs text-ink-400 dark:text-ink-300">
+              No changes yet — edit a field or tick Clear to remove a value.
+            </p>
           )}
           {working && fraction !== null && (
             <div className="w-full max-w-xs">

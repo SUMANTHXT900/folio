@@ -72,12 +72,24 @@ function usePreviewSrc(
   const recoveredUrlRef = useRef<string | null>(null);
 
   // Sync when the page's URLs change (thumb minted, preview replaced):
-  // rows must not keep rendering a revoked object URL.
+  // rows must not keep rendering a revoked object URL. When healed from
+  // file, a later canonical change (rotation re-import, thumb arrival)
+  // is adopted — the healed URL is revoked so no blob leaks — and the
+  // retry budget resets so the fresh URL gets its own heal chance.
   useEffect(() => {
-    if (recoveredUrlRef.current === null) {
-      setSrc(canonical);
-      setFailed(canonical === '');
+    const healed = recoveredUrlRef.current;
+    if (healed !== null) {
+      if (canonical !== '' && canonical !== healed) {
+        URL.revokeObjectURL(healed);
+        recoveredUrlRef.current = null;
+        setRetried(false);
+        setSrc(canonical);
+        setFailed(false);
+      }
+      return;
     }
+    setSrc(canonical);
+    setFailed(canonical === '');
   }, [canonical]);
 
   useEffect(() => {
@@ -180,13 +192,13 @@ const PageRow = memo(function PageRow({
           of the row keeps the page's vertical scroll (pan-y). */}
       <span
         onPointerDown={(e) => dragControls.start(e)}
-        className="flex h-8 w-7 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 hover:text-brass-500 active:cursor-grabbing sm:w-8"
+        className="flex h-8 w-7 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 dark:text-ink-300 hover:text-brass-500 active:cursor-grabbing sm:w-8"
         aria-label={`Drag ${page.name} to reorder`}
         role="button"
       >
         {GripIcon}
       </span>
-      <span className="w-5 shrink-0 text-center text-xs font-mono text-ink-400 tabular-nums sm:w-6">
+      <span className="w-5 shrink-0 text-center text-xs font-mono text-ink-400 dark:text-ink-300 tabular-nums sm:w-6">
         {position + 1}
       </span>
       <button
@@ -213,7 +225,7 @@ const PageRow = memo(function PageRow({
         <button
           onClick={() => onMove(page.id, -1)}
           disabled={isFirst}
-          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 text-ink-400 dark:text-ink-300 hover:text-brass-500 disabled:opacity-30"
           aria-label={`Move ${page.name} earlier`}
         >
           ↑
@@ -221,7 +233,7 @@ const PageRow = memo(function PageRow({
         <button
           onClick={() => onMove(page.id, 1)}
           disabled={isLast}
-          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 text-ink-400 dark:text-ink-300 hover:text-brass-500 disabled:opacity-30"
           aria-label={`Move ${page.name} later`}
         >
           ↓

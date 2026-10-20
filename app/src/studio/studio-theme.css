@@ -14,7 +14,11 @@
   --color-ink-700: #3a3126;
   --color-ink-600: #4a4033;
   --color-ink-500: #64594a;
-  --color-ink-400: #8a7d6a;
+  /* Ink-400 is the lightest running-text token on paper: 4.5:1 minimum at
+     text-xs on paper-50/paper-100 (#776a57 → 5.1/4.8:1). Usages on dark
+     surfaces must pair with dark:text-ink-300 (a single token cannot pass
+     on both paper and ink-950). */
+  --color-ink-400: #776a57;
   --color-ink-300: #c3b69e;
 
   /* Rust / brass accent */

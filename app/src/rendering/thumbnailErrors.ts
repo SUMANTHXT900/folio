@@ -8,7 +8,7 @@
  * exceptions never escape — they are wrapped as `THUMBNAIL_RENDER_FAILED`.
  */
 
-import { RenderError } from './errors';
+import { RenderError, truncatedCause } from './errors';
 
 export type ThumbnailErrorCode =
   | 'THUMBNAIL_INVALID_INPUT'
@@ -49,13 +49,6 @@ export function isThumbnailError(error: unknown): error is ThumbnailError {
 export interface ThumbnailErrorContext {
   documentId?: string;
   pageNumber?: number;
-}
-
-/** Truncates an underlying cause for `details` without dumping unbounded text. */
-function truncatedCause(error: unknown): string {
-  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  const limit = 300;
-  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
 /**

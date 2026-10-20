@@ -9,8 +9,10 @@ import {
   browserImageRenderer,
   outputMime,
   preparePageBytes,
+  rotationTargetSize,
   type ImageRenderer,
 } from './imagePrepare';
+import { MAX_IMPORT_LONG_EDGE } from './imageImport';
 import { createPage } from './imagePages';
 
 function stubRenderer(bytes = new Uint8Array([9, 9, 9])): ImageRenderer & {
@@ -97,6 +99,22 @@ describe('preparePageBytes', () => {
   });
 });
 
+describe('rotationTargetSize (import-budget clamp)', () => {
+  it('keeps small sources at the swapped size (no upscale)', () => {
+    expect(rotationTargetSize(40, 30, 90)).toEqual({ width: 30, height: 40 });
+    expect(rotationTargetSize(1920, 1080, 180)).toEqual({ width: 1920, height: 1080 });
+    expect(rotationTargetSize(2500, 1406, 270)).toEqual({ width: 1406, height: 2500 });
+  });
+
+  it('clamps oversized sources to the shared import budget', () => {
+    expect(MAX_IMPORT_LONG_EDGE).toBe(2500);
+    // 4000×3000 rotated 90° → 3000×4000 scaled by 2500/4000 → 1875×2500.
+    expect(rotationTargetSize(4000, 3000, 90)).toEqual({ width: 1875, height: 2500 });
+    // 180° keeps orientation: 4000×3000 → 2500×1875 (same as planNormalization).
+    expect(rotationTargetSize(4000, 3000, 180)).toEqual({ width: 2500, height: 1875 });
+  });
+});
+
 describe('browserImageRenderer JPEG-out (5-2)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -159,7 +177,63 @@ describe('browserImageRenderer JPEG-out (5-2)', () => {
     expect(calls).toContain('toBlob:image/jpeg:0.95');
     // Source bitmap + worker snapshot each released exactly once (the
     // worker transfer neuters the sender's copy, so its close is a no-op;
-    // without a worker the main-thread fallback encodes from the snapshot).
+    // without a worker the fallback encodes the source canvas directly).
     expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it('clamps an oversized rotation to the import budget before sizing the canvas', async () => {
+    const { canvas, ctx } = stubCanvas();
+    const createElementSpy = vi
+      .spyOn(document, 'createElement')
+      .mockReturnValue(canvas as unknown as HTMLElement);
+    const close = vi.fn();
+    (globalThis as unknown as Record<string, unknown>)['createImageBitmap'] = async (
+      source: unknown,
+    ) => {
+      // Second call snapshots the canvas: assert the canvas was already clamped.
+      if (source === canvas) {
+        expect(canvas.width).toBe(1875);
+        expect(canvas.height).toBe(2500);
+      }
+      return { width: 40, height: 30, close };
+    };
+    const file = new File(['x'], 'huge.jpg', { type: 'image/jpeg' });
+    // Source decodes as 4000×3000 in the bitmap mock below — override to large.
+    (globalThis as unknown as Record<string, unknown>)['createImageBitmap'] = async (
+      source: unknown,
+    ) => {
+      if (source instanceof File || source instanceof Blob)
+        return { width: 4000, height: 3000, close };
+      expect(canvas.width).toBe(1875);
+      expect(canvas.height).toBe(2500);
+      return { width: 1875, height: 2500, close };
+    };
+    const bytes = await browserImageRenderer.rotateToBytes(file, 90, 'image/jpeg');
+    expect(Array.from(bytes)).toEqual([1, 2, 3]);
+    expect(ctx.fillRect).toHaveBeenCalledWith(0, 0, 1875, 2500);
+    expect(createElementSpy).toHaveBeenCalledTimes(1);
+    expect(canvas.width).toBe(0);
+  });
+
+  it('fallback encodes the source canvas once (no second canvas, no re-draw)', async () => {
+    const { canvas, ctx } = stubCanvas();
+    const createElementSpy = vi
+      .spyOn(document, 'createElement')
+      .mockReturnValue(canvas as unknown as HTMLElement);
+    const close = vi.fn();
+    (globalThis as unknown as Record<string, unknown>)['createImageBitmap'] = async (
+      source: unknown,
+    ) => {
+      if (source instanceof File || source instanceof Blob) return { width: 40, height: 30, close };
+      return { width: 30, height: 40, close };
+    };
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    const bytes = await browserImageRenderer.rotateToBytes(file, 90, 'image/jpeg');
+    // One canvas total (source only) — the old snapshot re-draw canvas is gone.
+    expect(createElementSpy).toHaveBeenCalledTimes(1);
+    // One rotation draw only — no snapshot re-draw.
+    expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+    // Source-canvas toBlob carries the same bytes the worker path would encode.
+    expect(Array.from(bytes)).toEqual([1, 2, 3]);
   });
 });

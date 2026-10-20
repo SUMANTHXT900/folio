@@ -175,3 +175,75 @@ describe('runReviewDetectionQueue item spans (measure-only)', () => {
     expect([...seen].sort((a, b) => a - b)).toEqual([1, 2]);
   });
 });
+
+describe('runReviewDetectionQueue settle accounting (fail/cancel honesty)', () => {
+  it('counts completed items only in onProgress and reports the failure separately', async () => {
+    const progress: Array<[number, number]> = [];
+    const settles: Array<{ item: number; outcome: string; completed: number; failed: number }> = [];
+    await expect(
+      runReviewDetectionQueue([1, 2, 3], {
+        workerCount: 1,
+        process: async (item) => {
+          if (item === 2) throw new Error('detect boom');
+        },
+        onProgress: (done, total) => {
+          progress.push([done, total]);
+        },
+        onSettle: (settle) => {
+          settles.push({
+            item: settle.item,
+            outcome: settle.outcome,
+            completed: settle.completed,
+            failed: settle.failed,
+          });
+        },
+      }),
+    ).rejects.toThrow('detect boom');
+    // Progress advanced only for the completed item — the failure never
+    // drifted it forward.
+    expect(progress).toEqual([[1, 3]]);
+    expect(settles).toEqual([
+      { item: 1, outcome: 'completed', completed: 1, failed: 0 },
+      { item: 2, outcome: 'failed', completed: 1, failed: 1 },
+    ]);
+  });
+
+  it('reports a worker-cancelled item as cancelled, not failed', async () => {
+    const cancelled = Object.assign(new Error('scanic request cancelled'), { code: 'CANCELLED' });
+    const outcomes: string[] = [];
+    const progress: Array<[number, number]> = [];
+    await expect(
+      runReviewDetectionQueue([1, 2], {
+        workerCount: 1,
+        process: async (item) => {
+          if (item === 2) throw cancelled;
+        },
+        onProgress: (done, total) => {
+          progress.push([done, total]);
+        },
+        onSettle: (settle) => {
+          outcomes.push(settle.outcome);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(outcomes).toEqual(['completed', 'cancelled']);
+    expect(progress).toEqual([[1, 2]]);
+  });
+
+  it('reports no settle for items never started (already cancelled)', async () => {
+    const settles: unknown[] = [];
+    const process = vi.fn(async () => undefined);
+    await expect(
+      runReviewDetectionQueue([1, 2, 3], {
+        workerCount: 2,
+        process,
+        isCancelled: () => true,
+        onSettle: (settle) => {
+          settles.push(settle);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'CANCELLED' });
+    expect(process).not.toHaveBeenCalled();
+    expect(settles).toHaveLength(0);
+  });
+});

@@ -5,17 +5,23 @@
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
+  __resetEncodeWorkerForTests,
   __setEncodeWorkerFactoryForTests,
   browserImportRenderer,
   disposeEncodeWorker,
   ENCODE_PROTOCOL_VERSION,
+  ENCODE_WORKER_BOOT_RETRY_MS,
   EncodeWorkerUnavailableError,
   encodeBitmapToJpeg,
   getEncodeDroppedMessages,
+  isPngFile,
+  isPngFileWithMagic,
+  isPngMagicBytes,
   MAX_IMPORT_LONG_EDGE,
   prepareImportFile,
   planNormalization,
   runImportQueue,
+  sniffPngMagic,
   THUMB_LONG_EDGE,
   thumbTargetFor,
   type ImportRenderer,
@@ -166,6 +172,46 @@ describe('prepareImportFile', () => {
     );
     expect(close).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledWith(decoded);
+  });
+});
+
+describe('PNG content-magic sniff (renamed fixtures)', () => {
+  const PNG_HEAD = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+
+  it('matches the 8-byte PNG signature and rejects JPEG bytes', () => {
+    expect(isPngMagicBytes(PNG_HEAD)).toBe(true);
+    expect(isPngMagicBytes(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]))).toBe(false);
+    expect(isPngMagicBytes(new Uint8Array([1, 2, 3]))).toBe(false);
+  });
+
+  it('keeps the MIME/extension fast path (no I/O)', () => {
+    expect(isPngFile(new File(['x'], 'a.png', { type: 'image/png' }))).toBe(true);
+    expect(isPngFile(new File(['x'], 'a.jpg', { type: 'image/jpeg' }))).toBe(false);
+    expect(isPngFile(new File(['x'], 'a.PNG', { type: '' }))).toBe(true);
+  });
+
+  it('sniffs renamed PNG content (wrong .jpg name + jpeg MIME)', async () => {
+    const renamed = new File([PNG_HEAD], 'photo.jpg', { type: 'image/jpeg' });
+    expect(isPngFile(renamed)).toBe(false);
+    expect(await sniffPngMagic(renamed)).toBe(true);
+    expect(await isPngFileWithMagic(renamed)).toBe(true);
+  });
+
+  it('converts renamed PNGs to JPEG instead of retaining them', async () => {
+    const decoded = { width: 1280, height: 960, bitmap: { tag: 'bitmap' } };
+    const resizeToJpeg = vi.fn(async () => new Uint8Array([7, 7]));
+    const close = vi.fn();
+    const renderer: ImportRenderer = {
+      decode: vi.fn(async () => decoded),
+      resizeToJpeg,
+      close,
+    };
+    const renamed = new File([PNG_HEAD], 'screenshot.jpg', { type: 'image/jpeg' });
+    const out = await prepareImportFile(renamed, renderer);
+    expect(out.retainedOriginal).toBe(false);
+    expect(out.file.type).toBe('image/jpeg');
+    expect(out.name).toBe('screenshot.jpg');
+    expect(resizeToJpeg).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -456,6 +502,70 @@ describe('encode worker offload (P2 item 11)', () => {
     deliver({ kind: 'result' }); // No numeric id: uncorrelatable.
     deliver({ kind: 'result', id: 424242, ok: true }); // Unknown job.
     expect(getEncodeDroppedMessages()).toBe(4);
+  });
+
+  it('retries boot once after a delay, then latches (bounded)', async () => {
+    expect(ENCODE_WORKER_BOOT_RETRY_MS).toBe(1000);
+    __resetEncodeWorkerForTests();
+    let constructions = 0;
+    const FailingWorker = class {
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      constructor() {
+        constructions += 1;
+        throw new Error('workers blocked');
+      }
+      postMessage(): void {
+        // Never reached — construction throws first.
+      }
+      terminate(): void {
+        // Never reached — construction throws first.
+      }
+    };
+    __setEncodeWorkerFactoryForTests(() => new FailingWorker() as unknown as Worker);
+    // First boot fails → unavailable (bitmap not consumed).
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+    expect(constructions).toBe(1);
+    // Immediate second call reuses the cached false (no re-probe yet).
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+    expect(constructions).toBe(1);
+    // Past the retry delay the single re-probe runs.
+    await new Promise((resolve) => setTimeout(resolve, ENCODE_WORKER_BOOT_RETRY_MS + 100));
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+    expect(constructions).toBe(2);
+    // Bounded: a second failure latches permanently (no third construction).
+    await new Promise((resolve) => setTimeout(resolve, ENCODE_WORKER_BOOT_RETRY_MS + 100));
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+    expect(constructions).toBe(2);
+  });
+
+  it('recovers on the single retry when the worker starts working', async () => {
+    __resetEncodeWorkerForTests();
+    let calls = 0;
+    const ReplyingWorker = fakeEncodeWorker(true, [9, 9]);
+    __setEncodeWorkerFactoryForTests(() => {
+      calls += 1;
+      if (calls === 1) throw new Error('transient boot race');
+      return new ReplyingWorker() as unknown as Worker;
+    });
+    await expect(
+      encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92),
+    ).rejects.toBeInstanceOf(EncodeWorkerUnavailableError);
+    expect(calls).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, ENCODE_WORKER_BOOT_RETRY_MS + 100));
+    // The single re-probe constructs again and succeeds.
+    await expect(encodeBitmapToJpeg(fakeBitmap(), { width: 8, height: 8 }, 0.92)).resolves.toEqual(
+      new Uint8Array([9, 9]),
+    );
+    expect(calls).toBe(2);
   });
 
   it('dispose terminates the worker, fails in-flight jobs, and recreates on next use', async () => {

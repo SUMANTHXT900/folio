@@ -10,7 +10,7 @@
  * thumbnail engine never issues a separate `getPageDimensions` query
  * (asserted via `dimsCalls` staying empty).
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DefaultPdfThumbnailEngine } from './DefaultPdfThumbnailEngine';
 import type { PdfRenderEngine } from './PdfRenderEngine';
 import { RenderError } from './errors';
@@ -496,6 +496,62 @@ describe('generateDocumentThumbnails', () => {
     const { fake, thumbs } = makeEngines({ pageCount: 5 });
     const results = await thumbs.generateDocumentThumbnails(fake.id).promise;
     expect(results.map((result) => result.pageNumber)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('pages large documents through bounded windows (never one unbounded batch)', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 600 });
+    const spy = vi.spyOn(thumbs, 'generateThumbnails');
+    const seen: Array<{ completed: number; total: number }> = [];
+    const results = await thumbs.generateDocumentThumbnails(fake.id, {
+      onProgress: (progress) => {
+        seen.push({ completed: progress.completed, total: progress.total });
+      },
+    }).promise;
+    expect(results.map((result) => result.pageNumber)).toEqual(
+      Array.from({ length: 600 }, (_, i) => i + 1),
+    );
+    // Two bounded windows (500 + 100), each concurrency-bounded.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0]?.[1]).toHaveLength(500);
+    expect(spy.mock.calls[1]?.[1]).toHaveLength(100);
+    expect(fake.renderCalls).toHaveLength(600);
+    expect(fake.maxActiveRenders).toBeLessThanOrEqual(2);
+    // Progress is document-global across the windows.
+    expect(seen).toHaveLength(600);
+    expect(seen[0]).toEqual({ completed: 1, total: 600 });
+    expect(seen[599]).toEqual({ completed: 600, total: 600 });
+    spy.mockRestore();
+  });
+
+  it('releases prior windows when a later window fails atomically', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 600, failPages: [550] });
+    const failure = await thumbs
+      .generateDocumentThumbnails(fake.id)
+      .promise.catch((error) => error);
+    expect(isThumbnailError(failure)).toBe(true);
+    expect((failure as ThumbnailError).code).toBe('THUMBNAIL_RENDER_FAILED');
+    expect((failure as ThumbnailError).pageNumber).toBe(550);
+    // Window 1 completed, then the failure dropped its bitmaps: every
+    // started canvas is released and nothing reaches the caller.
+    expect(fake.seenCanvases.length).toBeGreaterThan(0);
+    for (const canvas of fake.seenCanvases) {
+      expect(canvas.width).toBe(0);
+    }
+  });
+
+  it('cancels a document run without starting later windows', async () => {
+    const { fake, thumbs } = makeEngines({ pageCount: 600, renderDelayMs: 5 });
+    let completed = 0;
+    const job = thumbs.generateDocumentThumbnails(fake.id, {
+      onProgress: () => {
+        completed += 1;
+        if (completed === 10) {
+          job.cancel();
+        }
+      },
+    });
+    await expect(job.promise).rejects.toMatchObject({ code: 'THUMBNAIL_CANCELLED' });
+    expect(fake.renderCalls.length).toBeLessThan(600);
   });
 
   it('rejects closed documents', async () => {

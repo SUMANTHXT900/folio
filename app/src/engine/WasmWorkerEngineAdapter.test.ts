@@ -343,6 +343,74 @@ describe('WasmWorkerEngineAdapter', () => {
     expect(finished.events.some((event) => event.message === 'ghost')).toBe(false);
   });
 
+  it('settles the job on version-mismatched messages instead of hanging', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    // A worker speaking the wrong framing (stale code, bad double): the
+    // message is unroutable, but the live job must settle, never hang.
+    worker.deliver({
+      protocol: 999,
+      kind: 'event',
+      clientJobId: jobId,
+      event: {
+        timestamp_ms: 1,
+        kind: 'log',
+        level: 'info',
+        message: 'stale chatter',
+      },
+    } as unknown as WorkerToMain);
+    const finished = await done;
+    expect(finished.status).toBe('failed');
+    expect(finished.error?.code).toBe('INTERNAL');
+    expect(finished.error?.details).toContain('worker-protocol-mismatch');
+    expect(finished.error?.details).toContain('999');
+    // The mismatched worker is poisoned: destroyed, so the next execute
+    // boots fresh and completes.
+    expect(worker.terminated).toBe(true);
+    const second = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: second.jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    expect((await second.done).status).toBe('completed');
+  });
+
+  it('ignores version-mismatched ghosts without killing the worker', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    worker.deliver({
+      protocol: 999,
+      kind: 'event',
+      clientJobId: 'wasm-999',
+      event: {
+        timestamp_ms: 1,
+        kind: 'log',
+        level: 'info',
+        message: 'ghost chatter',
+      },
+    } as unknown as WorkerToMain);
+    expect(worker.terminated).toBe(false);
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const finished = await done;
+    expect(finished.status).toBe('completed');
+    expect(finished.events.some((event) => event.message === 'ghost chatter')).toBe(false);
+  });
+
   it('sends images_to_pdf options with page size and background', async () => {
     const { adapter, worker } = makeAdapter();
     adapter.execute({
@@ -499,6 +567,7 @@ describe('WasmWorkerEngineAdapter', () => {
     expect(finished.status).toBe('failed');
     expect(finished.error?.code).toBe('INTERNAL');
     expect(finished.error?.message).toContain('boom');
+    expect(finished.error?.details).toContain('origin=orphan-fatal');
     expect(worker.terminated).toBe(true);
     // The poisoned worker is dropped: the next execute boots fresh.
     const second = adapter.execute(inspectRequest());
@@ -522,7 +591,9 @@ describe('WasmWorkerEngineAdapter', () => {
     worker.onerror?.({} as Event);
     const finished = await done;
     expect(finished.status).toBe('failed');
-    expect(finished.error?.code).toBe('IO_ERROR');
+    // Dead-worker seals share one code (INTERNAL); origin lives in details.
+    expect(finished.error?.code).toBe('INTERNAL');
+    expect(finished.error?.details).toContain('origin=worker-error-event');
   });
 
   function phasedProgress(clientJobId: string, phase: string, percentage: number): WorkerToMain {
@@ -624,5 +695,208 @@ describe('WasmWorkerEngineAdapter', () => {
     } finally {
       WasmWorkerEngineAdapter.retainFullEventTrail = false;
     }
+  });
+
+  it('evicts exactly the oldest settled records beyond the 25-job window', async () => {
+    const { adapter, worker } = makeAdapter();
+    const jobIds: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      const { jobId, done } = adapter.execute(inspectRequest());
+      jobIds.push(jobId);
+      worker.deliver({ protocol: 1, kind: 'ready' });
+      await Promise.resolve();
+      worker.deliver({
+        protocol: 1,
+        kind: 'result',
+        clientJobId: jobId,
+        resultJson: completedEnvelope(),
+        outputs: [],
+      });
+      await done;
+    }
+    // 30 settled, window 25: the first 5 are gone, the last 25 replay.
+    for (let i = 0; i < 5; i += 1) {
+      const seen: string[] = [];
+      adapter.subscribe(jobIds[i], (event) => {
+        seen.push(event.message ?? '');
+      });
+      expect(seen).toHaveLength(0);
+    }
+    for (let i = 5; i < 30; i += 1) {
+      const seen: string[] = [];
+      adapter.subscribe(jobIds[i], (event) => {
+        seen.push(event.message ?? '');
+      });
+      expect(seen.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('never prunes unsettled jobs even beyond the retention window', async () => {
+    const { adapter, worker } = makeAdapter();
+    const jobIds: string[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      const { jobId, done } = adapter.execute(inspectRequest());
+      jobIds.push(jobId);
+      worker.deliver({ protocol: 1, kind: 'ready' });
+      await Promise.resolve();
+      worker.deliver({
+        protocol: 1,
+        kind: 'result',
+        clientJobId: jobId,
+        resultJson: completedEnvelope(),
+        outputs: [],
+      });
+      await done;
+    }
+    // One more job stays in flight while the window is already full.
+    const pending = adapter.execute(inspectRequest());
+    await Promise.resolve();
+    // The in-flight record survives pruning: it still routes events…
+    worker.deliver(progressEvent(0.5));
+    // …but that event belongs to wasm-1 (settled+evicted), so it is ignored.
+    // Deliver one addressed to the live job instead.
+    worker.deliver({
+      protocol: 1,
+      kind: 'event',
+      clientJobId: pending.jobId,
+      event: {
+        timestamp_ms: 1001,
+        kind: 'progress',
+        phase: 'inspecting',
+        completed: 1,
+        total: 2,
+        percentage: 0.7,
+        message: 'live progress',
+        engine_job_id: 'job-7',
+      },
+    });
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: pending.jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const finished = await pending.done;
+    expect(finished.status).toBe('completed');
+    expect(finished.jobId).toBe(pending.jobId);
+    expect(finished.events.some((event) => event.message === 'live progress')).toBe(true);
+  });
+
+  it('routes out-of-order results to the right jobs without cross-talk', async () => {
+    const { adapter, worker } = makeAdapter();
+    const first = adapter.execute(inspectRequest());
+    const second = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    await Promise.resolve();
+    // Both pipelines posted; results arrive reversed: second first.
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: second.jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: first.jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const [a, b] = await Promise.all([first.done, second.done]);
+    expect(a.status).toBe('completed');
+    expect(b.status).toBe('completed');
+    expect(a.jobId).toBe(first.jobId);
+    expect(b.jobId).toBe(second.jobId);
+    expect(a.events.every((event) => event.jobId === first.jobId)).toBe(true);
+    expect(b.events.every((event) => event.jobId === second.jobId)).toBe(true);
+  });
+
+  it('ignores late events and duplicate results after a job settles', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    const finished = await done;
+    const eventCount = finished.events.length;
+    // Late chatter for the settled job is dropped, never resurrected.
+    worker.deliver(progressEvent(0.9));
+    worker.deliver({
+      protocol: 1,
+      kind: 'event',
+      clientJobId: jobId,
+      event: {
+        timestamp_ms: 1002,
+        kind: 'log',
+        level: 'info',
+        message: 'late ghost',
+        engine_job_id: 'job-7',
+      },
+    });
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    await Promise.resolve();
+    const replayed: string[] = [];
+    adapter.subscribe(jobId, (event) => {
+      replayed.push(event.message ?? '');
+    });
+    expect(replayed).toHaveLength(eventCount);
+    expect(replayed.some((message) => message === 'late ghost')).toBe(false);
+    expect(finished.status).toBe('completed');
+  });
+
+  it('ignores deliveries after terminate-cancel (no resurrection)', async () => {
+    const { adapter, worker } = makeAdapter();
+    const { jobId, done } = adapter.execute(inspectRequest());
+    worker.deliver({ protocol: 1, kind: 'ready' });
+    await Promise.resolve();
+    await adapter.cancel(jobId);
+    const cancelled = await done;
+    expect(cancelled.status).toBe('cancelled');
+    const eventCount = cancelled.events.length;
+    // The dead worker's stragglers arrive after the seal: dropped.
+    worker.deliver({
+      protocol: 1,
+      kind: 'event',
+      clientJobId: jobId,
+      event: {
+        timestamp_ms: 1003,
+        kind: 'progress',
+        phase: 'copying',
+        completed: 9,
+        total: 10,
+        percentage: 0.9,
+        message: 'straggler',
+        engine_job_id: 'job-7',
+      },
+    });
+    worker.deliver({
+      protocol: 1,
+      kind: 'result',
+      clientJobId: jobId,
+      resultJson: completedEnvelope(),
+      outputs: [],
+    });
+    await Promise.resolve();
+    const replayed: string[] = [];
+    adapter.subscribe(jobId, (event) => {
+      replayed.push(event.message ?? '');
+    });
+    expect(replayed).toHaveLength(eventCount);
+    expect(replayed.some((message) => message === 'straggler')).toBe(false);
   });
 });

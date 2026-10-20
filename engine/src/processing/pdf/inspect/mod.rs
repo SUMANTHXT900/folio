@@ -9,6 +9,7 @@
 use crate::core::document::{Document, DocumentData};
 use crate::core::error::{EngineError, ErrorCode};
 use crate::core::operation::{Operation, OperationCapabilities, OperationContext};
+use crate::execution::context::ProgressThrottle;
 use crate::processing::pdf::core::{load_pdf, PdfMetadata};
 
 /// Input for [`InspectOperation`]: owned PDF bytes plus an optional label.
@@ -184,6 +185,7 @@ impl Operation for InspectOperation {
         // Basic mode stops here: no page iteration, no page-detail records.
         let pages = if options.level == InspectLevel::Detailed {
             let mut details = Vec::with_capacity(page_count as usize);
+            let mut throttle = ProgressThrottle::new();
             // One traversal of the cached page map; each page's geometry is
             // resolved on the way through, never by rebuilding the map.
             for (index, (page_number, geometry)) in document.page_geometry_entries().enumerate() {
@@ -196,13 +198,19 @@ impl Operation for InspectOperation {
                     rotation_deg: geometry.rotation_deg,
                 });
                 // Pages occupy the 15–95% band; header work took 0–15%.
-                let completed = 15 + ((index + 1) as u64 * 80) / page_count.max(1) as u64;
-                ctx.report_progress(
-                    Some("inspecting pages"),
-                    completed.min(95),
-                    100,
-                    Some(&format!("page {} of {page_count}", index + 1)),
-                );
+                let completed = (15 + ((index + 1) as u64 * 80) / page_count.max(1) as u64).min(95);
+                // Source-side throttle mirroring the glue sink rule (phase
+                // changes always pass here — one phase per loop; Δ≥1 pp or
+                // every N pages otherwise). Same shape, fewer messages;
+                // cancellation stays per page above.
+                if throttle.should_report(completed, (index + 1) as u64) {
+                    ctx.report_progress(
+                        Some("inspecting pages"),
+                        completed,
+                        100,
+                        Some(&format!("page {} of {page_count}", index + 1)),
+                    );
+                }
             }
             Some(details)
         } else {
@@ -438,5 +446,74 @@ mod tests {
             first.pages.as_ref().expect("detailed pages")[0].rotation_deg,
             270
         );
+    }
+
+    /// Context recording every reported event, for throttle assertions.
+    struct RecordingCtx {
+        id: JobId,
+        events: std::cell::RefCell<Vec<(Option<String>, u64, u64)>>,
+    }
+
+    impl OperationContext for RecordingCtx {
+        fn job_id(&self) -> &JobId {
+            &self.id
+        }
+        fn operation_name(&self) -> &str {
+            "pdf.inspect"
+        }
+        fn report_progress(
+            &self,
+            phase: Option<&str>,
+            completed: u64,
+            total: u64,
+            _message: Option<&str>,
+        ) {
+            self.events
+                .borrow_mut()
+                .push((phase.map(str::to_string), completed, total));
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn check_cancellation(&self) -> Result<(), EngineError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn detailed_progress_is_throttled_but_monotonic_to_100() {
+        // 200 inspected pages through one detailed inspection: the
+        // source-side throttle must emit strictly fewer per-page events
+        // than pages, while every emitted event keeps the historical shape
+        // (phase + completed/total band) and the run still ends at exactly
+        // 100, monotonically.
+        let spec = fixtures::pdf_spec("1.7", vec![(612.0, 792.0, None); 200], None);
+        let ctx = RecordingCtx {
+            id: JobId::new(),
+            events: std::cell::RefCell::new(Vec::new()),
+        };
+        let out = InspectOperation
+            .execute(&ctx, input(&spec), InspectOptions::detailed())
+            .expect("inspection succeeds");
+        assert_eq!(out.page_count, 200);
+        assert_eq!(out.pages.as_ref().expect("detailed pages").len(), 200);
+        let events = ctx.events.borrow();
+        // Unthrottled history: loading + parsing + 200 pages + completed.
+        // The throttle must cut the per-page reports.
+        assert!(
+            events.len() < 200 + 3,
+            "throttle must drop redundant events: {}",
+            events.len()
+        );
+        assert!(!events.is_empty());
+        for (_, _, total) in events.iter() {
+            assert_eq!(*total, 100, "wire shape unchanged");
+        }
+        let completed: Vec<u64> = events.iter().map(|(_, done, _)| *done).collect();
+        assert!(
+            completed.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{completed:?}"
+        );
+        assert_eq!(*completed.last().expect("events"), 100);
     }
 }

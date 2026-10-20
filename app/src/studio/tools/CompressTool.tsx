@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ToolHeading, DropZone, FileChip, Button, Card } from '../components/ui';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 
@@ -23,7 +22,6 @@ const LEVELS = [
 export default function CompressTool() {
   const { files, setFiles, addFiles } = usePdfFiles();
   const file = files[0] ?? null;
-  const [level, setLevel] = useState<number>(1);
 
   return (
     <div className="py-6">
@@ -54,20 +52,33 @@ export default function CompressTool() {
           />
 
           <Card>
-            <p className="text-sm font-medium text-ink-700 dark:text-paper-100 mb-3">
+            <p
+              id="compress-level-heading"
+              className="text-sm font-medium text-ink-700 dark:text-paper-100 mb-1"
+            >
               Compression level
             </p>
-            <div className="grid gap-2">
-              {LEVELS.map((lv, i) => (
+            {/* Levels are preview-only while Compress is reserved: every
+                option is disabled with its reason, so picking one can never
+                pretend to change the (non-existent) output. */}
+            <p id="compress-level-note" className="text-xs text-ink-500 dark:text-ink-300 mb-3">
+              Not available yet — these options do nothing until Compress ships.
+            </p>
+            <div
+              className="grid gap-2"
+              role="radiogroup"
+              aria-labelledby="compress-level-heading"
+              aria-describedby="compress-level-note"
+              aria-disabled="true"
+            >
+              {LEVELS.map((lv) => (
                 <button
                   key={lv.label}
-                  onClick={() => setLevel(i)}
-                  className={
-                    'flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ' +
-                    (level === i
-                      ? 'border-brass-400 bg-brass-400/10'
-                      : 'border-paper-300 dark:border-ink-700 hover:border-brass-400/60')
-                  }
+                  type="button"
+                  disabled
+                  title="Not available yet — selection does nothing"
+                  aria-describedby="compress-level-note"
+                  className="flex items-center justify-between rounded-xl border px-4 py-3 text-left border-paper-300 dark:border-ink-700 opacity-60 cursor-not-allowed"
                 >
                   <span>
                     <span className="block text-sm font-medium text-ink-900 dark:text-paper-100">
@@ -75,14 +86,7 @@ export default function CompressTool() {
                     </span>
                     <span className="block text-xs text-ink-400 dark:text-ink-300">{lv.hint}</span>
                   </span>
-                  <span
-                    className={
-                      'w-4 h-4 rounded-full border ' +
-                      (level === i
-                        ? 'border-brass-500 bg-brass-500'
-                        : 'border-paper-300 dark:border-ink-600')
-                    }
-                  />
+                  <span className="w-4 h-4 rounded-full border border-paper-300 dark:border-ink-600" />
                 </button>
               ))}
             </div>

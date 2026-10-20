@@ -109,22 +109,40 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-describe('RotateTool no-op', () => {
-  it('empty selection succeeds without touching the engine, referencing the input', async () => {
+describe('RotateTool zero-rotation honesty', () => {
+  it('keeps the download disabled with an honest note until something is rotated', async () => {
     render(<RotateTool />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Download rotated PDF' }));
-    const card = await screen.findByTestId('continue-card');
+    const download = await screen.findByRole('button', { name: 'Download rotated PDF' });
+    expect((download as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/No rotation selected/)).toBeTruthy();
     expect(runMock).not.toHaveBeenCalled();
-    expect(card.getAttribute('data-producedby')).toBe('rotate');
-    expect(card.getAttribute('data-sourcename')).toBe('doc.pdf');
-    expect(card.getAttribute('data-outputcount')).toBe('1');
-    // Existing smart `rotate` naming preserved on the handoff item.
-    expect(card.getAttribute('data-outputnames')).toBe('doc-rotated.pdf');
-    // No-op path carries a zero engine duration (display-only, D4).
-    expect(card.getAttribute('data-durationms')).toBe('0');
-    expect(screen.getByText(/No pages rotated — the output matches the input\./)).not.toBeNull();
+    expect(screen.queryByTestId('continue-card')).toBeNull();
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to edit' }));
+  it('enables the download once a page is spun', async () => {
+    render(<RotateTool />);
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate right (page 1)' }));
+    const download = await screen.findByRole('button', { name: 'Download rotated PDF' });
+    expect((download as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/No rotation selected/)).toBeNull();
+  });
+});
+
+describe('RotateTool stale results', () => {
+  it('file remove clears the completion card', async () => {
+    const result: StudioResult = {
+      summary: { pageCount: 3 },
+      outputs: [{ name: 'o', bytes: new Uint8Array([1, 2]), byteLength: 2, pageCount: 3 }],
+      durationMs: 2,
+    };
+    runMock.mockReturnValue({ done: Promise.resolve(result), cancel: vi.fn() });
+
+    render(<RotateTool />);
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate right (page 1)' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Download rotated PDF' }));
+    await screen.findByTestId('continue-card');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove doc.pdf' }));
     expect(screen.queryByTestId('continue-card')).toBeNull();
   });
 });

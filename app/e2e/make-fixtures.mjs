@@ -10,7 +10,18 @@ fs.mkdirSync(dir, { recursive: true });
 const browser = await puppeteer.launch({
   executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   headless: 'shell',
-  args: ['--no-sandbox'],
+  // Security: `--no-sandbox` disables the Chrome sandbox — a compromised
+  // renderer then runs with the user's full privileges instead of contained.
+  // It is only justified in throwaway CI containers running as root, where
+  // the sandbox cannot initialize. Gate: pass it only when CI needs it
+  // (`FOLIO_CHROME_NO_SANDBOX=1`, or the standard `CI=true`); local runs
+  // keep the sandbox, which works on dev machines. Never enable it locally
+  // for convenience.
+  args: [
+    ...(process.env.FOLIO_CHROME_NO_SANDBOX === '1' || process.env.CI === 'true'
+      ? ['--no-sandbox']
+      : []),
+  ],
 });
 const page = await browser.newPage();
 // Base 1px fixtures (existing): pixel.png / pixel.jpg.

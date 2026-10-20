@@ -50,6 +50,24 @@ function segment(raw: string, stripExt: (name: string) => string): string {
 
 const ILLEGAL_FILENAME_CHARS = /[\\/:*?"<>|]/g;
 
+/**
+ * Bidirectional control characters (Trojan-Source-class filename spoofing:
+ * an invisible override can make `evil\u202Efdp.exe` render as `evilpdf.exe`).
+ * The listed set (U+202E, U+2066–U+2069, U+200E/U+200F) plus the sibling
+ * directional controls (U+202A–U+202D) share the identical abuse case, so all
+ * are stripped. Removed outright (never `-`): they are invisible, so a
+ * visible replacement would misrepresent the name.
+ */
+const BIDI_CONTROL_CHARS = /[\u202A-\u202E\u2066-\u2069\u200E\u200F]/g;
+
+/**
+ * Windows reserved device names (case-insensitive, stem match): creating
+ * `con.pdf` / `COM1.pdf` / `nul.pdf` fails on Windows and confuses
+ * cross-platform downloads. A leading `_` keeps the name readable while
+ * escaping the reservation.
+ */
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
 /** Control characters become `-` (char-code loop: control escapes trip `no-control-regex`). */
 function stripControls(value: string): string {
   let out = '';
@@ -62,18 +80,30 @@ function stripControls(value: string): string {
 
 /**
  * Makes a raw name filesystem-safe and guarantees a `.pdf` suffix.
- * Illegal characters become `-`, surrounding dots/spaces are trimmed,
- * the total is capped (preserving the suffix), and an empty result
- * falls back to `fallback` (default `document.pdf`).
+ * Illegal characters become `-`, bidirectional controls are stripped,
+ * surrounding dots/spaces are trimmed, Windows reserved stems gain a
+ * leading `_`, the total is capped (preserving the suffix), and an empty
+ * result falls back to `fallback` (default `document.pdf`) — the fallback
+ * itself is sanitized, never returned verbatim.
  */
 export function sanitizeFileName(raw: string, fallback: string = FALLBACK_PDF_NAME): string {
-  let base = stripControls(raw.replace(ILLEGAL_FILENAME_CHARS, '-')).replace(/\s+/g, ' ').trim();
+  let base = stripControls(raw.replace(ILLEGAL_FILENAME_CHARS, '-'))
+    .replace(BIDI_CONTROL_CHARS, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   base = base.replace(/^[. ]+/, '').replace(/[. ]+$/, '');
   if (/\.pdf$/i.test(base)) {
     base = base.slice(0, -4).trim();
   }
   if (base === '') {
-    return fallback.endsWith('.pdf') ? fallback : `${fallback}.pdf`;
+    // Sanitize the fallback instead of trusting it verbatim: a hostile or
+    // empty fallback must still yield a safe name. Terminates: the default
+    // fallback returns directly, so recursion depth is at most one.
+    if (fallback === FALLBACK_PDF_NAME) return FALLBACK_PDF_NAME;
+    return sanitizeFileName(fallback, FALLBACK_PDF_NAME);
+  }
+  if (WINDOWS_RESERVED_NAME.test(base)) {
+    base = `_${base}`;
   }
   let name = `${base}.pdf`;
   if (name.length > MAX_PDF_NAME_LENGTH) {

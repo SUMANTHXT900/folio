@@ -54,8 +54,12 @@ export default function InstallCard() {
             </p>
           )}
           {state.outcome === 'dismissed' && (
+            // One-shot prompt lifecycle: Chromium spends the stashed
+            // beforeinstallprompt on the first prompt() and never re-fires
+            // it in the same visit, so there is no in-place retry here —
+            // the browser menu path below is the honest fallback.
             <p className="mt-1 font-mono text-xs text-ink-500 dark:text-ink-300">
-              Install dismissed — you can retry anytime from here.
+              Install prompt dismissed — install anytime from your browser menu.
             </p>
           )}
         </div>

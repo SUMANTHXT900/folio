@@ -77,7 +77,7 @@ fn truncated_cause(err: &lopdf::Error) -> String {
     if text.len() <= LIMIT {
         text
     } else {
-        format!("{}…", &text[..LIMIT])
+        format!("{}…", &text[..text.floor_char_boundary(LIMIT)])
     }
 }
 
@@ -180,5 +180,29 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::InvalidDocument);
             assert!(err.details().is_some());
         }
+    }
+
+    #[test]
+    fn truncated_cause_does_not_split_multibyte_char() {
+        // `Syntax` Display carries a 32-byte prefix, so 467 filler bytes
+        // place a 2-byte `é` across byte 500 of the full text: the old
+        // `&text[..500]` byte slice panicked here.
+        let payload = format!("{}é{}", "a".repeat(467), "b".repeat(100));
+        let truncated = truncated_cause(&lopdf::Error::Syntax(payload));
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.len() <= 500 + "…".len());
+    }
+
+    #[test]
+    fn truncated_cause_keeps_ascii_behavior() {
+        // The 500-byte budget applies to the full Display text, prefix
+        // included (`Syntax` carries a 32-byte prefix).
+        let truncated = truncated_cause(&lopdf::Error::Syntax("x".repeat(600)));
+        assert_eq!(
+            truncated,
+            format!("syntax error in content stream: {}…", "x".repeat(500 - 32))
+        );
+        let short = truncated_cause(&lopdf::Error::Syntax("short".to_string()));
+        assert!(short.len() <= 500 && !short.ends_with('…'));
     }
 }

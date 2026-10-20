@@ -15,11 +15,18 @@
 
 const buffers = new Map<string, { bytes: Uint8Array; name: string }>();
 let counter = 0;
+/**
+ * Total live bytes currently owned by the store. Updated on every
+ * register/put/release/clear so a future cap has an O(1) basis instead of
+ * summing the map. Read via `storedBytes()`; never mutated directly.
+ */
+let totalBytes = 0;
 
 export function registerBytes(name: string, bytes: Uint8Array): string {
   counter += 1;
   const id = `bin-${counter}`;
   buffers.set(id, { bytes, name });
+  totalBytes += bytes.length;
   return id;
 }
 
@@ -29,7 +36,12 @@ export function registerBytes(name: string, bytes: Uint8Array): string {
  * output — mixing the two up orphans buffers, so keep them distinct.
  */
 export function putBytes(id: string, name: string, bytes: Uint8Array): void {
+  const prev = buffers.get(id);
+  if (prev !== undefined) {
+    totalBytes -= prev.bytes.length;
+  }
   buffers.set(id, { bytes, name });
+  totalBytes += bytes.length;
 }
 
 export function getBytes(id: string): Uint8Array | undefined {
@@ -58,6 +70,11 @@ export function copyBytes(id: string): Uint8Array<ArrayBuffer> | undefined {
 }
 
 export function releaseBytes(id: string): void {
+  const prev = buffers.get(id);
+  if (prev === undefined) {
+    return;
+  }
+  totalBytes -= prev.bytes.length;
   buffers.delete(id);
 }
 
@@ -65,8 +82,18 @@ export function storedCount(): number {
   return buffers.size;
 }
 
+/**
+ * Total live bytes owned by the store (accounting basis for a future cap).
+ * Updated on register/put/release/clear; double-release and stale-id reads
+ * never move it.
+ */
+export function storedBytes(): number {
+  return totalBytes;
+}
+
 /** Test-only reset. Not used by the app itself. */
 export function __clearBinaryStore(): void {
   buffers.clear();
   counter = 0;
+  totalBytes = 0;
 }

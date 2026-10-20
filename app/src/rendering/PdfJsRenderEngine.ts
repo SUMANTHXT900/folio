@@ -121,7 +121,6 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
     const promise = (async (): Promise<LoadedDocument> => {
       const startedAt = new Date().toISOString();
       const startMark = performance.now();
-      const data = input.data instanceof Uint8Array ? input.data : new Uint8Array(input.data);
       if (!(input.data instanceof Uint8Array || input.data instanceof ArrayBuffer)) {
         throw new RenderError(
           'RENDER_INVALID_INPUT',
@@ -131,6 +130,7 @@ export class PdfJsRenderEngine implements PdfRenderEngine {
           },
         );
       }
+      const data = input.data instanceof Uint8Array ? input.data : new Uint8Array(input.data);
       if (data.byteLength === 0) {
         throw new RenderError('RENDER_INVALID_INPUT', 'document data must not be empty', {
           details: 'byteLength=0',

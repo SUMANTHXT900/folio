@@ -18,6 +18,17 @@ use crate::processing::pdf::core::{load_pdf, PdfDocument};
 
 use super::model::{FieldPatch, MetadataPatch};
 
+/// Maximum UTF-8 bytes accepted for one metadata text value.
+///
+/// Availability bound: every `Set` value is embedded verbatim in the output
+/// PDF, so unbounded values bloat outputs and peak memory. 4096 bytes admits
+/// the UI's 500-character cap at worst-case 4-bytes-per-char UTF-8 (2000
+/// bytes) with headroom for direct-engine callers; longer prose belongs in
+/// the document body, not its Info dictionary. Measured in bytes, not chars
+/// (a 500-emoji title is 2000 bytes and passes; a 5000-ASCII-char title is
+/// 5000 bytes and fails).
+pub const MAX_METADATA_VALUE_BYTES: usize = 4096;
+
 /// Input for [`SetMetadataOperation`]: owned PDF bytes plus an optional label.
 #[derive(Debug, Clone)]
 pub struct SetMetadataInput {
@@ -159,10 +170,22 @@ fn validate_patch_values(patch: &MetadataPatch) -> Result<(), EngineError> {
     ];
     for (field, value) in strings {
         if let FieldPatch::Set(text) = value {
-            if text.is_empty() {
+            // Trim check mirroring `DocumentId::new`: whitespace-only
+            // values are empty in every sense that matters.
+            if text.trim().is_empty() {
                 return Err(EngineError::new(
                     ErrorCode::InvalidInput,
                     format!("metadata field {field} cannot be set to an empty string (use Clear)"),
+                )
+                .with_details(format!("field={field}")));
+            }
+            if text.len() > MAX_METADATA_VALUE_BYTES {
+                return Err(EngineError::new(
+                    ErrorCode::InvalidInput,
+                    format!(
+                        "metadata field {field} exceeds {MAX_METADATA_VALUE_BYTES} bytes (got {} bytes)",
+                        text.len()
+                    ),
                 )
                 .with_details(format!("field={field}")));
             }
@@ -302,6 +325,90 @@ mod tests {
             .expect_err("empty set must fail");
         assert_eq!(err.code(), ErrorCode::InvalidInput);
         assert!(err.message().contains("title"));
+    }
+
+    #[test]
+    fn rejects_whitespace_only_set_values() {
+        // Whitespace-only values are empty in every sense that matters
+        // (mirroring `DocumentId::new`'s trim check): clearing is what
+        // `FieldPatch::Clear` is for, so `Set("   ")` is rejected, never
+        // silently written.
+        for (field, patch) in [
+            (
+                "title",
+                MetadataPatch {
+                    title: FieldPatch::Set("   ".to_string()),
+                    ..MetadataPatch::default()
+                },
+            ),
+            (
+                "author",
+                MetadataPatch {
+                    author: FieldPatch::Set("\t \n".to_string()),
+                    ..MetadataPatch::default()
+                },
+            ),
+        ] {
+            let err = SetMetadataOperation
+                .execute(
+                    &ctx(),
+                    input(fixtures::single_page_pdf()),
+                    SetMetadataOptions::new(patch),
+                )
+                .expect_err("whitespace-only set must fail");
+            assert_eq!(err.code(), ErrorCode::InvalidInput, "field {field}");
+            assert!(err.message().contains(field), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_over_cap_set_values_as_invalid_input() {
+        // The cap is bytes, not chars: 1400 emoji are fewer chars than the
+        // UI's 500-char convenience cap admits, but 5600 bytes on the wire.
+        let patch = MetadataPatch {
+            title: FieldPatch::Set("a".repeat(MAX_METADATA_VALUE_BYTES + 1)),
+            ..MetadataPatch::default()
+        };
+        let err = SetMetadataOperation
+            .execute(
+                &ctx(),
+                input(fixtures::single_page_pdf()),
+                SetMetadataOptions::new(patch),
+            )
+            .expect_err("over-cap set must fail");
+        assert_eq!(err.code(), ErrorCode::InvalidInput);
+        assert!(err.message().contains("title"), "{err:?}");
+
+        let patch = MetadataPatch {
+            subject: FieldPatch::Set("🎉".repeat(1400)),
+            ..MetadataPatch::default()
+        };
+        let err = SetMetadataOperation
+            .execute(
+                &ctx(),
+                input(fixtures::single_page_pdf()),
+                SetMetadataOptions::new(patch),
+            )
+            .expect_err("over-cap multibyte set must fail");
+        assert_eq!(err.code(), ErrorCode::InvalidInput);
+        assert!(err.message().contains("subject"), "{err:?}");
+    }
+
+    #[test]
+    fn at_cap_set_values_round_trip() {
+        // Exactly MAX_METADATA_VALUE_BYTES bytes is admitted (the UI's
+        // worst-case 500 chars x 4 bytes UTF-8 = 2000 bytes clears it).
+        let value = "e".repeat(MAX_METADATA_VALUE_BYTES);
+        assert_eq!(value.len(), MAX_METADATA_VALUE_BYTES);
+        let patch = MetadataPatch {
+            title: FieldPatch::Set(value.clone()),
+            ..MetadataPatch::default()
+        };
+        let reparsed = set_and_reparse(fixtures::single_page_pdf(), patch);
+        assert_eq!(
+            read_metadata(&reparsed).title.as_deref(),
+            Some(value.as_str())
+        );
     }
 
     #[test]

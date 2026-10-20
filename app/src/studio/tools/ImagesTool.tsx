@@ -9,7 +9,7 @@ import {
   type StudioJob,
   type StudioOutput,
 } from '../services/folio';
-import { buildImagesPdf, resolveShardCount } from './imageSharding';
+import { buildImagesPdf, classifyStagedKind, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
 import ScanicCapture, { type ScanicCommittedPage } from './ScanicCapture';
@@ -43,20 +43,38 @@ const ACCEPT = 'image/jpeg,image/png,.jpg,.jpeg,.png';
  * page at a time, `onStagingProgress(completed, total)` after each page,
  * and a `setTimeout(0)` yield between pages so the staging progress can
  * paint instead of blocking the main thread through a large batch.
- * Exported for unit tests; the tool wires it to `stage`/`fraction`.
+ * Abortable via `options.signal`: an abort between pages stops the loop
+ * with a `CANCELLED` error (same code as engine cancellation) and never
+ * stages a partial page. Exported for unit tests; the tool wires it to
+ * `stage`/`fraction`.
  */
+export function stagingCancelledError(): Error & { code: string } {
+  const error = new Error('Image build cancelled.') as Error & { code: string };
+  error.code = 'CANCELLED';
+  return error;
+}
+
 export async function stageImagePages(
   pages: readonly ImagePage[],
   renderer: ImageRenderer,
   onStagingProgress?: (completed: number, total: number) => void,
+  options?: { signal?: AbortSignal },
 ): Promise<Array<{ name: string; bytes: Uint8Array }>> {
   const staged: Array<{ name: string; bytes: Uint8Array }> = [];
+  const signal = options?.signal;
+  // Local predicate (not an inline `=== true`): `aborted` flips
+  // asynchronously on cancel, so inline comparisons narrow to `false`
+  // after the first check (TS2367) and never see the abort.
+  const isAborted = (): boolean => signal?.aborted === true;
   for (let i = 0; i < pages.length; i += 1) {
+    if (isAborted()) throw stagingCancelledError();
     const prepared = await preparePageBytes(pages[i], renderer);
+    if (isAborted()) throw stagingCancelledError();
     staged.push(prepared);
     onStagingProgress?.(i + 1, pages.length);
     // Yield: keeps React paint + input responsive between files.
     await new Promise((resolve) => setTimeout(resolve, 0));
+    if (isAborted()) throw stagingCancelledError();
   }
   return staged;
 }
@@ -116,8 +134,9 @@ export function toPdfOutput(first: StudioOutput, sourceName: string): StudioOutp
  * pages hold File/Blob handles + preview URLs. Uploads share the entry
  * card with the scanic camera entry below: committed camera pages arrive
  * pre-named `scan-NNN.jpg` in capture order (`source: 'camera'`) and join
- * the same collection via `addFiles` — handles only, no normalization, so
- * the gallery upload path stays byte-identical.
+ * the same normalized collection via `importFiles` — dims + thumbs ride
+ * along, so the gallery upload path stays byte-identical for in-budget
+ * JPEGs while feeding the pixel gate real cost.
  *
  * Images is a continue SOURCE only, never a target: a completed build
  * renders `ContinueCard` (download branch keeps the existing smart `images`
@@ -128,7 +147,7 @@ export function toPdfOutput(first: StudioOutput, sourceName: string): StudioOutp
  * any pending transfer is ignored and left for PDF tools.
  */
 export default function ImagesTool() {
-  const { pages, importFiles, move, remove, rotate, clear, reorder, addFiles } = useImagePages();
+  const { pages, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [working, setWorking] = useState(false);
@@ -145,6 +164,12 @@ export default function ImagesTool() {
   const [progress, setProgress] = useState<{ fraction: number | null; label: string } | null>(null);
   const [importing, setImporting] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
+  // Staging-phase abort: one controller spans the prepare loop + the
+  // sharded engine jobs so Cancel aborts whichever phase is in flight.
+  const stageAbortRef = useRef<AbortController | null>(null);
+  // Honest cancelling state: set on Cancel tap, cleared when the build
+  // settles (onBuild finally). Drives the disabled Cancel button label.
+  const [cancelling, setCancelling] = useState(false);
   const moreInputRef = useRef<HTMLInputElement>(null);
   // True only while a completed build's card is displayed: collection or
   // page-size changes invalidate the card ONLY then (order-affecting change
@@ -152,18 +177,47 @@ export default function ImagesTool() {
   const completedBuildRef = useRef(false);
 
   // Scanic camera reintegration: committed pages are pre-named `scan-NNN.jpg`
-  // in capture order. `addFiles` appends handles in array order with no
-  // normalization — the committed bytes (warped PNG or untouched original)
-  // reach the collection byte-identical, and numbering continues past any
-  // camera pages already in the collection.
+  // in capture order. They join the collection through the SAME normalized
+  // import path as gallery uploads (`importFiles` → `prepareImportFile`),
+  // so normalized w×h ride into `ImagePage` and the sharding pixel gate
+  // sees real decode cost (raw `addFiles` handles would blind it with
+  // zero-pixel fallbacks). Already-normalized JPEGs retain their bytes
+  // (no recompression), so the commit stays byte-identical while gaining
+  // dims + thumbs. Numbering continues past existing camera pages.
   const commitCameraPages = (committed: ScanicCommittedPage[]) => {
-    if (committed.length > 0) {
-      addFiles(
-        committed.map((p) => p.file),
-        'camera',
-      );
+    if (committed.length === 0) {
+      setScannerOpen(false);
+      return;
     }
     setScannerOpen(false);
+    setImporting('Preparing images…');
+    void importFiles(
+      committed.map((p) => p.file),
+      'camera',
+      {
+        onProgress: (completed, total) =>
+          setImporting(`Preparing images… ${completed} of ${total}`),
+      },
+    )
+      .then((summary) => {
+        if (summary.skipped > 0) {
+          setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
+        } else if (summary.failed > 0) {
+          setError(
+            new Error(
+              summary.firstError !== null
+                ? `Couldn't add ${summary.failed} image(s): ${summary.firstError}`
+                : `Couldn't add ${summary.failed} image(s).`,
+            ),
+          );
+        } else {
+          setError(null);
+        }
+      })
+      .catch(setError)
+      .finally(() => {
+        setImporting(null);
+      });
   };
   const cameraStartIndex = pages.filter((p) => p.source === 'camera').length;
 
@@ -220,11 +274,14 @@ export default function ImagesTool() {
     if (pages.length === 0) return;
     completedBuildRef.current = false;
     setWorking(true);
+    setCancelling(false);
     setError(null);
     setDone(null);
     setProgress(null);
     const staged: string[] = [];
     const stagedSizes: number[] = [];
+    const stageController = new AbortController();
+    stageAbortRef.current = stageController;
     try {
       // M5: pre-stage policy on pre-stage sums (single source of truth for
       // the decision lives in `buildImagesPdf`'s post-stage evaluation;
@@ -235,12 +292,19 @@ export default function ImagesTool() {
           `[folio-images] pre-stage policy: ${pages.length} pages, ${preStage.totalBytes} bytes → ${preStage.shards} shard(s)`,
         );
       }
-      const prepared = await stageImagePages(pages, browserImageRenderer, (completed, total) => {
-        setProgress({
-          fraction: completed / total,
-          label: `Preparing images… ${completed} of ${total}`,
-        });
-      });
+      const prepared = await stageImagePages(
+        pages,
+        browserImageRenderer,
+        (completed, total) => {
+          if (stageController.signal.aborted) return;
+          setProgress({
+            fraction: completed / total,
+            label: `Preparing images… ${completed} of ${total}`,
+          });
+        },
+        { signal: stageController.signal },
+      );
+      if (stageController.signal.aborted) throw stagingCancelledError();
       for (const item of prepared) {
         stagedSizes.push(item.bytes.length);
         staged.push(stageStudioBytes(item.name, item.bytes));
@@ -249,20 +313,29 @@ export default function ImagesTool() {
       // ordered merge (imageSharding); small batches keep the historical
       // single-worker engine call byte-for-byte inside that module.
       // Known normalized dims ride along as the pixel gate's decode-cost
-      // input (raw handles carry 0 and keep the byte-only behavior).
+      // input (raw handles carry 0 only when truly unknown — camera pages
+      // now arrive normalized via importFiles, so their pixels are real).
       const stagedPixels = pages.map((p) => (p.width > 0 && p.height > 0 ? p.width * p.height : 0));
+      // P3 item 7: real image kinds ride into the sharding output gate —
+      // import-normalized JPEGs estimate near-passthrough, so they keep
+      // sharding; unknown kinds stay conservative (early single-worker).
+      const stagedKinds = pages.map((p) => classifyStagedKind({ name: p.name, mime: p.file.type }));
       const job = buildImagesPdf({
         stagedIds: staged,
         stagedSizes,
         stagedPixels,
+        stagedKinds,
         pageSize,
+        signal: stageController.signal,
         onProgress: (p) => {
+          if (stageController.signal.aborted) return;
           setProgress({ fraction: p.fraction, label: p.label });
         },
       });
       jobRef.current = job;
       const out = await job.done;
       jobRef.current = null;
+      stageAbortRef.current = null;
       const first = out.outputs[0];
       // Existing naming policy, unchanged: the smart `images` default from
       // the collection (`<page>.pdf` / `<first>-plus<N-1>-pages.pdf`). It
@@ -284,6 +357,7 @@ export default function ImagesTool() {
       completedBuildRef.current = true;
     } catch (e) {
       jobRef.current = null;
+      stageAbortRef.current = null;
       const code = (e as { code?: string }).code;
       if (code === 'CANCELLED') {
         setError(new Error('Image build cancelled.'));
@@ -292,13 +366,24 @@ export default function ImagesTool() {
       }
     } finally {
       setWorking(false);
+      setCancelling(false);
       setProgress(null);
+      stageAbortRef.current = null;
       for (const id of staged) releaseStagedBytes(id);
     }
   };
 
   const onCancel = async () => {
+    // Honest cancelling state: the button disables into "Cancelling…" and
+    // progress (when visible) relabels — the build settles via onBuild's
+    // catch/finally, which clears this flag. Aborts staging AND sharded
+    // work through the shared controller plus the engine job.
+    setCancelling(true);
+    setProgress((prev) =>
+      prev !== null ? { ...prev, label: 'Cancelling…' } : { fraction: null, label: 'Cancelling…' },
+    );
     try {
+      stageAbortRef.current?.abort();
       await jobRef.current?.cancel();
     } catch {
       // The job settles the UI via onBuild's catch/finally.
@@ -416,15 +501,18 @@ export default function ImagesTool() {
                   : `Build PDF · ${pages.length} image${pages.length === 1 ? '' : 's'}`}
               </Button>
               {working && (
-                <Button variant="ghost" onClick={onCancel}>
+                <Button variant="ghost" onClick={onCancel} disabled={cancelling}>
                   Cancel
                 </Button>
               )}
             </div>
           )}
-          {working && progress !== null && progress.fraction !== null && (
+          {working && progress !== null && (progress.fraction !== null || cancelling) && (
             <div className="w-full max-w-xs">
-              <Progress value={progress.fraction * 100} label={progress.label} />
+              <Progress
+                value={(progress.fraction ?? 0) * 100}
+                label={cancelling ? 'Cancelling…' : progress.label}
+              />
             </div>
           )}
 

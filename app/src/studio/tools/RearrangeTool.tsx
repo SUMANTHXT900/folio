@@ -15,15 +15,9 @@ import ContinueCard from '../components/ContinueCard';
 import { smartOutputName } from '../components/downloadNaming';
 import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
-import {
-  runStudioOperation,
-  consumePendingTransfer,
-  getStudioBytes,
-  closeStudioDoc,
-  type StudioDoc,
-  type StudioOutput,
-  type StudioJob,
-} from '../services/folio';
+import { runStudioOperation, type StudioOutput, type StudioJob } from '../services/folio';
+import { usePendingTransfer } from './usePendingTransfer';
+import { cancelledError } from './studioJob';
 
 const PAGE_LIMIT = 24;
 
@@ -49,12 +43,28 @@ const RearrangeRow = memo(function RearrangeRow({
   return (
     <div className="flex items-center gap-3 rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-800/60 px-3 py-2">
       {/* Drag handle — the ONLY touch point that starts a drag. The rest of the
-          row keeps the page's vertical scroll (see DragRow's pan-y). */}
-      <span
+          row keeps the page's vertical scroll (see DragRow's pan-y).
+          Keyboard: a real button (Tab-reachable) — arrows nudge one step,
+          Enter/Space moves later. Pointer drag is unchanged. */}
+      <button
+        type="button"
         onPointerDown={(e) => dragControls.start(e)}
-        className="flex w-8 h-8 shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 hover:text-brass-500 active:cursor-grabbing"
-        aria-label="Drag to reorder"
-        role="button"
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+            e.preventDefault();
+            onMove(pos, -1);
+          } else if (
+            e.key === 'ArrowDown' ||
+            e.key === 'ArrowRight' ||
+            e.key === 'Enter' ||
+            e.key === ' '
+          ) {
+            e.preventDefault();
+            onMove(pos, 1);
+          }
+        }}
+        className="flex w-11 h-11 min-w-[44px] min-h-[44px] shrink-0 cursor-grab touch-none items-center justify-center rounded-lg text-ink-400 dark:text-ink-300 hover:text-brass-500 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-800"
+        aria-label={`Reorder Page ${pageIdx + 1}: arrow keys move, Enter moves later`}
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
           <circle cx="9" cy="6" r="1.6" />
@@ -64,8 +74,10 @@ const RearrangeRow = memo(function RearrangeRow({
           <circle cx="9" cy="18" r="1.6" />
           <circle cx="15" cy="18" r="1.6" />
         </svg>
+      </button>
+      <span className="w-6 text-center text-xs font-mono text-ink-400 dark:text-ink-300">
+        {pos + 1}
       </span>
-      <span className="w-6 text-center text-xs font-mono text-ink-400">{pos + 1}</span>
       <button onClick={() => onPreview(pos)} className="flex-1 flex items-center gap-3 text-left">
         {thumb ? (
           <img
@@ -84,16 +96,18 @@ const RearrangeRow = memo(function RearrangeRow({
         <button
           onClick={() => onMove(pos, -1)}
           disabled={isFirst}
-          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-ink-400 dark:text-ink-300 hover:text-brass-500 disabled:opacity-30 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
           aria-label="Move up"
+          title={`Move Page ${pageIdx + 1} earlier`}
         >
           ↑
         </button>
         <button
           onClick={() => onMove(pos, 1)}
           disabled={isLast}
-          className="px-3 py-1 text-ink-400 hover:text-brass-500 disabled:opacity-30"
+          className="px-3 py-1 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-ink-400 dark:text-ink-300 hover:text-brass-500 disabled:opacity-30 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
           aria-label="Move down"
+          title={`Move Page ${pageIdx + 1} later`}
         >
           ↓
         </button>
@@ -167,17 +181,29 @@ export default function RearrangeTool() {
     /** Engine `StudioResult.durationMs` — display-only (D4), owned by the card's summary line. */
     durationMs: number;
   } | null>(null);
-  const [continuedFrom, setContinuedFrom] = useState<{
-    producedBy: string;
-    sourceName: string;
-  } | null>(null);
-  // Pending-transfer claim: same back-out-release discipline as MergeTool
-  // (single doc here — extras are ignored, never uploaded, never in state).
-  const claimedRef = useRef<StudioDoc[]>([]);
-  const ranRef = useRef(false);
-  const mountGenRef = useRef(0);
+  // Shared pending-transfer intake (claim + gen-guarded back-out release).
+  const { claimedRef, ranRef, continuedFrom } = usePendingTransfer(setFiles, 'single');
   const [opError, setOpError] = useState<unknown>(null);
   const [viewer, setViewer] = useState<number | null>(null);
+  // Preview-dialog focus discipline (AUD-6): the Close button takes focus
+  // on open, Escape closes, and focus returns to the opener on close.
+  const viewerCloseRef = useRef<HTMLButtonElement>(null);
+  const viewerPrevFocusRef = useRef<Element | null>(null);
+  const isViewerOpen = viewer !== null;
+  useEffect(() => {
+    if (!isViewerOpen) return;
+    viewerPrevFocusRef.current = document.activeElement;
+    viewerCloseRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setViewer(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      const prev = viewerPrevFocusRef.current as HTMLElement | null;
+      if (prev && document.contains(prev)) prev.focus();
+    };
+  }, [isViewerOpen]);
   const [hiRes, setHiRes] = useState<Record<number, string>>({});
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
@@ -216,35 +242,9 @@ export default function RearrangeTool() {
   // service purges its keys on close/evict, so no caller-side revoke here.
   const [showAll, setShowAll] = useState(false);
 
-  // Pending-transfer intake (mount once): the handed-off doc becomes the
-  // single input by reference — verified live, never re-uploaded.
-  useEffect(() => {
-    mountGenRef.current += 1;
-    const gen = mountGenRef.current;
-    const pending = consumePendingTransfer();
-    if (pending !== null) {
-      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
-      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
-      if (firstDoc !== undefined) {
-        claimedRef.current = [firstDoc];
-        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
-        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
-      }
-    }
-    return () => {
-      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
-      const claimed = claimedRef.current;
-      window.setTimeout(() => {
-        if (mountGenRef.current !== gen) return;
-        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
-        if (ranRef.current) return;
-        for (const d of claimed) void closeStudioDoc(d.id);
-      }, 0);
-    };
-  }, [setFiles]);
-
   useEffect(() => {
     setResult(null);
+    setOpError(null);
     setShowAll(false);
     setHiRes({});
     if (!file) {
@@ -278,6 +278,10 @@ export default function RearrangeTool() {
     return order.slice(0, PAGE_LIMIT);
   }, [order, showAll]);
   const hiddenCount = order.length - visibleOrder.length;
+  // No-op honesty: an identity order would "succeed" without changing a
+  // byte — keep Save disabled with the reason inline instead of
+  // celebrating a Done card for doing nothing.
+  const isIdentity = order.length > 0 && order.every((v, i) => v === i);
 
   const handleRearrange = useCallback(async () => {
     if (!file) return;
@@ -319,7 +323,7 @@ export default function RearrangeTool() {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
       if (code === 'CANCELLED') {
-        setOpError(new Error('Rearrange cancelled.'));
+        setOpError(cancelledError('rearrange'));
       } else {
         setOpError(e);
       }
@@ -392,12 +396,13 @@ export default function RearrangeTool() {
               claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
               remove(file.id);
               setResult(null);
+              setOpError(null);
             }}
           />
 
           {loading && (
             <div className="flex flex-col items-center gap-1">
-              <div className="flex items-center gap-2 text-sm text-ink-400">
+              <div className="flex items-center gap-2 text-sm text-ink-400 dark:text-ink-300">
                 <Spinner /> Rendering page previews…
               </div>
               {progress && progress.total > 0 && progress.done < progress.total && (
@@ -436,7 +441,7 @@ export default function RearrangeTool() {
                     setShowAll(true);
                     void fillAll();
                   }}
-                  className="mt-3 w-full rounded-xl border-2 border-dashed border-paper-300 dark:border-ink-700 py-3 text-sm text-ink-500 hover:border-brass-400 hover:text-brass-600 transition-colors"
+                  className="mt-3 w-full min-h-[44px] rounded-xl border-2 border-dashed border-paper-300 dark:border-ink-700 py-3 text-sm text-ink-500 hover:border-brass-400 hover:text-brass-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
                 >
                   {progress && progress.done < progress.total
                     ? `Load & show ${Math.min(hiddenCount, 48)} more of ${hiddenCount} (${progress.done}/${progress.total} ready)`
@@ -448,7 +453,7 @@ export default function RearrangeTool() {
               {hiddenCount === 0 && order.length > 30 && showAll && (
                 <button
                   onClick={() => setShowAll(false)}
-                  className="mt-3 text-xs text-ink-400 hover:text-ink-700"
+                  className="mt-3 min-h-[44px] px-3 inline-flex items-center text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
                 >
                   Show less
                 </button>
@@ -458,7 +463,7 @@ export default function RearrangeTool() {
 
           {!result && order.length > 0 && (
             <div className="flex items-center gap-3">
-              <Button onClick={handleRearrange} disabled={busy} className="w-full">
+              <Button onClick={handleRearrange} disabled={busy || isIdentity} className="w-full">
                 {busy ? <Spinner /> : 'Save rearranged PDF'}
               </Button>
               {busy && (
@@ -467,6 +472,12 @@ export default function RearrangeTool() {
                 </Button>
               )}
             </div>
+          )}
+          {!result && !busy && isIdentity && (
+            <p className="text-xs text-ink-400 dark:text-ink-300">
+              Pages are in their original order — drag the handle or use the arrows to reorder
+              before saving.
+            </p>
           )}
           {busy && fraction !== null && (
             <div className="w-full max-w-xs">
@@ -486,7 +497,11 @@ export default function RearrangeTool() {
         </div>
       )}
 
-      {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
+      {filesError && (
+        <p role="alert" className="mt-4 text-sm text-red-500">
+          {filesError}
+        </p>
+      )}
       {opError !== null && <ErrorBlock error={opError} />}
 
       <>
@@ -519,13 +534,15 @@ export default function RearrangeTool() {
                 className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
                 role="dialog"
+                aria-modal="true"
                 aria-label={`Preview Page ${order[viewer] + 1}`}
               >
                 <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
                   <span className="font-display text-lg">Page {order[viewer] + 1}</span>
                   <button
+                    ref={viewerCloseRef}
                     onClick={() => setViewer(null)}
-                    className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                    className="rounded-full bg-white/10 px-4 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-sm hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                   >
                     Close
                   </button>

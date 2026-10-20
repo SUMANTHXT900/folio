@@ -192,7 +192,7 @@ export default function Home() {
               <span className="absolute inline-flex w-full h-full rounded-full bg-forest-500 opacity-40 animate-ping" />
               <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-forest-500" />
             </span>
-            Every tool works offline · nothing is uploaded
+            Your files stay on your device · app shell + update check use network
           </span>
 
           <h1 className="font-display text-[2.4rem] sm:text-6xl font-semibold tracking-tight text-ink-900 dark:text-paper-100 leading-[0.98] text-balance">
@@ -204,7 +204,7 @@ export default function Home() {
 
           <p className="mt-4 text-[15px] sm:text-lg text-ink-500 dark:text-ink-300 leading-relaxed max-w-lg text-pretty">
             Merge, split, rearrange, rotate and more — processed entirely in your browser. Your
-            documents never touch a server.
+            documents never leave your device; only the app shell and update check use the network.
           </p>
         </motion.div>
 
@@ -219,7 +219,7 @@ export default function Home() {
             <strong className="font-display text-brass-600 dark:text-brass-300 font-semibold">
               0
             </strong>{' '}
-            servers touched
+            document uploads
           </span>
           <span
             aria-hidden
@@ -318,13 +318,15 @@ export default function Home() {
             </>
           );
           if (disabled) {
+            // Reserved tool: deliberately NOT focusable (no tab stop to a
+            // dead end). AT users still hear the name + "not available yet"
+            // description via the virtual cursor; Tab skips straight past.
             return (
               <motion.div
                 key={tool.id}
                 variants={cardV}
                 aria-disabled="true"
                 aria-describedby={`tool-desc-${tool.id}`}
-                tabIndex={0}
                 title="Reserved for a future update"
                 className={cardClass + ' opacity-60 saturate-50 cursor-not-allowed'}
               >

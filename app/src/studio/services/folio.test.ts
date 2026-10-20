@@ -14,6 +14,9 @@ import {
   encodeThumbCanvases,
   formatDurationMs,
   isPdfBytes,
+  isThumbBoxUsable,
+  runBoundedPool,
+  selectThumbMimeChain,
   studioDownload,
   studioShare,
   studioStripExt,
@@ -86,6 +89,40 @@ describe('toStudioError', () => {
     const error = toStudioError({ code: 'CANCELLED' }, 'pdf.merge');
     expect(error.code).toBe('CANCELLED');
     expect(error.message).toMatch(/cancel/i);
+  });
+
+  it('maps rendering and thumbnail codes to friendly text with codes preserved', () => {
+    const codes = [
+      'RENDER_INVALID_INPUT',
+      'RENDER_DOCUMENT_FAILED',
+      'RENDER_INVALID_PAGE',
+      'RENDER_PAGE_FAILED',
+      'RENDER_INTERNAL',
+      'RENDER_CLOSED',
+      'THUMBNAIL_INVALID_INPUT',
+      'THUMBNAIL_INVALID_PAGE',
+      'THUMBNAIL_CLOSED',
+      'THUMBNAIL_RENDER_FAILED',
+      'THUMBNAIL_INTERNAL',
+    ];
+    for (const code of codes) {
+      const error = toStudioError({ code, message: 'raw engine text' }, 'pdf.inspect');
+      expect(error.code).toBe(code);
+      expect(error.message.length).toBeGreaterThan(0);
+      // Friendly primary line, never the raw render message…
+      expect(error.message).not.toContain('raw engine text');
+      // …with the raw text retained as secondary detail.
+      expect(error.engineMessage).toBe('raw engine text');
+      expect(error.operation).toBe('pdf.inspect');
+    }
+  });
+
+  it('maps render/thumbnail cancellations like CANCELLED', () => {
+    for (const code of ['RENDER_CANCELLED', 'THUMBNAIL_CANCELLED']) {
+      const error = toStudioError({ code, message: 'interrupted' }, 'pdf.merge');
+      expect(error.code).toBe(code);
+      expect(error.message).toMatch(/cancel/i);
+    }
   });
 
   it('falls back safely for unknown shapes', () => {
@@ -453,6 +490,107 @@ describe('studioThumb dead path', () => {
   });
 });
 
+describe('runBoundedPool (P3 item 6 intake fan-out)', () => {
+  const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('preserves input order under out-of-order completion', async () => {
+    const out = await runBoundedPool(
+      [0, 1, 2, 3],
+      async (item) => {
+        await delay((3 - item) * 5);
+        return `doc-${item}`;
+      },
+      4,
+    );
+    expect(out).toEqual(['doc-0', 'doc-1', 'doc-2', 'doc-3']);
+  });
+
+  it('bounds concurrency without serializing', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const out = await runBoundedPool(
+      [0, 1, 2, 3, 4, 5],
+      async (item) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await delay(5);
+          return item;
+        } finally {
+          inFlight -= 1;
+        }
+      },
+      3,
+    );
+    expect(out).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it('throws the first error and never starts queued items afterwards', async () => {
+    const started: number[] = [];
+    const failure = new Error('intake file 1 unreadable');
+    await expect(
+      runBoundedPool(
+        [0, 1, 2, 3, 4],
+        async (item) => {
+          started.push(item);
+          await delay(item === 0 ? 20 : 1);
+          if (item === 0) {
+            throw failure;
+          }
+          return item;
+        },
+        1,
+      ),
+    ).rejects.toBe(failure);
+    // Serial lane: the failure settled before any later item was claimed.
+    expect(started).toEqual([0]);
+  });
+
+  it('handles empty input and degenerate concurrency as serial', async () => {
+    await expect(runBoundedPool([], async (x: number) => x, 3)).resolves.toEqual([]);
+    const seen: number[] = [];
+    await expect(
+      runBoundedPool(
+        [0, 1],
+        async (item) => {
+          seen.push(item);
+          return item;
+        },
+        0,
+      ),
+    ).resolves.toEqual([0, 1]);
+    expect(seen).toEqual([0, 1]);
+  });
+});
+
+describe('selectThumbMimeChain (P3 item 3 encoder detect)', () => {
+  it('keeps the historical webp→jpeg→png chain when nothing is missing', () => {
+    expect(selectThumbMimeChain(new Set())).toEqual([
+      { mime: 'image/webp', quality: 0.85 },
+      { mime: 'image/jpeg', quality: 0.85 },
+      { mime: 'image/png' },
+    ]);
+  });
+
+  it('skips session-known-missing encoders in order', () => {
+    expect(selectThumbMimeChain(new Set(['image/webp']))).toEqual([
+      { mime: 'image/jpeg', quality: 0.85 },
+      { mime: 'image/png' },
+    ]);
+    expect(selectThumbMimeChain(new Set(['image/webp', 'image/jpeg']))).toEqual([
+      { mime: 'image/png' },
+    ]);
+  });
+
+  it('never returns an empty chain — PNG is the last resort', () => {
+    expect(selectThumbMimeChain(new Set(['image/webp', 'image/jpeg', 'image/png']))).toEqual([
+      { mime: 'image/png' },
+    ]);
+  });
+});
+
 describe('preview cache ownership', () => {
   const revoked: string[] = [];
 
@@ -485,6 +623,61 @@ describe('preview cache ownership', () => {
     expect(cache.hit(cache.key('renderdoc-9', cache.max + 2))).toBe(`blob:p${cache.max + 2}`);
     expect(cache.live('renderdoc-9', cache.max + 2, `blob:p${cache.max + 2}`)).toBe(true);
   });
+
+  it('notifies preview holders on LRU evict with a generation bump', () => {
+    const cache = __previewCacheForTests;
+    const seen: string[] = [];
+    const unsubscribe = cache.subscribe((renderId) => {
+      seen.push(renderId);
+    });
+    expect(cache.generation('renderdoc-7')).toBe(0);
+    for (let page = 1; page <= cache.max + 1; page += 1) {
+      cache.touch(cache.key('renderdoc-7', page), `blob:q${page}`);
+    }
+    expect(cache.size()).toBe(cache.max);
+    expect(seen).toEqual(['renderdoc-7']);
+    expect(cache.generation('renderdoc-7')).toBe(1);
+    expect(cache.live('renderdoc-7', 1, 'blob:q1')).toBe(false);
+    expect(revoked).toEqual(['blob:q1']);
+    unsubscribe();
+  });
+
+  it('notifies once on render purge and drops only that render document', () => {
+    const cache = __previewCacheForTests;
+    const seen: string[] = [];
+    const unsubscribe = cache.subscribe((renderId) => {
+      seen.push(renderId);
+    });
+    cache.touch(cache.key('renderdoc-1', 1), 'blob:r1');
+    cache.touch(cache.key('renderdoc-1', 2), 'blob:r2');
+    cache.touch(cache.key('renderdoc-2', 1), 'blob:r3');
+    cache.purge('renderdoc-1');
+    expect(seen).toEqual(['renderdoc-1']);
+    expect(cache.generation('renderdoc-1')).toBe(1);
+    expect(cache.has('renderdoc-1', 1)).toBe(false);
+    expect(cache.has('renderdoc-1', 2)).toBe(false);
+    expect(cache.has('renderdoc-2', 1)).toBe(true);
+    expect(cache.live('renderdoc-2', 1, 'blob:r3')).toBe(true);
+    expect(revoked).toEqual(['blob:r1', 'blob:r2']);
+    // Purging a render document with no entries notifies nobody.
+    cache.purge('renderdoc-1');
+    expect(seen).toEqual(['renderdoc-1']);
+    unsubscribe();
+  });
+
+  it('stops notifying preview holders after unsubscribe', () => {
+    const cache = __previewCacheForTests;
+    const seen: string[] = [];
+    const unsubscribe = cache.subscribe((renderId) => {
+      seen.push(renderId);
+    });
+    unsubscribe();
+    for (let page = 1; page <= cache.max + 1; page += 1) {
+      cache.touch(cache.key('renderdoc-3', page), `blob:s${page}`);
+    }
+    expect(seen).toEqual([]);
+    expect(cache.generation('renderdoc-3')).toBe(1);
+  });
 });
 
 describe('thumbnail cache bounds and eviction signaling', () => {
@@ -511,7 +704,7 @@ describe('thumbnail cache bounds and eviction signaling', () => {
     });
     for (let d = 0; d < cache.maxDocs + 1; d += 1) {
       const pages = cache.touch(`doc-${d}`);
-      cache.set(pages, `doc-${d}`, 1, `blob:doc-${d}-p1`);
+      cache.set(pages, `doc-${d}`, 1, `blob:doc-${d}-p1`, 128);
     }
     expect(cache.has('doc-0')).toBe(false);
     expect(cache.has(`doc-${cache.maxDocs}`)).toBe(true);
@@ -529,7 +722,7 @@ describe('thumbnail cache bounds and eviction signaling', () => {
     });
     const pages = cache.touch('big-doc');
     for (let p = 1; p <= cache.maxPagesPerDoc + 5; p += 1) {
-      cache.set(pages, 'big-doc', p, `blob:big-${p}`);
+      cache.set(pages, 'big-doc', p, `blob:big-${p}`, 128);
     }
     expect(cache.size('big-doc')).toBe(cache.maxPagesPerDoc);
     // Evicted pages are revoked and no longer live...
@@ -547,7 +740,7 @@ describe('thumbnail cache bounds and eviction signaling', () => {
   it('stops notifying after unsubscribe', () => {
     const cache = __thumbCacheForTests;
     const pages = cache.touch('ghost-doc');
-    cache.set(pages, 'ghost-doc', 1, 'blob:ghost-1');
+    cache.set(pages, 'ghost-doc', 1, 'blob:ghost-1', 128);
     const seen: string[] = [];
     const unsubscribe = cache.subscribe((docId) => {
       seen.push(docId);
@@ -556,5 +749,71 @@ describe('thumbnail cache bounds and eviction signaling', () => {
     cache.revokeDoc('ghost-doc');
     expect(seen).toEqual([]);
     expect(cache.has('ghost-doc')).toBe(false);
+  });
+});
+
+describe('thumbnail tier-aware cache', () => {
+  const revoked: string[] = [];
+
+  beforeEach(() => {
+    revoked.length = 0;
+    URL.revokeObjectURL = vi.fn((url: string) => {
+      revoked.push(url);
+    });
+    __thumbCacheForTests.clearForTests();
+  });
+
+  afterEach(() => {
+    __thumbCacheForTests.clearForTests();
+    vi.restoreAllMocks();
+  });
+
+  it('reuses same-tier and larger-tier entries, misses smaller tiers', () => {
+    // Same box hits; a larger cached box downscales safely into a smaller
+    // request; a smaller cached box must never upscale into a bigger one.
+    expect(isThumbBoxUsable(128, 128)).toBe(true);
+    expect(isThumbBoxUsable(384, 384)).toBe(true);
+    expect(isThumbBoxUsable(384, 128)).toBe(true);
+    expect(isThumbBoxUsable(128, 384)).toBe(false);
+    expect(isThumbBoxUsable(96, 192)).toBe(false);
+  });
+
+  it('list-then-grid is a miss: the upgrade re-renders and revokes the stale entry', () => {
+    const cache = __thumbCacheForTests;
+    const pages = cache.touch('tier-doc');
+    cache.set(pages, 'tier-doc', 1, 'blob:list-1', 128);
+    expect(cache.box('tier-doc', 1)).toBe(128);
+    // The cached list tier cannot serve a grid request — the window treats
+    // this as missing and re-renders at the requested box...
+    expect(isThumbBoxUsable(cache.box('tier-doc', 1) ?? 0, 384)).toBe(false);
+    // ...and the upgrade write revokes the stale list URL (no orphaned
+    // entry beside the fresh render).
+    cache.set(pages, 'tier-doc', 1, 'blob:grid-1', 384);
+    expect(revoked).toEqual(['blob:list-1']);
+    expect(cache.box('tier-doc', 1)).toBe(384);
+    expect(cache.live('tier-doc', 1, 'blob:list-1')).toBe(false);
+    expect(cache.live('tier-doc', 1, 'blob:grid-1')).toBe(true);
+  });
+
+  it('grid-then-list reuses the cached entry with no re-render and no revoke', () => {
+    const cache = __thumbCacheForTests;
+    const pages = cache.touch('tier-doc-2');
+    cache.set(pages, 'tier-doc-2', 1, 'blob:grid-1', 384);
+    // The cached grid tier covers a list request — the window serves the
+    // same URL, writes nothing, revokes nothing.
+    expect(isThumbBoxUsable(cache.box('tier-doc-2', 1) ?? 0, 128)).toBe(true);
+    expect(cache.live('tier-doc-2', 1, 'blob:grid-1')).toBe(true);
+    expect(revoked).toEqual([]);
+  });
+
+  it('same-tier rewrites revoke the replaced URL instead of leaking it', () => {
+    const cache = __thumbCacheForTests;
+    const pages = cache.touch('tier-doc-3');
+    cache.set(pages, 'tier-doc-3', 1, 'blob:first', 128);
+    cache.set(pages, 'tier-doc-3', 1, 'blob:second', 128);
+    expect(revoked).toEqual(['blob:first']);
+    expect(cache.live('tier-doc-3', 1, 'blob:first')).toBe(false);
+    expect(cache.live('tier-doc-3', 1, 'blob:second')).toBe(true);
+    expect(cache.size('tier-doc-3')).toBe(1);
   });
 });

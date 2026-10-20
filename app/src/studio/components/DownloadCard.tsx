@@ -6,8 +6,9 @@
  * a Smart / Custom toggle, an editable filename, and a Download anchor
  * whose `download` attribute always carries the exact final name — the
  * download triggers with what the user sees, never a generic fallback.
- * After the first save, the familiar `DoneBanner` takes over (re-save +
- * share with the same exact name).
+ * After the first download click, the familiar `DoneBanner` takes over
+ * (save again + share with the same exact name — the click is a user
+ * gesture, the strongest save signal the browser exposes).
  *
  * - Smart: input pre-filled from the input file names (`downloadNaming`),
  *   with a one-tap reset to the suggestion.
@@ -207,6 +208,12 @@ function PartRow({
   anchorRef: (el: HTMLAnchorElement | null) => void;
 }) {
   const [text, setText] = useState(part.suggestedName);
+  // A new completion reuses the stable row (same key) — resync the editable
+  // text instead of keeping a stale name (the single-DownloadCard reset
+  // pattern above: one state update, never a remount).
+  useEffect(() => {
+    setText(part.suggestedName);
+  }, [part.suggestedName, part.blob]);
   const url = useObjectUrl(part.blob);
   const finalName = sanitizeFileName(
     text.trim() === '' ? part.suggestedName : text,
@@ -275,14 +282,33 @@ export function MultiDownloadCard({
   title?: string;
 }) {
   const anchorsRef = useRef<Array<HTMLAnchorElement | null>>([]);
-  const [savedAll, setSavedAll] = useState(false);
+  // Honest post-click state: an anchor click is fire-and-forget — no browser
+  // API reports whether the file actually landed — so this records only that
+  // the downloads were STARTED (and how many anchors were live when clicked),
+  // never that all parts "saved". The single-output card keeps its
+  // click-to-banner path; only it treats a user-gesture click as a save.
+  const [started, setStarted] = useState(false);
+  const [startedCount, setStartedCount] = useState(0);
+
+  // A new completion resets the started notice in one pass (same pattern as
+  // the single DownloadCard above) — a stale notice must never survive a
+  // re-run.
+  useEffect(() => {
+    setStarted(false);
+    setStartedCount(0);
+  }, [parts]);
 
   const downloadAll = async () => {
+    let clicked = 0;
     for (const anchor of anchorsRef.current) {
-      anchor?.click();
+      if (anchor !== null && anchor !== undefined) {
+        anchor.click();
+        clicked += 1;
+      }
       await new Promise((r) => setTimeout(r, 400));
     }
-    setSavedAll(true);
+    setStartedCount(clicked);
+    setStarted(true);
   };
 
   return (
@@ -314,9 +340,11 @@ export function MultiDownloadCard({
           />
         ))}
       </div>
-      {savedAll && (
+      {started && (
         <p className="mt-2 text-xs text-forest-600 dark:text-forest-300" role="status">
-          All parts saved — tap any row’s Save again if one didn’t come through.
+          {startedCount >= parts.length
+            ? `Downloads started for all ${parts.length} parts — check your downloads shelf; tap any row’s Save again if one didn’t come through.`
+            : `Started ${startedCount} of ${parts.length} downloads — tap any row’s Save again for the rest.`}
         </p>
       )}
     </div>

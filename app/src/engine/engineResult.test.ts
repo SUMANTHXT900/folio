@@ -7,7 +7,7 @@
  * can display `N images → N-page PDF`.
  */
 import { describe, expect, it } from 'vitest';
-import { translateSummary } from './engineResult';
+import { errorData, translateSummary } from './engineResult';
 
 describe('translateSummary images_to_pdf', () => {
   it('preserves imageCount alongside pageCount', () => {
@@ -43,5 +43,46 @@ describe('translateSummary images_to_pdf', () => {
       output_page_count: 8,
     });
     expect(summary).toEqual({ pageCount: 8, inputPageCount: 10, outputPageCount: 8 });
+  });
+});
+
+describe('translateSummary guards (AUD-2)', () => {
+  it('throws on a mismatched wire shape instead of returning undefined pageCount', () => {
+    expect(() =>
+      translateSummary(
+        'pdf.extract_pages',
+        // Missing page_count — previously cast blindly to { pageCount: undefined }.
+        {} as unknown as { page_count: number },
+      ),
+    ).toThrow();
+  });
+
+  it('throws on malformed merge/split summaries', () => {
+    expect(() =>
+      translateSummary('pdf.merge', { input_page_count: 5, output_page_count: 5 } as never),
+    ).toThrow();
+    expect(() =>
+      translateSummary('pdf.split', { input_page_count: 5, parts: [{ name: null }] } as never),
+    ).toThrow();
+  });
+
+  it('throws on malformed inspect summary', () => {
+    expect(() => translateSummary('pdf.inspect', { page_count: 1 } as never)).toThrow();
+  });
+});
+
+describe('errorData code validation (AUD-2)', () => {
+  it('maps an unknown wire code to INTERNAL and keeps the raw message', () => {
+    const err = errorData('BOGUS_CODE', 'boom');
+    expect(err.code).toBe('INTERNAL');
+    expect(err.message).toBe('boom');
+    expect(err.details ?? '').toContain('BOGUS_CODE');
+  });
+
+  it('passes known codes through unchanged', () => {
+    expect(errorData('IO_ERROR', 'disk gone')).toEqual({
+      code: 'IO_ERROR',
+      message: 'disk gone',
+    });
   });
 });

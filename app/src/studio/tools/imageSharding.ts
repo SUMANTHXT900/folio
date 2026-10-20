@@ -70,8 +70,42 @@ export const MANY_CORE_THRESHOLD = 8;
  * Memory bound for the sharded path: total staged input bytes allowed in
  * flight across all concurrent shard jobs. See the module doc for the
  * peak arithmetic. Conservative on purpose (P3 risk).
+ *
+ * The gate compares TWO estimates against this cap (P3 item 7): staged
+ * input bytes AND estimated sub-PDF output bytes (below). Inputs alone
+ * understate the peak: every shard's output is held until the ordered
+ * merge, so resident ≈ inputs + outputs on top of the store copies the
+ * caller already holds. Batches over either estimate stay single-worker:
+ * slower, but bounded.
  */
 export const MAX_SHARD_IN_FLIGHT_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Estimated PDF container overhead on JPEG passthrough bytes (P3 item 7).
+ * The engine embeds baseline orientation-1 JPEGs byte-identical
+ * (passthrough, `images_to_pdf/mod.rs`), so sub-PDF output ≈ input plus
+ * per-page dictionary overhead. ESTIMATE, not measured: 5% covers the
+ * container with headroom; non-passthrough JPEGs re-encode at q82 and
+ * come out SMALLER, so this overstates them (safe direction).
+ */
+export const SHARD_JPEG_OUTPUT_FACTOR = 1.05;
+
+/**
+ * Conservative output factor for PNG/unknown inputs with unknown dims
+ * (P3 item 7). The engine embeds PNGs as uncompressed raw RGB, and the
+ * in-tree observation (5-2) is ~8× versus JPEG bytes. ESTIMATE, not
+ * measured — deliberately pessimistic so unknown-dim batches gate early
+ * instead of counting 0.
+ */
+export const SHARD_UNKNOWN_OUTPUT_FACTOR = 8;
+
+/**
+ * Raw-RGB bytes per pixel for the PNG embed path (P3 item 7). GROUNDED in
+ * the engine contract (`images_to_pdf/mod.rs`: PNGs keep lossless raw
+ * RGB): a PNG with known dims can never exceed w×h×3 output bytes, so
+ * known dims always beat the conservative byte factor above.
+ */
+export const SHARD_RAW_RGB_BYTES_PER_PIXEL = 3;
 
 /**
  * Decode-cost bound for the sharded path (5-3): total pixels allowed
@@ -89,11 +123,70 @@ export const MAX_SHARD_PIXELS = 48_000_000;
 /** Share of overall progress attributed to the shard phase (rest: merge). */
 export const SHARD_PHASE_WEIGHT = 0.9;
 
+/**
+ * Image kind for the output-byte estimate (P3 item 7). `'unknown'` is the
+ * conservative default: raw-RGB-scale output is assumed, never zero.
+ */
+export type StagedImageKind = 'jpeg' | 'png' | 'unknown';
+
+/**
+ * Pure classifier: MIME first, extension fallback, else `'unknown'`.
+ * Exported for unit tests and for callers threading staged kinds.
+ */
+export function classifyStagedKind(input: { name?: string; mime?: string }): StagedImageKind {
+  const mime = (input.mime ?? '').toLowerCase().trim();
+  if (mime === 'image/jpeg') return 'jpeg';
+  if (mime === 'image/png') return 'png';
+  const name = (input.name ?? '').toLowerCase();
+  if (/\.jpe?g$/.test(name)) return 'jpeg';
+  if (/\.png$/.test(name)) return 'png';
+  return 'unknown';
+}
+
+/**
+ * Estimated sub-PDF output bytes held across shards until the ordered
+ * merge (P3 item 7 gate input). Per image, same order as `stagedSizes`:
+ * - `'jpeg'`: input × `SHARD_JPEG_OUTPUT_FACTOR` (passthrough + overhead).
+ * - `'png'`/`'unknown'` with known dims: pixels × 3 (raw-RGB bound —
+ *   grounded, never estimated).
+ * - `'png'`/`'unknown'` with unknown dims: input ×
+ *   `SHARD_UNKNOWN_OUTPUT_FACTOR` (conservative — replaces the old 0).
+ *
+ * Exported for unit tests.
+ */
+export function estimateShardOutputBytes(
+  stagedSizes: readonly number[],
+  kinds?: readonly StagedImageKind[],
+  stagedPixels?: readonly number[],
+): number {
+  let total = 0;
+  for (let i = 0; i < stagedSizes.length; i += 1) {
+    const size = Math.max(0, stagedSizes[i] ?? 0);
+    const kind = kinds?.[i] ?? 'unknown';
+    const pixels = Math.max(0, stagedPixels?.[i] ?? 0);
+    if (kind === 'jpeg') {
+      total += Math.ceil(size * SHARD_JPEG_OUTPUT_FACTOR);
+    } else if (pixels > 0) {
+      total += pixels * SHARD_RAW_RGB_BYTES_PER_PIXEL;
+    } else {
+      total += Math.ceil(size * SHARD_UNKNOWN_OUTPUT_FACTOR);
+    }
+  }
+  return total;
+}
+
 export interface ShardedImagesInput {
   /** Staged image ids in collection (= PDF page) order. Caller-owned. */
   stagedIds: string[];
   /** Staged byte lengths, same order (memory gate + progress weights). */
   stagedSizes: number[];
+  /**
+   * Image kind per staged image, same order (P3 item 7 output gate).
+   * JPEGs embed near-passthrough; PNGs embed as raw RGB (~w×h×3). Absent
+   * entries (or a wholly absent array) count as `'unknown'` and take the
+   * conservative factor — unknown batches gate early instead of counting 0.
+   */
+  stagedKinds?: StagedImageKind[];
   /**
    * Decode cost per staged image (w×h, known at prepare time), same
    * order (5-3 pixel gate). Optional: batches without it keep the
@@ -109,6 +202,13 @@ export interface ShardedImagesInput {
    */
   retainedPixels?: number[];
   pageSize: 'fit' | 'standard';
+  /**
+   * Staging-phase abort: the same `AbortController` that cancels
+   * `stageImagePages` is forwarded here so one Cancel aborts the whole
+   * build (staging loop + shard jobs + merge). Checked at phase
+   * boundaries and wired to cancel in-flight jobs via listener.
+   */
+  signal?: AbortSignal;
   /**
    * Test/SSR override for `navigator.hardwareConcurrency`. Defaults to
    * the live value when available.
@@ -144,7 +244,9 @@ function readHardwareConcurrency(): number | undefined {
  *
  * Gate order is deliberate (M5): the page-count check runs first so
  * small batches keep the single-worker path byte-for-byte, then the
- * pre-stage byte cap, then the decode-cost pixel cap (5-3). Callers
+ * pre-stage byte cap, then the estimated-output cap (P3 item 7: inputs +
+ * outputs are both resident until the merge), then the decode-cost pixel
+ * cap (5-3). Callers
  * SHOULD evaluate this policy on pre-stage sums (Σ `file.size` +
  * Σ known w×h, retained originals included) BEFORE the prepare loop
  * materializes staged bytes: an early single-path decision skips
@@ -154,10 +256,25 @@ function readHardwareConcurrency(): number | undefined {
  */
 export function resolveShardCount(
   pageCount: number,
-  options?: { hardwareConcurrency?: number; totalBytes?: number; totalPixels?: number },
+  options?: {
+    hardwareConcurrency?: number;
+    totalBytes?: number;
+    totalPixels?: number;
+    /**
+     * Estimated sub-PDF output bytes (`estimateShardOutputBytes`, P3 item
+     * 7). Absent keeps the historical input+pixel gates byte-for-byte.
+     */
+    totalOutputBytes?: number;
+  },
 ): number {
   if (pageCount < SHARD_THRESHOLD_PAGES) return 1;
   if (options?.totalBytes !== undefined && options.totalBytes > MAX_SHARD_IN_FLIGHT_BYTES) {
+    return 1;
+  }
+  if (
+    options?.totalOutputBytes !== undefined &&
+    options.totalOutputBytes > MAX_SHARD_IN_FLIGHT_BYTES
+  ) {
     return 1;
   }
   if (options?.totalPixels !== undefined && options.totalPixels > MAX_SHARD_PIXELS) {
@@ -242,157 +359,183 @@ export function buildImagesPdf(
   const pageCount = input.stagedIds.length;
 
   const done = (async (): Promise<StudioResult> => {
-    const shardCount = resolveShardCount(pageCount, {
-      hardwareConcurrency: input.hardwareConcurrency,
-      totalBytes: estimateInFlightBytes(input.stagedSizes),
-      totalPixels: estimatePixelCost(input.stagedPixels, input.retainedPixels),
-    });
-
-    if (shardCount <= 1) {
-      // Historical single-worker path, unchanged: same operation, same
-      // ids, same options, same progress passthrough.
-      const job = deps.runOperation(
-        'pdf.images_to_pdf',
-        input.stagedIds,
-        imagesToPdfOptions(input.pageSize),
-        onProgress !== undefined ? { onProgress } : undefined,
-      );
-      active.add(job);
-      try {
-        return await job.done;
-      } finally {
-        active.delete(job);
-      }
-    }
-
-    const plans = planShards(pageCount, shardCount);
-    const totalPages = pageCount;
-    const fractions = new Array<number>(plans.length).fill(0);
-    // Shards run concurrently (`Promise.all` below), so wall time is the
-    // slowest shard — never the sum. The engine duration of each single
-    // run stays authoritative (D4); this only combines the parallel
-    // spans honestly before adding the sequential merge wall.
-    let maxShardDurationMs = 0;
-    const shardMarks: StudioPerfMark[] = [];
-    const reportShards = (): void => {
-      if (onProgress === undefined) return;
-      let weighted = 0;
-      for (let i = 0; i < plans.length; i += 1) {
-        weighted += (plans[i].length / totalPages) * fractions[i];
-      }
-      onProgress({ fraction: SHARD_PHASE_WEIGHT * weighted, label: 'Building pages…' });
-    };
-
-    const runShard = async (shardIndex: number, indices: number[]): Promise<StudioResult> => {
-      const job = deps.runOperation(
-        'pdf.images_to_pdf',
-        indices.map((i) => input.stagedIds[i]),
-        imagesToPdfOptions(input.pageSize),
-        onProgress !== undefined
-          ? {
-              onProgress: (p) => {
-                fractions[shardIndex] = p.fraction ?? 0;
-                let weighted = 0;
-                for (let i = 0; i < plans.length; i += 1) {
-                  weighted += (plans[i].length / totalPages) * fractions[i];
-                }
-                onProgress({
-                  fraction: SHARD_PHASE_WEIGHT * weighted,
-                  label: `Shard ${shardIndex + 1} of ${plans.length} — ${p.label}`,
-                });
-              },
-            }
-          : undefined,
-      );
-      active.add(job);
-      try {
-        return await job.done;
-      } finally {
-        active.delete(job);
+    const isAborted = (): boolean => cancelled || input.signal?.aborted === true;
+    // Staging-abort forwarding: the same controller that aborts the
+    // prepare loop also aborts sharded work — an abort between phases or
+    // mid-shard fails honestly with CANCELLED and cancels in-flight jobs.
+    const onAbortSignal = (): void => {
+      cancelled = true;
+      for (const job of [...active]) {
+        void job.cancel().catch(() => undefined);
       }
     };
-
-    // All shards in flight at once (that is the parallelism). Any
-    // rejection fails the build: remaining shards are cancelled below
-    // and the error propagates — no silent single-worker retry (see
-    // module doc: a retry would double worst-case time).
-    let shardResults: StudioResult[];
+    input.signal?.addEventListener('abort', onAbortSignal, { once: true });
     try {
-      shardResults = await Promise.all(plans.map((indices, i) => runShard(i, indices)));
-    } catch (error) {
-      for (const job of active) {
-        await job.cancel().catch(() => undefined);
-      }
-      throw error;
-    }
-    for (let i = 0; i < shardResults.length; i += 1) {
-      const shard = shardResults[i];
-      maxShardDurationMs = Math.max(maxShardDurationMs, shard.durationMs);
-      // Keep per-shard attribution spans when present (DEV-only):
-      // namespaced by shard so concurrent spans stay distinguishable.
-      if (shard.perfMarks !== undefined) {
-        for (const mark of shard.perfMarks) {
-          shardMarks.push({ ...mark, name: `shard:${i + 1}:${mark.name}` });
-        }
-      }
-    }
-    reportShards();
+      if (isAborted()) throw cancelledError();
+      const shardCount = resolveShardCount(pageCount, {
+        hardwareConcurrency: input.hardwareConcurrency,
+        totalBytes: estimateInFlightBytes(input.stagedSizes),
+        totalPixels: estimatePixelCost(input.stagedPixels, input.retainedPixels),
+        // P3 item 7: estimated sub-PDF outputs join the gate — absent
+        // kinds default to 'unknown' (conservative), so callers that
+        // thread real kinds (ImagesTool) keep JPEG batches sharding while
+        // unknown batches gate early.
+        totalOutputBytes: estimateShardOutputBytes(
+          input.stagedSizes,
+          input.stagedKinds,
+          input.stagedPixels,
+        ),
+      });
 
-    if (cancelled) throw cancelledError();
-
-    // Ordered merge through temp studio docs (RotateTool pattern).
-    const tempIds: string[] = [];
-    try {
-      for (let i = 0; i < shardResults.length; i += 1) {
-        if (cancelled) throw cancelledError();
-        const first = shardResults[i].outputs[0];
-        if (first === undefined) {
-          throw new Error(`Shard ${i + 1} of ${shardResults.length} produced no output.`);
-        }
-        const temp = await deps.openBytes(
-          `images (shard ${i + 1} of ${shardResults.length})`,
-          first.bytes,
+      if (shardCount <= 1) {
+        // Historical single-worker path, unchanged: same operation, same
+        // ids, same options, same progress passthrough.
+        if (isAborted()) throw cancelledError();
+        const job = deps.runOperation(
+          'pdf.images_to_pdf',
+          input.stagedIds,
+          imagesToPdfOptions(input.pageSize),
+          onProgress !== undefined ? { onProgress } : undefined,
         );
-        tempIds.push(temp.id);
-      }
-      if (cancelled) throw cancelledError();
-      const job = deps.runOperation(
-        'pdf.merge',
-        tempIds,
-        {},
-        onProgress !== undefined
-          ? {
-              onProgress: (p) => {
-                onProgress({
-                  fraction: SHARD_PHASE_WEIGHT + (1 - SHARD_PHASE_WEIGHT) * (p.fraction ?? 0),
-                  label: `Merging ${tempIds.length} parts — ${p.label}`,
-                });
-              },
-            }
-          : undefined,
-      );
-      mergeJob = job;
-      active.add(job);
-      try {
-        const merged = await job.done;
-        // Parallel shard wall (max) + sequential merge wall — not the sum.
-        const durationMs = maxShardDurationMs + merged.durationMs;
-        if (shardMarks.length > 0 || merged.perfMarks !== undefined) {
-          return {
-            ...merged,
-            durationMs,
-            perfMarks: [...shardMarks, ...(merged.perfMarks ?? [])],
-          };
+        active.add(job);
+        try {
+          return await job.done;
+        } finally {
+          active.delete(job);
         }
-        return { ...merged, durationMs };
+      }
+
+      const plans = planShards(pageCount, shardCount);
+      const totalPages = pageCount;
+      const fractions = new Array<number>(plans.length).fill(0);
+      // Shards run concurrently (`Promise.all` below), so wall time is the
+      // slowest shard — never the sum. The engine duration of each single
+      // run stays authoritative (D4); this only combines the parallel
+      // spans honestly before adding the sequential merge wall.
+      let maxShardDurationMs = 0;
+      const shardMarks: StudioPerfMark[] = [];
+      const reportShards = (): void => {
+        if (onProgress === undefined) return;
+        let weighted = 0;
+        for (let i = 0; i < plans.length; i += 1) {
+          weighted += (plans[i].length / totalPages) * fractions[i];
+        }
+        onProgress({ fraction: SHARD_PHASE_WEIGHT * weighted, label: 'Building pages…' });
+      };
+
+      const runShard = async (shardIndex: number, indices: number[]): Promise<StudioResult> => {
+        const job = deps.runOperation(
+          'pdf.images_to_pdf',
+          indices.map((i) => input.stagedIds[i]),
+          imagesToPdfOptions(input.pageSize),
+          onProgress !== undefined
+            ? {
+                onProgress: (p) => {
+                  fractions[shardIndex] = p.fraction ?? 0;
+                  let weighted = 0;
+                  for (let i = 0; i < plans.length; i += 1) {
+                    weighted += (plans[i].length / totalPages) * fractions[i];
+                  }
+                  onProgress({
+                    fraction: SHARD_PHASE_WEIGHT * weighted,
+                    label: `Shard ${shardIndex + 1} of ${plans.length} — ${p.label}`,
+                  });
+                },
+              }
+            : undefined,
+        );
+        active.add(job);
+        try {
+          return await job.done;
+        } finally {
+          active.delete(job);
+        }
+      };
+
+      // All shards in flight at once (that is the parallelism). Any
+      // rejection fails the build: remaining shards are cancelled below
+      // and the error propagates — no silent single-worker retry (see
+      // module doc: a retry would double worst-case time).
+      let shardResults: StudioResult[];
+      try {
+        shardResults = await Promise.all(plans.map((indices, i) => runShard(i, indices)));
+      } catch (error) {
+        for (const job of active) {
+          await job.cancel().catch(() => undefined);
+        }
+        throw error;
+      }
+      for (let i = 0; i < shardResults.length; i += 1) {
+        const shard = shardResults[i];
+        maxShardDurationMs = Math.max(maxShardDurationMs, shard.durationMs);
+        // Keep per-shard attribution spans when present (DEV-only):
+        // namespaced by shard so concurrent spans stay distinguishable.
+        if (shard.perfMarks !== undefined) {
+          for (const mark of shard.perfMarks) {
+            shardMarks.push({ ...mark, name: `shard:${i + 1}:${mark.name}` });
+          }
+        }
+      }
+      reportShards();
+
+      if (isAborted()) throw cancelledError();
+
+      // Ordered merge through temp studio docs (RotateTool pattern).
+      const tempIds: string[] = [];
+      try {
+        for (let i = 0; i < shardResults.length; i += 1) {
+          if (isAborted()) throw cancelledError();
+          const first = shardResults[i].outputs[0];
+          if (first === undefined) {
+            throw new Error(`Shard ${i + 1} of ${shardResults.length} produced no output.`);
+          }
+          const temp = await deps.openBytes(
+            `images (shard ${i + 1} of ${shardResults.length})`,
+            first.bytes,
+          );
+          tempIds.push(temp.id);
+        }
+        if (isAborted()) throw cancelledError();
+        const job = deps.runOperation(
+          'pdf.merge',
+          tempIds,
+          {},
+          onProgress !== undefined
+            ? {
+                onProgress: (p) => {
+                  onProgress({
+                    fraction: SHARD_PHASE_WEIGHT + (1 - SHARD_PHASE_WEIGHT) * (p.fraction ?? 0),
+                    label: `Merging ${tempIds.length} parts — ${p.label}`,
+                  });
+                },
+              }
+            : undefined,
+        );
+        mergeJob = job;
+        active.add(job);
+        try {
+          const merged = await job.done;
+          // Parallel shard wall (max) + sequential merge wall — not the sum.
+          const durationMs = maxShardDurationMs + merged.durationMs;
+          if (shardMarks.length > 0 || merged.perfMarks !== undefined) {
+            return {
+              ...merged,
+              durationMs,
+              perfMarks: [...shardMarks, ...(merged.perfMarks ?? [])],
+            };
+          }
+          return { ...merged, durationMs };
+        } finally {
+          active.delete(job);
+          mergeJob = null;
+        }
       } finally {
-        active.delete(job);
-        mergeJob = null;
+        for (const id of tempIds) {
+          await deps.closeDoc(id).catch(() => undefined);
+        }
       }
     } finally {
-      for (const id of tempIds) {
-        await deps.closeDoc(id).catch(() => undefined);
-      }
+      input.signal?.removeEventListener('abort', onAbortSignal);
     }
   })();
 

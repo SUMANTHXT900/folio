@@ -319,3 +319,78 @@ describe('useScanicProcessor draining', () => {
     unmount();
   });
 });
+
+describe('useScanicProcessor unmount ownership', () => {
+  it('terminates the hook-owned worker client on unmount', async () => {
+    const terminateSpy = vi.spyOn(
+      (await import('./scanicClient')).ScanicClient.prototype,
+      'terminate',
+    );
+    try {
+      const { unmount } = renderHook(() =>
+        useScanicProcessor({
+          decode: async (): Promise<ImageData> => new ImageData(2, 2),
+          encodePng: async (): Promise<Blob> => new Blob(['png'], { type: 'image/png' }),
+        }),
+      );
+      unmount();
+      expect(terminateSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      terminateSpy.mockRestore();
+    }
+  });
+
+  it('never terminates a caller-supplied client on unmount', async () => {
+    const { client } = makeFakeClient();
+    const terminate = vi.fn();
+    (client as unknown as { terminate: () => void }).terminate = terminate;
+    const { unmount } = renderHook(() => useScanicProcessor(makeOptions(client)));
+    unmount();
+    expect(terminate).not.toHaveBeenCalled();
+  });
+
+  it('buildNow after unmount resolves promptly with the snapshot instead of joining a dead drain', async () => {
+    const { client } = makeFakeClient();
+    let resolveDecode: ((image: ImageData) => void) | null = null;
+    const { result, unmount } = renderHook(() =>
+      useScanicProcessor(
+        makeOptions(client, {
+          decode: () =>
+            new Promise<ImageData>((resolve) => {
+              resolveDecode = resolve;
+            }),
+        }),
+      ),
+    );
+
+    act(() => {
+      result.current.enqueueCapture(new File(['a'], 'a.jpg', { type: 'image/jpeg' }));
+    });
+    // Let the drain start and park inside decode.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    unmount();
+
+    // Alive-guarded: resolves now with the queued snapshot — never hangs on
+    // the orphaned in-flight decode.
+    const settled = await Promise.race([
+      result.current.buildNow().then((entries) => ({ kind: 'resolved' as const, entries })),
+      new Promise<{ kind: 'timeout' }>((resolve) => {
+        setTimeout(() => resolve({ kind: 'timeout' }), 100);
+      }),
+    ]);
+    expect(settled.kind).toBe('resolved');
+    if (settled.kind === 'resolved') {
+      expect(settled.entries).toHaveLength(1);
+      // Picked up and marked `processing` before parking in decode — the
+      // snapshot is returned as-is, with no further work started.
+      expect(settled.entries[0].phase).toBe('processing');
+    }
+    // Release the orphaned decode so the worker-less test ends cleanly.
+    await act(async () => {
+      resolveDecode?.(new ImageData(2, 2));
+      await Promise.resolve();
+    });
+  });
+});

@@ -190,12 +190,59 @@ describe('MetadataTool patch semantics', () => {
   });
 });
 
+describe('MetadataTool empty-patch honesty', () => {
+  it('keeps Save disabled with an honest note until something changes', async () => {
+    render(<MetadataTool />);
+    await screen.findByText('Orig');
+    const save = screen.getByRole('button', { name: 'Save metadata' });
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/No changes yet/)).toBeTruthy();
+    const sets = (runMock.mock.calls as unknown[][]).filter((c) => c[0] === 'pdf.set_metadata');
+    expect(sets).toHaveLength(0);
+  });
+
+  it('enables Save after an edit and clears the note', async () => {
+    render(<MetadataTool />);
+    await screen.findByText('Orig');
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Title' } });
+    const save = screen.getByRole('button', { name: 'Save metadata' });
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/No changes yet/)).toBeNull();
+  });
+
+  it('inputs carry a visible focus ring, not a border-color-only change', async () => {
+    render(<MetadataTool />);
+    await screen.findByText('Orig');
+    expect(screen.getByLabelText('Title').className).toMatch('focus-visible:ring-2');
+    expect(screen.getByLabelText('Creation date').className).toMatch('focus-visible:ring-2');
+  });
+
+  it('caps free-text inputs at 500 characters (client-side convenience only)', async () => {
+    render(<MetadataTool />);
+    await screen.findByText('Orig');
+    for (const label of ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer']) {
+      expect((screen.getByLabelText(label) as HTMLInputElement).maxLength).toBe(500);
+    }
+  });
+});
+
 describe('MetadataTool lifecycle', () => {
   it('removes the file through remove(), not a bare state reset', async () => {
     render(<MetadataTool />);
     await screen.findByText('Orig');
     fireEvent.click(screen.getByRole('button', { name: 'Remove doc.pdf' }));
     expect(pdfFilesMock.remove).toHaveBeenCalledWith('s1');
+  });
+
+  it('file remove clears a previous completion card (no stale Done)', async () => {
+    render(<MetadataTool />);
+    await screen.findByText('Orig');
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save metadata' }));
+    await screen.findByTestId('continue-card');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove doc.pdf' }));
+    expect(screen.queryByTestId('continue-card')).toBeNull();
   });
 
   it('loads a handed-off doc as the single input by reference, with an honest note', async () => {

@@ -54,13 +54,74 @@ function fail(clientJobId: string, message: string): void {
   post({ protocol: WORKER_PROTOCOL_VERSION, kind: 'fatal', clientJobId, message });
 }
 
+/** Human tag for a runtime value in malformed-job reports. */
+function valueKind(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (value instanceof ArrayBuffer) {
+    return 'ArrayBuffer';
+  }
+  if (ArrayBuffer.isView(value)) {
+    return Object.prototype.toString.call(value); // e.g. [object Uint8Array]
+  }
+  return typeof value;
+}
+
+/**
+ * Per-field `inputs[]` validation (parity with the scanic/imageEncode
+ * workers: protocol/kind framing is checked at the door; every entry is
+ * validated here). Returns the cause string, or null when the entries are
+ * well-formed. The caller posts it as a `fatal` so the adapter seals the
+ * job fast with a diagnosable message — never silence (silence would hang
+ * the adapter's `done` until its timeout).
+ */
+function validateInputs(msg: WorkerExecuteRequest): string | null {
+  const inputs: unknown = (msg as unknown as { inputs?: unknown }).inputs;
+  if (!Array.isArray(inputs)) {
+    return (
+      `malformed engine job (job=${msg.clientJobId}, operation=${String(msg.operation)}): ` +
+      `inputs must be an array, got ${valueKind(inputs)}`
+    );
+  }
+  for (let index = 0; index < inputs.length; index += 1) {
+    const entry: unknown = inputs[index];
+    const field =
+      entry !== null && typeof entry === 'object'
+        ? (entry as { name?: unknown; buffer?: unknown })
+        : null;
+    const nameOk = field !== null && typeof field.name === 'string' && field.name.length > 0;
+    const bufferOk = field !== null && field.buffer instanceof ArrayBuffer;
+    if (!nameOk || !bufferOk) {
+      return (
+        `malformed engine job (job=${msg.clientJobId}, operation=${String(msg.operation)}): ` +
+        `inputs[#${index + 1}] must be {name: non-empty string, buffer: ArrayBuffer} ` +
+        `(got name=${valueKind(field?.name)}, buffer=${valueKind(field?.buffer)})`
+      );
+    }
+  }
+  return null;
+}
+
 self.onmessage = (ev: MessageEvent<WorkerExecuteRequest>): void => {
   const msg = ev.data;
   if (msg === null || typeof msg !== 'object' || msg.protocol !== WORKER_PROTOCOL_VERSION) {
     return; // Malformed framing is the adapter's bug; ignore, never throw.
   }
+  // Unroutable without a string job id: no job to blame, so (like the
+  // imageEncode worker) ignore rather than post a fatal nobody can
+  // attribute — an orphan fatal would destroy the worker and fail
+  // innocent in-flight jobs.
+  if (typeof msg.clientJobId !== 'string' || msg.clientJobId.length === 0) {
+    return;
+  }
   if (msg.kind !== 'execute') {
     fail(msg.clientJobId, `unknown worker request kind: ${String(msg.kind)}`);
+    return;
+  }
+  const inputsError = validateInputs(msg);
+  if (inputsError !== null) {
+    fail(msg.clientJobId, inputsError);
     return;
   }
 

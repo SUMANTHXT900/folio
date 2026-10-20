@@ -56,6 +56,10 @@ export function useImagePages() {
   // setPages updaters (updaters must stay side-effect free).
   const pagesRef = useRef<ImagePage[]>([]);
   pagesRef.current = pages;
+  // Mount guard for post-await continuations (unmount-mid-import): when
+  // false, async completions must not mint URLs or call setState — the
+  // unmount sweep below already ran, so any late URL would leak.
+  const mountedRef = useRef(true);
 
   const track = (url: string) => {
     if (url) urlsRef.current.add(url);
@@ -68,10 +72,15 @@ export function useImagePages() {
     revoke(page.thumbUrl);
   };
 
-  // Unmount sweep: no preview URL survives the tool.
+  // Unmount sweep: no preview URL survives the tool. Also drops the
+  // mount guard so post-await import continuations below skip their
+  // addEntries commit (minting URLs after this sweep would leak — no
+  // sweep runs again to collect them).
   useEffect(() => {
+    mountedRef.current = true;
     const live = urlsRef.current;
     return () => {
+      mountedRef.current = false;
       for (const url of live) URL.revokeObjectURL(url);
       live.clear();
     };
@@ -154,7 +163,12 @@ export function useImagePages() {
         },
         () => callbacks.signal?.aborted === true,
       );
-      if (batch.length > 0) addEntries(batch);
+      // Mount-guarded commit: an unmount mid-import must not mint preview
+      // URLs (the sweep above already ran — late URLs would leak with no
+      // second sweep to collect them) nor call setState on an unmounted
+      // hook. The prepared batch is dropped; its File/Blob handles are GC'd
+      // (no object URLs were ever minted for them).
+      if (batch.length > 0 && mountedRef.current) addEntries(batch);
       for (const outcome of outcomes) {
         if (outcome.error !== null && firstError === null) {
           firstError = outcome.error;

@@ -1,3 +1,24 @@
+# Folio security headers (Cloudflare Pages `_headers`; the `/*` block merges
+# with the path-specific cache rules below — those lines are unchanged).
+# CSP rationale per directive (one line each):
+# - base default-src 'self': app is same-origin-only (no CDN, no API, no analytics).
+# - script-src 'wasm-unsafe-eval': lets Chrome stream-compile folio-wasm + scanic ORT .wasm while still banning JS eval.
+# - style-src 'unsafe-inline': React injects view-transition CSS via <style> (StudioApp VT_CSS); Tailwind/framer-motion need it too.
+# - img-src blob: data:: blob: page thumbs/previews/downloads (folio.ts createObjectURL); data: grain SVG in studio-theme.css.
+# - worker-src/child-src blob:: Vite-bundled engine/scanic/imageEncode + pdf.js workers are same-origin; blob: covers pdf.js/ORT fallback worker creation.
+# - connect-src 'self' blob:: Workbox precache + runtime fetch of wasm/ort/model assets are all same-origin; blob: allows fetching app-created blob URLs (byte probes, re-validation) — same-origin blobs only, no new exfiltration surface.
+# - media-src blob:: camera <video> uses srcObject (no CSP fetch) but blob: keeps any blob-backed media safe.
+# - object-src 'none' / frame-src 'none' / frame-ancestors 'none': no plugins, no iframes, app is never embedded (clickjacking guard).
+# - Permissions-Policy camera=(self): ScanicCapture getUserMedia must keep working; mic/geo/payments/usb stay disabled (audio:false, never requested).
+# - Deliberately absent: no COOP/COEP — scanic runs single-threaded with no cross-origin-isolation need; adding them risks breaking the PWA update flow.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; child-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; manifest-src 'self'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(self), microphone=(), geolocation=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
+
 /sw.js
   Cache-Control: no-store
 

@@ -58,7 +58,7 @@ export function isPdfJsCancel(error: unknown): boolean {
 }
 
 /** Truncates an underlying cause for `details` without dumping unbounded text. */
-function truncatedCause(error: unknown): string {
+export function truncatedCause(error: unknown): string {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   const limit = 300;
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;

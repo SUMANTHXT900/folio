@@ -24,6 +24,7 @@
 
 import type { PdfRenderEngine } from './PdfRenderEngine';
 import type { PdfThumbnailEngine } from './PdfThumbnailEngine';
+import { MAX_WINDOW_SIZE, pageWindows } from './pageWindows';
 import type { CancellableRender } from './types';
 import { calculateThumbnailGeometry } from './thumbnailGeometry';
 import {
@@ -507,10 +508,72 @@ export class DefaultPdfThumbnailEngine implements PdfThumbnailEngine {
       rejected.catch(() => undefined);
       return { promise: rejected, cancel: () => undefined };
     }
-    const pages: number[] = [];
-    for (let page = 1; page <= open.pageCount; page += 1) {
-      pages.push(page);
-    }
-    return this.generateThumbnails(documentId, pages, options);
+    // Bounded batches through the shared `pageWindows` primitive — never
+    // one unbounded batch: each window is one `generateThumbnails` call
+    // (concurrency-bounded internally), run strictly sequentially so peak
+    // scheduling state stays window-sized. The returned array is
+    // caller-owned (same contract as `generateThumbnails`).
+    const windows = pageWindows(open.pageCount, MAX_WINDOW_SIZE);
+    const total = open.pageCount;
+    let cancelled = false;
+    let cancelCurrent: (() => void) | undefined;
+    const promise = (async (): Promise<ThumbnailResult[]> => {
+      const all: ThumbnailResult[] = [];
+      let done = 0;
+      const onProgress = options?.onProgress;
+      const onThumbnail = options?.onThumbnail;
+      for (const window of windows) {
+        if (cancelled) {
+          throw new ThumbnailError('THUMBNAIL_CANCELLED', 'thumbnail generation was cancelled', {
+            documentId,
+          });
+        }
+        const offset = done;
+        const job = this.generateThumbnails(documentId, window, {
+          ...options,
+          onProgress:
+            onProgress === undefined
+              ? undefined
+              : (progress): void => {
+                  const completed = offset + progress.completed;
+                  onProgress({
+                    completed,
+                    total,
+                    percentage: completed / total,
+                  });
+                },
+          onThumbnail,
+        });
+        cancelCurrent = (): void => job.cancel();
+        try {
+          const results = await job.promise;
+          // Windows run in ascending page order and each batch preserves
+          // input order, so concatenation stays in page order.
+          for (const item of results) {
+            all.push(item);
+          }
+          done += results.length;
+        } catch (error) {
+          // Atomic failure (same contract as `generateThumbnails`): prior
+          // windows never reach the caller, so their bitmaps are dropped
+          // here. The failing window already released its own bitmaps.
+          for (const item of all) {
+            releaseCanvas(item.canvas);
+          }
+          all.length = 0;
+          throw error;
+        } finally {
+          cancelCurrent = undefined;
+        }
+      }
+      return all;
+    })();
+    return {
+      promise,
+      cancel: () => {
+        cancelled = true;
+        cancelCurrent?.();
+      },
+    };
   }
 }

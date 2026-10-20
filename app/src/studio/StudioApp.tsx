@@ -17,13 +17,57 @@ const ImagesTool = lazy(() => import('./tools/ImagesTool'));
 export type ToolId =
   'merge' | 'split' | 'rearrange' | 'rotate' | 'compress' | 'metadata' | 'images';
 
-function ToolFallback() {
+/** How long a lazy tool chunk may take before the fallback admits it is
+    stalled (additive: the spinner copy below never changes). */
+export const TOOL_FALLBACK_STALL_MS = 10000;
+
+export function ToolFallback() {
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    const id = globalThis.setTimeout(() => setStalled(true), TOOL_FALLBACK_STALL_MS);
+    return () => globalThis.clearTimeout(id);
+  }, []);
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-16">
-      <span className="w-8 h-8 rounded-full border-2 border-paper-300 dark:border-ink-700 border-t-brass-500 animate-spin" />
-      <p className="text-sm text-ink-400">Loading tool…</p>
+      <span
+        aria-hidden
+        className="w-8 h-8 rounded-full border-2 border-paper-300 dark:border-ink-700 border-t-brass-500 animate-spin"
+      />
+      <p className="text-sm text-ink-400 dark:text-ink-300">Loading tool…</p>
+      {stalled && (
+        <div
+          role="alert"
+          className="mt-2 max-w-sm rounded-xl border border-brass-400/40 bg-brass-400/[0.07] px-4 py-3 text-center"
+        >
+          <p className="text-sm text-ink-500 dark:text-ink-300">
+            Loading is taking longer than expected — a new app version may have been released while
+            this page was open.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-2 rounded-xl bg-ink-900 dark:bg-paper-50 text-paper-50 dark:text-ink-900 px-4 py-2 min-h-[44px] text-sm font-medium shadow-sm hover:opacity-90 transition-opacity"
+          >
+            Reload app
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * Stale-chunk detector for lazy routes. Keep in sync with `STALE_CHUNK_RE`
+ * in `studio/components/ui.tsx` (`isStaleChunkError`) — both must catch the
+ * `ChunkLoadError` / `Loading chunk … failed` shapes, not just the dynamic
+ * `import()` failure strings.
+ */
+export const ROUTE_CHUNK_RE =
+  /Failed to fetch dynamically imported module|Loading chunk [\w-]+ failed|ChunkLoadError|Importing a module script failed|error loading dynamically imported module/i;
+
+export function isRouteChunkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : '';
+  return ROUTE_CHUNK_RE.test(message);
 }
 
 /* Error boundary — a failed lazy-chunk import (stale SW, interrupted fetch,
@@ -47,10 +91,7 @@ class RouteErrorBoundary extends React.Component<
 
   render() {
     if (this.state.error) {
-      const isChunk =
-        /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(
-          this.state.error.message,
-        );
+      const isChunk = isRouteChunkError(this.state.error);
       return (
         <div className="flex flex-col items-center justify-center gap-4 py-20 px-4 text-center">
           <span className="w-12 h-12 rounded-2xl bg-brass-400/15 text-brass-600 dark:text-brass-300 flex items-center justify-center">
@@ -377,7 +418,8 @@ function Header({
           </motion.a>
           <motion.button
             onClick={onToggleDark}
-            aria-label="Toggle theme"
+            aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
+            aria-pressed={dark}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.94, rotate: 12 }}
             transition={{ type: 'spring', stiffness: 400, damping: 18 }}
@@ -459,15 +501,32 @@ export const TOOL_LIST: { id: ToolId; name: string; tagline: string }[] = [
 
 /* Mobile bottom nav — only shown inside tools (home already IS the nav).
    Single-row horizontal strip: 8 destinations never fit a fixed grid,
-   so this scrolls (snap) instead of wrapping into space-stealing rows. */
-function MobileNav({ route }: { route: string }) {
+   so this scrolls (snap) instead of wrapping into space-stealing rows.
+   Compress is engine-Phase-2 reserved: it renders as a disabled,
+   non-focusable item (parity with the Home card) — never a link to the
+   reserved id. The edge fade drops while focus is inside (focus-within)
+   and focused items scroll into view, so keyboard users never lose the
+   focus ring under the mask. */
+export function MobileNav({ route }: { route: string }) {
   const active = route as ToolId;
   return (
     <nav
       className="sm:hidden fixed bottom-0 inset-x-0 z-50 glass bg-paper-100/92 dark:bg-ink-950/92 border-t border-paper-300/60 dark:border-ink-800/60 pb-[env(safe-area-inset-bottom)]"
       aria-label="Tools"
     >
-      <div className="flex gap-1 overflow-x-auto px-2 py-1.5 snap-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,transparent,black_16px,black_calc(100%-16px),transparent)]">
+      <div
+        onFocus={(e) => {
+          const el = e.target as HTMLElement | null;
+          if (el && el !== e.currentTarget && typeof el.scrollIntoView === 'function') {
+            try {
+              el.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+            } catch {
+              // scrollIntoView options unsupported — the item stays reachable by scroll.
+            }
+          }
+        }}
+        className="flex gap-1 overflow-x-auto px-2 py-1.5 snap-x scroll-px-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [mask-image:linear-gradient(to_right,transparent,black_16px,black_calc(100%-16px),transparent)] focus-within:[mask-image:none]"
+      >
         <a
           href="#/"
           className="relative flex shrink-0 snap-start flex-col items-center justify-center gap-0.5 rounded-xl px-3.5 py-1.5 min-h-[56px] min-w-[62px]"
@@ -491,6 +550,25 @@ function MobileNav({ route }: { route: string }) {
           <span className="text-[10px] text-ink-400 dark:text-ink-300">Home</span>
         </a>
         {TOOL_LIST.map((t) => {
+          if (t.id === 'compress') {
+            // Reserved id: no link (parity with the disabled Home card) —
+            // a span keeps it visible but out of the tab order entirely.
+            return (
+              <span
+                key={t.id}
+                aria-disabled="true"
+                title="Reserved for a future update"
+                className="relative flex shrink-0 snap-start flex-col items-center justify-center gap-0.5 rounded-xl px-3.5 py-1.5 min-h-[56px] min-w-[62px] opacity-60 saturate-50 cursor-not-allowed"
+              >
+                <span className="relative w-8 h-8 rounded-lg flex items-center justify-center text-ink-400 dark:text-ink-300">
+                  {ICONS_MOBILE[t.id]}
+                </span>
+                <span className="relative text-[10px] leading-none text-ink-400 dark:text-ink-300">
+                  {t.name}
+                </span>
+              </span>
+            );
+          }
           const isActive = active === t.id;
           return (
             <a

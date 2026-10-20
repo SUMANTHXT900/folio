@@ -10,8 +10,10 @@
  * ScanicReview buttons (`data-crop-handle`), so these tests pin the
  * integration contract, not just the component.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StrictMode, type ReactNode } from 'react';
+import { ScanicClientError } from './scan/scanicClient';
 import ScanicCapture, {
   AUTO_CAPTURE_COOLDOWN_MS,
   AUTO_CAPTURE_MEAN_THRESHOLD,
@@ -23,6 +25,7 @@ import ScanicCapture, {
   buildVideoConstraints,
   cameraDisplayName,
   cameraFailureMessage,
+  clampStoredCameraId,
   formatScanName,
   grayscaleSAD,
   hasZoomCapability,
@@ -586,6 +589,271 @@ describe('eager warp', () => {
     const calls = mockWarpExtract.mock.calls.length;
     await new Promise((r) => setTimeout(r, 200));
     expect(mockWarpExtract.mock.calls.length).toBe(calls);
+  });
+});
+
+describe('eager warp paging (no stranded victim)', () => {
+  function fakeWarpImage(): { width: number; height: number; data: Uint8ClampedArray } {
+    return { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) };
+  }
+
+  /** Faithful terminate-to-cancel double: terminating rejects outstanding warps as cancelled. */
+  function stubTerminateToCancel(
+    pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }>,
+  ) {
+    __clientMocks.terminate.mockImplementation(() => {
+      const outstanding = pending.splice(0);
+      for (const p of outstanding) {
+        p.reject(
+          new ScanicClientError('cancelled', 'scanic request cancelled (worker terminated)'),
+        );
+      }
+    });
+  }
+
+  function stubDeferredExtract(
+    pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }>,
+  ) {
+    mockWarpExtract.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          pending.push({ resolve, reject });
+        }),
+    );
+  }
+
+  afterEach(() => {
+    mockWarpExtract.mockReset();
+    __clientMocks.terminate.mockReset();
+  });
+
+  it('pages mid-warp without killing the other page warp — both pages commit', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    const pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    stubDeferredExtract(pending);
+    stubTerminateToCancel(pending);
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1, 2]), photo('b.jpg', [3, 4]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    await findQ('[data-scan-queue]');
+    // Page 1 eager warp is in flight; both pages settle ready.
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(1));
+    await waitFor(() => {
+      expect(document.querySelector('[data-review-preparing]')).toBeNull();
+    });
+    // Page mid-warp: the second page's eager warp must NOT terminate the
+    // first page's in-flight warp (per-entry guards, never a global gate).
+    fireEvent.click(q('[data-page-next]'));
+    await screen.findByText('Page 2 of 2');
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(2));
+    expect(__clientMocks.terminate).not.toHaveBeenCalled();
+    // Both warps resolve: both pages commit instead of stranding page 1 on
+    // "Processing auto-crop…".
+    await act(async () => {
+      for (const p of pending.splice(0)) p.resolve(fakeWarpImage());
+    });
+    await findQ('[data-crop-result-img]');
+    fireEvent.click(q('[data-page-prev]'));
+    await screen.findByText('Page 1 of 2');
+    expect(await findQ('[data-crop-result-img]')).toBeTruthy();
+    expect(screen.queryByText(/Processing auto-crop/)).toBeNull();
+  });
+
+  it('retries visibly when a current warp is cancelled — never stuck on Processing auto-crop…', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    const pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    stubDeferredExtract(pending);
+    stubTerminateToCancel(pending);
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(1));
+    // Worker loss races the warp: the pending warp rejects as cancelled.
+    await act(async () => {
+      (__clientMocks.terminate as (...a: unknown[]) => unknown)();
+    });
+    // The retry refires the warp instead of swallowing the cancel…
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(2));
+    // …and the page commits once the retry resolves.
+    await act(async () => {
+      for (const p of pending.splice(0)) p.resolve(fakeWarpImage());
+    });
+    const img = (await findQ('[data-crop-result-img]')) as HTMLImageElement;
+    expect(img.src).toMatch(/^blob:mock-/);
+  });
+
+  it('drops a stale in-flight warp when Re-detect lands fresher corners', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    const pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    stubDeferredExtract(pending);
+    const first = detectedCorners();
+    const second: ScanicCorners = {
+      topLeft: { x: 10, y: 10 },
+      topRight: { x: 600, y: 10 },
+      bottomRight: { x: 600, y: 440 },
+      bottomLeft: { x: 10, y: 440 },
+    };
+    mockDetect
+      .mockResolvedValueOnce({ success: true, corners: first, confidence: 0.9, detector: 'ml' })
+      .mockResolvedValueOnce({ success: true, corners: second, confidence: 0.9, detector: 'ml' });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    await findQ('[data-scan-queue]');
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(1));
+    await waitFor(() => {
+      expect(document.querySelector('[data-review-preparing]')).toBeNull();
+    });
+    // Re-detect lands fresher corners; the fresh eager warp fires…
+    fireEvent.click(screen.getByText('Re-detect', { exact: true }));
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(2));
+    expect(mockWarpExtract.mock.calls[1][1]).toEqual(second);
+    // …then the STALE warp resolves: it must not commit over the redetect.
+    await act(async () => {
+      pending.shift()?.resolve(fakeWarpImage());
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(document.querySelector('[data-crop-result-img]')).toBeNull();
+    expect(screen.queryByText(/Processing auto-crop/)).not.toBeNull();
+    // The fresh warp commits when it resolves.
+    await act(async () => {
+      for (const p of pending.splice(0)) p.resolve(fakeWarpImage());
+    });
+    expect(await findQ('[data-crop-result-img]')).toBeTruthy();
+  });
+
+  it('disables Re-detect while the drain owns the page — no duplicate lane-0 detect', async () => {
+    let resolveDetect: ((v: unknown) => void) | null = null;
+    mockDetect.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDetect = resolve;
+        }),
+    );
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    await findQ('[data-scan-queue]');
+    // The drain's detect is in flight for this page…
+    await waitFor(() => expect(mockDetect.mock.calls.length).toBe(1));
+    // The drain owns this page (detecting): the button is disabled, so a tap
+    // can never duplicate the drain's lane-0 detect.
+    const redetect = (await findQ('[data-redetect]')) as HTMLButtonElement;
+    expect(redetect.disabled).toBe(true);
+    fireEvent.click(redetect);
+    await act(async () => {
+      resolveDetect?.({
+        success: true,
+        corners: detectedCorners(),
+        confidence: 0.9,
+        detector: 'ml',
+      });
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-review-preparing]')).toBeNull();
+    });
+    expect(mockDetect.mock.calls.length).toBe(1);
+    // Settled: enabled again, and a double-tap still runs exactly one Re-detect.
+    await waitFor(() => {
+      expect((document.querySelector('[data-redetect]') as HTMLButtonElement).disabled).toBe(false);
+    });
+    const before = mockDetect.mock.calls.length;
+    const readyBtn = document.querySelector('[data-redetect]') as HTMLButtonElement;
+    fireEvent.click(readyBtn);
+    fireEvent.click(readyBtn);
+    await waitFor(() => expect(mockDetect.mock.calls.length).toBe(before + 1));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(mockDetect.mock.calls.length).toBe(before + 1);
+  });
+
+  it('stops camera tracks and clears the video binding on unmount', async () => {
+    const { stop } = mockLiveCamera();
+    const { unmount } = render(
+      <ScanicCapture onCommit={() => undefined} onExit={() => undefined} />,
+    );
+    await findQ('[data-scan-capture]');
+    const video = document.querySelector(
+      'video[aria-label="Camera preview"]',
+    ) as HTMLVideoElement | null;
+    if (!video) throw new Error('missing preview video');
+    expect(video.srcObject).not.toBeNull();
+    unmount();
+    expect(stop).toHaveBeenCalled();
+    expect(video.srcObject).toBeNull();
+  });
+
+  it('still probes under StrictMode double-effects (no probe skip)', async () => {
+    // Local double (the probe suite's helper is scoped to its describe):
+    // default low-res stream + a clearly sharper cam-2 candidate.
+    const makeTrack = (caps: unknown) => ({
+      stop: vi.fn(),
+      readyState: 'live',
+      getCapabilities: () => caps,
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    });
+    const lowTrack = makeTrack({ width: { max: 1920 }, height: { max: 1080 } });
+    const lowStream = {
+      getTracks: () => [lowTrack],
+      getVideoTracks: () => [lowTrack],
+    } as unknown as MediaStream;
+    const highTrack = makeTrack({ width: { max: 4000 }, height: { max: 3000 } });
+    const highStream = {
+      getTracks: () => [highTrack],
+      getVideoTracks: () => [highTrack],
+    } as unknown as MediaStream;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async (constraints: unknown) => {
+          const video = (constraints as { video?: { deviceId?: { exact?: string } } }).video;
+          if (video?.deviceId?.exact === 'cam-2') return highStream;
+          return lowStream;
+        }),
+        enumerateDevices: vi.fn(async () => [
+          { kind: 'videoinput', deviceId: 'cam-1', label: 'Back Cam 1', groupId: '' },
+          { kind: 'videoinput', deviceId: 'cam-2', label: 'Back Cam 2', groupId: '' },
+        ]),
+      },
+      configurable: true,
+    });
+    const StrictWrapper = ({ children }: { children: ReactNode }) => (
+      <StrictMode>{children}</StrictMode>
+    );
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />, {
+      wrapper: StrictWrapper,
+    });
+    await findQ('[data-scan-capture]');
+    // The 600ms-delayed probe must still fire after the double-effect
+    // cleanup cleared the first timer — the suggestion proves it ran.
+    await waitFor(
+      () => {
+        expect(document.querySelector('[data-camera-suggest]')).not.toBeNull();
+      },
+      { timeout: 8000 },
+    );
+    expect(document.querySelector('[data-camera-suggest]')?.textContent).toMatch(
+      /Sharper camera found/,
+    );
   });
 });
 
@@ -1864,6 +2132,82 @@ describe('best-camera probe + persisted pick + flash honesty', () => {
   });
 });
 
+describe('stored cameraId clamp + persistent-overconstraint clear', () => {
+  it('clamps length and control-charsets on read, passes printable ids through', () => {
+    expect(clampStoredCameraId('cam-2')).toBe('cam-2');
+    expect(clampStoredCameraId('a1b2-c3d4_e5f6/7890+abcd=')).toBe('a1b2-c3d4_e5f6/7890+abcd=');
+    expect(clampStoredCameraId('')).toBeNull();
+    expect(clampStoredCameraId(null)).toBeNull();
+    expect(clampStoredCameraId(undefined)).toBeNull();
+    expect(clampStoredCameraId(42)).toBeNull();
+    expect(clampStoredCameraId('x'.repeat(257))).toBeNull();
+    expect(clampStoredCameraId('x'.repeat(256))).toBe('x'.repeat(256));
+    expect(clampStoredCameraId('cam\n2')).toBeNull();
+    expect(clampStoredCameraId('cam\t2')).toBeNull();
+    expect(clampStoredCameraId('cam\x7F2')).toBeNull();
+  });
+
+  it('ignores a hostile stored pick and opens with the default flow', async () => {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async (_constraints: unknown) => stream);
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    });
+    // Overlong + control-laden stored pick (same-origin writable storage).
+    window.localStorage.setItem(CAMERA_STORAGE_KEY, `cam-2\n${'x'.repeat(300)}`);
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    await waitFor(() => {
+      expect(getUserMedia).toHaveBeenCalled();
+    });
+    // The clamped pick never reaches `deviceId: { exact }` — defaults win.
+    for (const call of getUserMedia.mock.calls) {
+      const video = (call[0] as unknown as { video: Record<string, unknown> }).video;
+      expect(video).not.toHaveProperty('deviceId');
+    }
+  });
+
+  it('clears the stored pick when an exact pick persistently over-constrains', async () => {
+    const overconstrained = (): Error => {
+      const e = new Error('constraint failed');
+      e.name = 'OverconstrainedError';
+      return e;
+    };
+    const getUserMedia = vi.fn(async (_constraints: unknown) => {
+      throw overconstrained();
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia, enumerateDevices: vi.fn(async () => []) },
+      configurable: true,
+    });
+    window.localStorage.setItem(CAMERA_STORAGE_KEY, 'stale-cam-9');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    // Both the exact-device open and the default fallback fail, then the
+    // cleared-pick default retry fails too — the overconstrained help shows.
+    await screen.findByText(/could not provide the requested resolution/);
+    // The implicated stored pick is gone, so the next open starts clean.
+    expect(window.localStorage.getItem(CAMERA_STORAGE_KEY)).toBeNull();
+    // At least one retry ran without the exact pick (no failure loop on it).
+    const videos = getUserMedia.mock.calls.map(
+      (call) => (call[0] as unknown as { video: Record<string, unknown> }).video,
+    );
+    expect(videos.length).toBeGreaterThan(2);
+    expect(videos[videos.length - 1]).not.toHaveProperty('deviceId');
+  });
+});
+
 describe('main-lens scoring (scoreBackCamera)', () => {
   it('penalizes ultra-wide labels so a plain main lens wins at equal pixels', () => {
     const ultra = scoreBackCamera({
@@ -2138,6 +2482,83 @@ describe('minimal camera cluster', () => {
     fireEvent.click(gallery);
     expect(await findQ('[data-scan-queue]')).toBeTruthy();
     expect(screen.getByText('Page 2 of 2')).toBeTruthy();
+  });
+});
+
+describe('shutter inflight guard (D53)', () => {
+  function mockCameraForGuard() {
+    const stop = vi.fn();
+    const track = {
+      stop,
+      readyState: 'live',
+      getCapabilities: () => ({}),
+      getSettings: () => ({ width: 1920, height: 1080 }),
+      applyConstraints: vi.fn(async () => undefined),
+    };
+    const stream = {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(async () => stream),
+        enumerateDevices: vi.fn(async () => []),
+      },
+      configurable: true,
+    });
+  }
+
+  it('overlapping taps no-op: second tap never re-enters takePhoto, Capturing… shows, then releases', async () => {
+    let takeCalls = 0;
+    let resolveTake: ((blob: Blob) => void) | null = null;
+    vi.stubGlobal(
+      'ImageCapture',
+      class {
+        constructor(_track: unknown) {
+          void _track;
+        }
+        async getPhotoCapabilities() {
+          return { imageWidth: { max: 4000 }, imageHeight: { max: 3000 } };
+        }
+        takePhoto() {
+          takeCalls += 1;
+          return new Promise<Blob>((resolve) => {
+            resolveTake = resolve;
+          });
+        }
+      },
+    );
+    mockCameraForGuard();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    const shutter = (await findQ('[data-scan-capture]')) as HTMLButtonElement;
+    expect(shutter.disabled).toBe(false);
+
+    // Two overlapping taps in the same tick: the sync capturingRef guard
+    // must drop the second before the first await yields.
+    fireEvent.click(shutter);
+    fireEvent.click(q('[data-scan-capture]'));
+    // The guard flips synchronously: pill + disabled shutter paint before
+    // the deferred takePhoto resolves.
+    await waitFor(() => {
+      expect(q('[data-finder-status]').textContent).toBe('Capturing…');
+    });
+    expect((q('[data-scan-capture]') as HTMLButtonElement).disabled).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(takeCalls).toBe(1);
+
+    // Release the sensor: exactly one page parks, the guard drops in
+    // `finally`, and the shutter re-enables.
+    await act(async () => {
+      resolveTake?.(new Blob(['sensor-bytes'], { type: 'image/jpeg' }));
+    });
+    const cta = await findQ('[data-review-cta]');
+    expect(cta.textContent).toBe('View 1 pages');
+    expect(takeCalls).toBe(1);
+    await waitFor(() => {
+      expect((q('[data-scan-capture]') as HTMLButtonElement).disabled).toBe(false);
+    });
+    // Capturing… is gone (Captured flash or quiet — never stuck on Capturing).
+    expect(q('[data-finder-status]')?.textContent ?? '').not.toBe('Capturing…');
   });
 });
 

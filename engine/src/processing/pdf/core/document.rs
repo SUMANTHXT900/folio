@@ -483,7 +483,19 @@ impl PdfDocument {
             }
             if rotation.is_none() {
                 if let Ok(obj) = current.get(b"Rotate") {
-                    rotation = Some(self.as_number(page_number, obj, "Rotate")? as i64);
+                    // Fail-closed like `effective_rotation`: a
+                    // non-quarter-turn value is corrupt input, never
+                    // truncated or normalized into a valid geometry.
+                    let raw = self.as_number(page_number, obj, "Rotate")? as i32;
+                    let normalized = normalize_quarter_turn(raw).ok_or_else(|| {
+                        EngineError::new(
+                            ErrorCode::InvalidDocument,
+                            format!(
+                                "page {page_number} has a non-quarter-turn rotation of {raw} degrees"
+                            ),
+                        )
+                    })?;
+                    rotation = Some(i64::from(normalized));
                 }
             }
             if media_box.is_some() && rotation.is_some() {
@@ -730,6 +742,56 @@ mod tests {
             inherited.rotation_deg,
             doc.effective_rotation(2).expect("page 2")
         );
+    }
+
+    #[test]
+    fn geometry_rejects_non_quarter_turn_rotation() {
+        // Fail-closed like `effective_rotation`: a page carrying a
+        // non-quarter-turn /Rotate must error in geometry too — never
+        // truncate or accept a stray value.
+        for bad in [45, 30, 91, 135, -45] {
+            let bytes = fixtures::build_pdf(&fixtures::pdf_spec(
+                "1.4",
+                vec![(612.0, 792.0, Some(bad))],
+                None,
+            ));
+            let doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
+            let geometry_err = doc.page_geometry(1).expect_err("geometry must reject");
+            assert_eq!(
+                geometry_err.code(),
+                ErrorCode::InvalidDocument,
+                "rotation {bad}"
+            );
+            assert!(
+                geometry_err.message().contains("non-quarter-turn"),
+                "{geometry_err:?}"
+            );
+            let rotation_err = doc
+                .effective_rotation(1)
+                .expect_err("effective rotation must reject");
+            assert_eq!(
+                rotation_err.code(),
+                ErrorCode::InvalidDocument,
+                "rotation {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn geometry_rejects_inherited_non_quarter_turn_rotation() {
+        // An ancestor's stray /Rotate must fail the same way: inheritance
+        // never launders a corrupt value into a valid geometry.
+        let mut spec = fixtures::pdf_spec("1.4", vec![(612.0, 792.0, None)], None);
+        spec.pages_rotate = Some(45);
+        let bytes = fixtures::build_pdf(&spec);
+        let doc = super::super::loader::load_pdf(&bytes).expect("fixture loads");
+        let geometry_err = doc.page_geometry(1).expect_err("geometry must reject");
+        assert_eq!(geometry_err.code(), ErrorCode::InvalidDocument);
+        assert!(geometry_err.message().contains("non-quarter-turn"));
+        let rotation_err = doc
+            .effective_rotation(1)
+            .expect_err("effective rotation must reject");
+        assert_eq!(rotation_err.code(), ErrorCode::InvalidDocument);
     }
 
     #[test]

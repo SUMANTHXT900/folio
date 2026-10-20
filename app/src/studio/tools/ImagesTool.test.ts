@@ -7,7 +7,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ImagesTool, { preStageShardEstimate, stageImagePages, toPdfOutput } from './ImagesTool';
+import ImagesTool, {
+  preStageShardEstimate,
+  stageImagePages,
+  stagingCancelledError,
+  toPdfOutput,
+} from './ImagesTool';
 import { createPage } from './imagePages';
 import type { ImageRenderer } from './imagePrepare';
 import type { StudioOutput } from '../services/folio';
@@ -176,5 +181,71 @@ describe('camera entry (scanic reintegration)', () => {
     expect(document.querySelector('[data-scanner-root]')).toBeNull();
     // Still the empty entry card — no pages were added.
     expect(screen.getByText(/decode one at a time/)).toBeTruthy();
+  });
+});
+
+describe('stageImagePages cancellation (staging-phase Cancel)', () => {
+  it('throws CANCELLED when the signal is already aborted', async () => {
+    const pages = [
+      createPage({ id: 'a', source: 'upload', file: upload('a.jpg', [1]), name: 'a.jpg' }),
+    ];
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      stageImagePages(pages, stubRenderer(), undefined, { signal: controller.signal }),
+    ).rejects.toMatchObject({ code: 'CANCELLED' });
+  });
+
+  it('aborts mid-loop with honest progress (only completed pages staged)', async () => {
+    const pages = [
+      createPage({ id: 'a', source: 'upload', file: upload('a.jpg', [1]), name: 'a.jpg' }),
+      createPage({ id: 'b', source: 'upload', file: upload('b.jpg', [2]), name: 'b.jpg' }),
+      createPage({ id: 'c', source: 'upload', file: upload('c.jpg', [3]), name: 'c.jpg' }),
+    ];
+    const controller = new AbortController();
+    const progress: Array<[number, number]> = [];
+    const promise = stageImagePages(
+      pages,
+      stubRenderer(),
+      (completed, total) => {
+        progress.push([completed, total]);
+        if (completed === 1) controller.abort();
+      },
+      { signal: controller.signal },
+    );
+    await expect(promise).rejects.toMatchObject({ code: 'CANCELLED' });
+    // One page completed honestly before the abort; the loop never staged a partial page.
+    expect(progress).toEqual([[1, 3]]);
+  });
+
+  it('exposes the CANCELLED code for the UI cancelled message', () => {
+    expect(stagingCancelledError().code).toBe('CANCELLED');
+  });
+});
+
+describe('camera pixel gate (normalized dims feed stagedPixels)', () => {
+  it('counts raw handles as zero (truly unknown) but normalized camera pages as real', () => {
+    // Raw handle path (old addFiles): dims unknown → zero-pixel fallback.
+    const raw = [
+      createPage({
+        id: 'r',
+        source: 'camera',
+        file: upload('scan-001.jpg', [1, 2]),
+        name: 'scan-001.jpg',
+      }),
+    ];
+    expect(preStageShardEstimate(raw).totalPixels).toBe(0);
+    // Normalized commit path (importFiles → prepareImportFile dims thread through).
+    const normalized = [
+      createPage({
+        id: 'n',
+        source: 'camera',
+        file: upload('scan-001.jpg', [1, 2]),
+        name: 'scan-001.jpg',
+        width: 2500,
+        height: 1875,
+      }),
+    ];
+    expect(preStageShardEstimate(normalized).totalPixels).toBe(2500 * 1875);
   });
 });

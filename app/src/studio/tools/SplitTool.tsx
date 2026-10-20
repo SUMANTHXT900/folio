@@ -17,14 +17,12 @@ import { usePdfFiles } from '../hooks/usePdfFiles';
 import { usePageThumbs } from '../hooks/usePageThumbs';
 import {
   runStudioOperation,
-  consumePendingTransfer,
-  getStudioBytes,
-  closeStudioDoc,
   thumbGridBox,
-  type StudioDoc,
   type StudioOutput,
   type StudioJob,
 } from '../services/folio';
+import { usePendingTransfer } from './usePendingTransfer';
+import { cancelledError, useCancelOnUnmount } from './studioJob';
 
 const PAGE_LIMIT = 24;
 
@@ -71,7 +69,7 @@ const ThumbTile = memo(function ThumbTile({
       <button
         onClick={() => onToggle(index)}
         aria-label={`${kept ? 'Remove' : 'Keep'} Page ${index + 1}`}
-        className="absolute bottom-0 left-0 right-0 py-2 flex items-center justify-center bg-black/60 text-paper-100 text-xs text-center hover:bg-black/75 transition-colors"
+        className="absolute bottom-0 left-0 right-0 py-2 min-h-[44px] flex items-center justify-center bg-black/60 text-paper-100 text-xs text-center hover:bg-black/75 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/80"
       >
         {kept ? `Page ${index + 1}` : 'removed'}
       </button>
@@ -120,6 +118,25 @@ export default function SplitTool() {
   } | null>(null);
   const [opError, setOpError] = useState<unknown>(null);
   const [preview, setPreview] = useState<number | null>(null);
+  // Preview-dialog focus discipline (AUD-6): the Close button takes focus
+  // on open, Escape closes, and focus returns to the opener on close.
+  const previewCloseRef = useRef<HTMLButtonElement>(null);
+  const previewPrevFocusRef = useRef<Element | null>(null);
+  const isPreviewOpen = preview !== null;
+  useEffect(() => {
+    if (!isPreviewOpen) return;
+    previewPrevFocusRef.current = document.activeElement;
+    previewCloseRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreview(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      const prev = previewPrevFocusRef.current as HTMLElement | null;
+      if (prev && document.contains(prev)) prev.focus();
+    };
+  }, [isPreviewOpen]);
   // Full-res preview URL per 1-based page number (F-23): the pick-grid
   // thumbs render at grid tier (~grid box), sharp in tiles but far too
   // small for the preview dialog — the dialog borrows the full-res render
@@ -152,54 +169,15 @@ export default function SplitTool() {
   const [fraction, setFraction] = useState<number | null>(null);
   const [stage, setStage] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
-  const [continuedFrom, setContinuedFrom] = useState<{
-    producedBy: string;
-    sourceName: string;
-  } | null>(null);
-  // Pending-transfer claim: same back-out-release discipline as
-  // MergeTool/RearrangeTool (single doc here — extras are ignored, never
-  // uploaded, never in state).
-  const claimedRef = useRef<StudioDoc[]>([]);
-  const ranRef = useRef(false);
-  const mountGenRef = useRef(0);
-
-  // Pending-transfer intake (mount once): the handed-off doc becomes the
-  // single input by reference — verified live, never re-uploaded.
-  useEffect(() => {
-    mountGenRef.current += 1;
-    const gen = mountGenRef.current;
-    const pending = consumePendingTransfer();
-    if (pending !== null) {
-      const live = pending.docs.filter((d) => getStudioBytes(d.id) !== undefined);
-      const firstDoc: StudioDoc | undefined = live.length > 0 ? live[0] : undefined;
-      if (firstDoc !== undefined) {
-        claimedRef.current = [firstDoc];
-        setFiles((prev) => (prev.length > 0 ? prev : [firstDoc]));
-        setContinuedFrom({ producedBy: pending.producedBy, sourceName: pending.sourceName });
-      }
-    }
-    return () => {
-      // Same deferred back-out release as MergeTool (P5-1 via closeStudioDoc).
-      const claimed = claimedRef.current;
-      window.setTimeout(() => {
-        if (mountGenRef.current !== gen) return;
-        claimedRef.current = claimedRef.current.filter((d) => !claimed.some((c) => c.id === d.id));
-        if (ranRef.current) return;
-        for (const d of claimed) void closeStudioDoc(d.id);
-      }, 0);
-    };
-  }, [setFiles]);
+  // Shared pending-transfer intake (claim + gen-guarded back-out release).
+  const { claimedRef, ranRef, continuedFrom } = usePendingTransfer(setFiles, 'single');
 
   // Cancel the running job when the user navigates away.
-  useEffect(
-    () => () => {
-      void jobRef.current?.cancel();
-    },
-    [],
-  );
+  useCancelOnUnmount(jobRef);
 
   useEffect(() => {
     setResult(null);
+    setOpError(null);
     setShowAll(false);
     setHiRes({});
     if (!file) {
@@ -334,7 +312,7 @@ export default function SplitTool() {
       jobRef.current = null;
       const code = (e as { code?: string }).code;
       if (code === 'CANCELLED') {
-        setOpError(new Error('Split cancelled.'));
+        setOpError(cancelledError('split'));
       } else {
         setOpError(e);
       }
@@ -391,6 +369,7 @@ export default function SplitTool() {
               claimedRef.current = claimedRef.current.filter((d) => d.id !== file.id);
               remove(file.id);
               setResult(null);
+              setOpError(null);
             }}
           />
 
@@ -402,7 +381,7 @@ export default function SplitTool() {
                 'flex-1 rounded-xl border px-4 py-2 min-h-[44px] text-sm transition-colors ' +
                 (mode === 'pick'
                   ? 'border-brass-400 bg-brass-400/10 text-ink-900 dark:text-paper-100'
-                  : 'border-paper-300 dark:border-ink-700 text-ink-400')
+                  : 'border-paper-300 dark:border-ink-700 text-ink-400 dark:text-ink-300')
               }
             >
               Pick pages
@@ -414,7 +393,7 @@ export default function SplitTool() {
                 'flex-1 rounded-xl border px-4 py-2 min-h-[44px] text-sm transition-colors ' +
                 (mode === 'ranges'
                   ? 'border-brass-400 bg-brass-400/10 text-ink-900 dark:text-paper-100'
-                  : 'border-paper-300 dark:border-ink-700 text-ink-400')
+                  : 'border-paper-300 dark:border-ink-700 text-ink-400 dark:text-ink-300')
               }
             >
               By ranges
@@ -479,14 +458,14 @@ export default function SplitTool() {
                     )}
                   </div>
                   {thumbs.length > 30 && !showAll && (
-                    <p className="text-xs text-ink-400 mt-3">
+                    <p className="text-xs text-ink-400 dark:text-ink-300 mt-3">
                       Showing {PAGE_LIMIT} of {thumbs.length} pages — click “Show all” for the rest.
                     </p>
                   )}
                   {showAll && thumbs.length > 30 && (
                     <button
                       onClick={() => setShowAll(false)}
-                      className="mt-3 text-xs text-ink-400 hover:text-ink-700"
+                      className="mt-3 min-h-[44px] px-3 inline-flex items-center text-xs text-ink-400 dark:text-ink-300 hover:text-ink-700 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass-400/60"
                     >
                       Show less
                     </button>
@@ -506,9 +485,9 @@ export default function SplitTool() {
                 onChange={(e) => setRanges(e.target.value)}
                 placeholder="e.g. 1-3, 5, 8-10"
                 aria-label="Pages to extract"
-                className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2.5 text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400"
+                className="w-full rounded-xl border border-paper-300 dark:border-ink-700 bg-paper-50 dark:bg-ink-900 px-4 py-2.5 min-h-[44px] text-sm text-ink-900 dark:text-paper-100 outline-none focus:border-brass-400 focus-visible:ring-2 focus-visible:ring-brass-400/60 focus-visible:ring-offset-1 focus-visible:ring-offset-paper-50 dark:focus-visible:ring-offset-ink-900"
               />
-              <p className="text-xs text-ink-400 mt-2">
+              <p className="text-xs text-ink-400 dark:text-ink-300 mt-2">
                 One file per range; ranges produce multiple downloads.
               </p>
             </Card>
@@ -548,12 +527,15 @@ export default function SplitTool() {
         </div>
       )}
 
-      {filesError && <p className="mt-4 text-sm text-red-500">{filesError}</p>}
+      {filesError && (
+        <p role="alert" className="mt-4 text-sm text-red-500">
+          {filesError}
+        </p>
+      )}
       {opError !== null && <ErrorBlock error={opError} />}
 
       <>
         {preview !== null &&
-          thumbs[preview] &&
           // Portaled to document.body: the Card above carries no
           // `backdrop-filter` today, so in-tree `fixed` would work — but a
           // future refactor could nest this inside one (glass), which per
@@ -565,6 +547,9 @@ export default function SplitTool() {
           // swallows direct createPortal() children (dialog never mounts).
           // Enter is a 180ms fade+scale via plain motion initial/animate
           // (transform/opacity only); close unmounts instantly.
+          // AUD-5 (F-18 parity): the dialog mounts for any requested
+          // preview — a missing/failed thumb renders an explicit
+          // "Preview unavailable" panel, never a silent no-op.
           createPortal(
             <motion.div
               initial={{ opacity: 0 }}
@@ -582,33 +567,48 @@ export default function SplitTool() {
                 className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
                 role="dialog"
+                aria-modal="true"
                 aria-label={`Preview Page ${preview + 1}`}
               >
                 <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">
                   <span className="font-display text-lg">Page {preview + 1}</span>
                   <button
+                    ref={previewCloseRef}
                     onClick={() => setPreview(null)}
-                    className="rounded-full bg-white/10 px-3 py-1 text-sm hover:bg-white/20"
+                    className="rounded-full bg-white/10 px-4 min-h-[44px] min-w-[44px] inline-flex items-center justify-center text-sm hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                   >
                     Close
                   </button>
                 </div>
-                <img
-                  src={hiRes[preview + 1] ?? thumbs[preview]}
-                  alt={
-                    hiRes[preview + 1]
-                      ? `Page ${preview + 1} (full resolution)`
-                      : `Page ${preview + 1}`
-                  }
-                  className={
-                    'w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]' +
-                    (hiRes[preview + 1] ? '' : ' opacity-80')
-                  }
-                />
-                {!hiRes[preview + 1] && (
-                  <p className="mt-2 text-center text-xs text-paper-100/80">
-                    Rendering full-resolution view…
-                  </p>
+                {(hiRes[preview + 1] ?? thumbs[preview]) ? (
+                  <>
+                    <img
+                      src={hiRes[preview + 1] ?? thumbs[preview]}
+                      alt={
+                        hiRes[preview + 1]
+                          ? `Page ${preview + 1} (full resolution)`
+                          : `Page ${preview + 1}`
+                      }
+                      loading="eager"
+                      decoding="async"
+                      className={
+                        'w-full rounded-xl shadow-2xl bg-white object-contain max-h-[78dvh]' +
+                        (hiRes[preview + 1] ? '' : ' opacity-80')
+                      }
+                    />
+                    {!hiRes[preview + 1] && (
+                      <p className="mt-2 text-center text-xs text-paper-100/80">
+                        Rendering full-resolution view…
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <div className="flex h-64 flex-col items-center justify-center gap-2 rounded-xl bg-white/10 text-center text-paper-100">
+                    <span className="font-display text-base">Preview unavailable</span>
+                    <span className="max-w-xs px-4 text-xs opacity-70">
+                      Page {preview + 1} could not be rendered.
+                    </span>
+                  </div>
                 )}
               </motion.div>
             </motion.div>,

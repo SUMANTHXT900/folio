@@ -32,6 +32,24 @@ pub struct OperationResult<T> {
 }
 
 impl<T> OperationResult<T> {
+    /// Enforces `started_at <= completed_at`: panics in debug builds on
+    /// inverted timestamps, and saturates `completed_at` up to `started_at`
+    /// in release builds so the invariant always holds.
+    fn order_timestamps(
+        started_at: SystemTime,
+        completed_at: SystemTime,
+    ) -> (SystemTime, SystemTime) {
+        debug_assert!(
+            started_at <= completed_at,
+            "OperationResult timestamps out of order: started_at > completed_at"
+        );
+        if started_at > completed_at {
+            (started_at, started_at)
+        } else {
+            (started_at, completed_at)
+        }
+    }
+
     /// Builds a successful result.
     pub fn success(
         job_id: JobId,
@@ -41,6 +59,7 @@ impl<T> OperationResult<T> {
         duration: Duration,
         value: T,
     ) -> Self {
+        let (started_at, completed_at) = Self::order_timestamps(started_at, completed_at);
         Self {
             job_id,
             operation: operation.into(),
@@ -61,6 +80,7 @@ impl<T> OperationResult<T> {
         duration: Duration,
         error: EngineError,
     ) -> Self {
+        let (started_at, completed_at) = Self::order_timestamps(started_at, completed_at);
         let status = if error.code() == crate::core::error::ErrorCode::Cancelled {
             CompletionStatus::Cancelled
         } else {
@@ -161,5 +181,71 @@ mod tests {
             r.outcome().as_ref().expect_err("must be err").code(),
             ErrorCode::Cancelled
         );
+    }
+
+    #[test]
+    fn success_preserves_ordered_timestamps() {
+        let early = SystemTime::now();
+        let late = early + Duration::from_secs(1);
+        let r: OperationResult<String> = OperationResult::success(
+            JobId::new(),
+            "test.op",
+            early,
+            late,
+            Duration::from_millis(1),
+            "ok".into(),
+        );
+        assert_eq!(r.started_at(), early);
+        assert_eq!(r.completed_at(), late);
+    }
+
+    #[test]
+    fn failure_preserves_ordered_timestamps() {
+        let early = SystemTime::now();
+        let late = early + Duration::from_secs(1);
+        let job = JobId::new();
+        let r: OperationResult<String> = OperationResult::failure(
+            job,
+            "test.op",
+            early,
+            late,
+            Duration::from_millis(1),
+            EngineError::new(ErrorCode::ProcessingFailed, "boom"),
+        );
+        assert_eq!(r.started_at(), early);
+        assert_eq!(r.completed_at(), late);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn inverted_timestamps_panic_in_debug() {
+        let early = SystemTime::now();
+        let late = early + Duration::from_secs(1);
+        let _: OperationResult<String> = OperationResult::success(
+            JobId::new(),
+            "test.op",
+            late,
+            early,
+            Duration::from_millis(1),
+            "ok".into(),
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn inverted_timestamps_saturate_in_release() {
+        let early = SystemTime::now();
+        let late = early + Duration::from_secs(1);
+        let r: OperationResult<String> = OperationResult::success(
+            JobId::new(),
+            "test.op",
+            late,
+            early,
+            Duration::from_millis(1),
+            "ok".into(),
+        );
+        assert_eq!(r.started_at(), late);
+        assert_eq!(r.completed_at(), late);
     }
 }

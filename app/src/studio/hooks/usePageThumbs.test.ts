@@ -159,3 +159,156 @@ describe('usePageThumbs eviction invalidation', () => {
     unmount();
   });
 });
+
+describe('usePageThumbs background-fill liveness', () => {
+  it('drops a background window evicted mid-await (revoked URLs never repopulate)', async () => {
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    // Seed the service cache so the evict below bumps the thumb generation.
+    const live = __thumbCacheForTests.touch('doc-1');
+    __thumbCacheForTests.set(live, 'doc-1', 1, 'blob:seed-1');
+
+    let resolveBg!: (value: Map<number, string>) => void;
+    const bgGate = new Promise<Map<number, string>>((resolve) => {
+      resolveBg = resolve;
+    });
+    mockedWindow.mockImplementationOnce(windowImpl); // first wave: immediate
+    mockedWindow.mockImplementation(() => ({ done: bgGate, cancel: vi.fn() }));
+
+    await act(async () => {
+      await result.current.load('doc-1', 50, 24);
+    });
+    // The background window is now in flight (past the pacing sleep).
+    await waitFor(() => expect(mockedWindow).toHaveBeenCalledTimes(2));
+    // Evict mid-await: blanks the hook array and bumps the generation.
+    act(() => {
+      __thumbCacheForTests.revokeDoc('doc-1');
+    });
+    expect(result.current.thumbs.every((url) => url === '')).toBe(true);
+    // The superseded window resolves late with revoked URLs.
+    const late = new Map(
+      Array.from({ length: 24 }, (_, i) => [i + 25, `blob:doc-1-${i + 25}`]) as Array<
+        [number, string]
+      >,
+    );
+    await act(async () => {
+      resolveBg(late);
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    // Dropped: nothing repopulated.
+    expect(result.current.thumbs.filter(Boolean)).toHaveLength(0);
+    act(() => {
+      result.current.cancel();
+    });
+    unmount();
+  });
+});
+
+describe('usePageThumbs fill exclusivity', () => {
+  it('fillAll supersedes background fill (cancelled lane, no double windows)', async () => {
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    let resolveBg!: (value: Map<number, string>) => void;
+    const bgGate = new Promise<Map<number, string>>((resolve) => {
+      resolveBg = resolve;
+    });
+    const bgCancel = vi.fn();
+    mockedWindow.mockImplementationOnce(windowImpl); // first wave: immediate
+    mockedWindow.mockImplementation(() => ({ done: bgGate, cancel: bgCancel }));
+
+    await act(async () => {
+      await result.current.load('doc-1', 50, 24);
+    });
+    await waitFor(() => expect(mockedWindow).toHaveBeenCalledTimes(2));
+
+    // fillAll takes over with immediately-resolving windows.
+    mockedWindow.mockImplementation(windowImpl);
+    await act(async () => {
+      await result.current.fillAll();
+    });
+    // Four engine calls: first wave + gated background + two fillAll waves.
+    expect(mockedWindow).toHaveBeenCalledTimes(4);
+    // The superseded background lane was cancelled in flight.
+    expect(bgCancel).toHaveBeenCalled();
+    // Its late result must not clobber the filled array.
+    const late = new Map(
+      Array.from({ length: 24 }, (_, i) => [i + 25, `blob:SENTINEL-${i + 25}`]) as Array<
+        [number, string]
+      >,
+    );
+    await act(async () => {
+      resolveBg(late);
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    const thumbs = result.current.thumbs;
+    expect(thumbs).toHaveLength(50);
+    expect(thumbs.filter(Boolean)).toHaveLength(50);
+    expect(thumbs.some((url) => url.includes('SENTINEL'))).toBe(false);
+    expect(thumbs[49]).toBe('blob:doc-1-50');
+    unmount();
+  });
+});
+
+describe('usePageThumbs box validation', () => {
+  it('rejects invalid boxes as a no-op (later loads unpoisoned)', async () => {
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    for (const bad of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY, 'x']) {
+      await act(async () => {
+        await expect(
+          result.current.load('doc-1', 10, 10, bad as unknown as number),
+        ).rejects.toThrow(/Invalid thumbnail box/);
+      });
+    }
+    expect(mockedWindow).not.toHaveBeenCalled();
+    expect(result.current.loading).toBe(false);
+    // A later valid load fills every page: nothing was marked failed.
+    await act(async () => {
+      await result.current.load('doc-1', 10, 10, 384);
+    });
+    await waitFor(() => expect(result.current.progress).toBeNull(), { timeout: 5000 });
+    expect(result.current.thumbs.filter(Boolean)).toHaveLength(10);
+    expect(mockedWindow.mock.calls[0]?.[2]).toEqual({ box: 384 });
+    unmount();
+  });
+});
+
+describe('usePageThumbs loading reset', () => {
+  it('resets loading when the first wave fails', async () => {
+    mockedWindow.mockImplementationOnce(() => ({
+      done: Promise.reject(new Error('engine boom')),
+      cancel: vi.fn(),
+    }));
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    await act(async () => {
+      await expect(result.current.load('doc-1', 10, 10)).rejects.toThrow(
+        'Could not render page previews.',
+      );
+    });
+    expect(result.current.loading).toBe(false);
+    unmount();
+  });
+
+  it('resets loading when the first wave is cancelled', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const gate = new Promise<Map<number, string>>((_, reject) => {
+      rejectFirst = reject;
+    });
+    gate.catch(() => undefined);
+    mockedWindow.mockImplementationOnce(() => ({
+      done: gate,
+      cancel: () => rejectFirst(new Error('cancelled')),
+    }));
+    const { result, unmount } = renderHook(() => usePageThumbs());
+    let pending!: Promise<string[]>;
+    act(() => {
+      pending = result.current.load('doc-1', 10, 10);
+    });
+    expect(result.current.loading).toBe(true);
+    act(() => {
+      result.current.cancel();
+    });
+    await act(async () => {
+      await expect(pending).resolves.toEqual([]);
+    });
+    expect(result.current.loading).toBe(false);
+    unmount();
+  });
+});

@@ -1,10 +1,29 @@
 /**
  * `DownloadCard` reset tests: a new completion (new blob/suggestion)
  * resets mode, text, and downloaded state in one pass.
+ *
+ * `MultiDownloadCard` honesty tests: anchor clicks are fire-and-forget (no
+ * browser API reports a completed download), so Download-all announces only
+ * that downloads STARTED — never that all parts "saved".
  */
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DownloadCard } from './DownloadCard';
+import { DownloadCard, MultiDownloadCard, type DownloadPart } from './DownloadCard';
+
+function makeParts(): DownloadPart[] {
+  return [
+    {
+      key: 'part-0',
+      blob: new Blob(['a'], { type: 'application/pdf' }),
+      suggestedName: 'a-p1-1.pdf',
+    },
+    {
+      key: 'part-1',
+      blob: new Blob(['b'], { type: 'application/pdf' }),
+      suggestedName: 'a-p2-2.pdf',
+    },
+  ];
+}
 
 beforeEach(() => {
   let counter = 0;
@@ -49,5 +68,58 @@ describe('DownloadCard reset', () => {
     const blob = new Blob(['a'], { type: 'application/pdf' });
     render(<DownloadCard blob={blob} suggestedName="images.pdf" />);
     expect((screen.getByLabelText('File name') as HTMLInputElement).value).toBe('images.pdf');
+  });
+});
+
+describe('MultiDownloadCard honest started-state', () => {
+  it('announces downloads-started (never all-saved) after Download all', async () => {
+    render(<MultiDownloadCard parts={makeParts()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Download all parts' }));
+    const status = await screen.findByRole('status', {}, { timeout: 3000 });
+    expect(status.textContent).toMatch(/Downloads started for all 2 parts/);
+    expect(status.textContent).toMatch(/check your downloads shelf/);
+    expect(screen.queryByText(/All parts saved/)).toBeNull();
+  });
+
+  it('resyncs row text when a new completion reuses the stable rows', () => {
+    const { rerender } = render(<MultiDownloadCard parts={makeParts()} />);
+    fireEvent.change(screen.getByLabelText('File name part 1'), {
+      target: { value: 'my-custom' },
+    });
+    expect((screen.getByLabelText('File name part 1') as HTMLInputElement).value).toBe('my-custom');
+
+    // Re-run: new blobs, new suggestions, same stable keys — the stale edit
+    // must not survive.
+    rerender(
+      <MultiDownloadCard
+        parts={[
+          {
+            key: 'part-0',
+            blob: new Blob(['c'], { type: 'application/pdf' }),
+            suggestedName: 'b-p1-1.pdf',
+          },
+          {
+            key: 'part-1',
+            blob: new Blob(['d'], { type: 'application/pdf' }),
+            suggestedName: 'b-p2-2.pdf',
+          },
+        ]}
+      />,
+    );
+    expect((screen.getByLabelText('File name part 1') as HTMLInputElement).value).toBe(
+      'b-p1-1.pdf',
+    );
+    expect((screen.getByLabelText('File name part 2') as HTMLInputElement).value).toBe(
+      'b-p2-2.pdf',
+    );
+  });
+
+  it('resets the started notice when a new completion arrives', async () => {
+    const { rerender } = render(<MultiDownloadCard parts={makeParts()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Download all parts' }));
+    await screen.findByRole('status', {}, { timeout: 3000 });
+
+    rerender(<MultiDownloadCard parts={makeParts()} />);
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

@@ -182,15 +182,19 @@ impl Operation for RotateOperation {
         validate_pages(&source, &options.pages)?;
         let mut document = source;
 
-        // A zero-page document cannot satisfy any rotation request; this
-        // preserves the pre-in-place behavior, where the full-document copy
-        // rejected an empty page set with exactly this error.
+        // A zero-page document cannot satisfy any rotation request — not
+        // even an empty selection, which is a valid no-op elsewhere. This
+        // preserves the pre-in-place behavior (no zero-page output), with a
+        // message naming the document's real condition instead of blaming
+        // a valid selection. Non-empty selections on an empty document
+        // never reach here: range validation above already rejects them.
         let page_count = document.page_count();
         if page_count == 0 {
             return Err(EngineError::new(
                 ErrorCode::InvalidInput,
-                "page selection must not be empty; select at least one page",
-            ));
+                "document contains no pages; rotation requires at least one page",
+            )
+            .with_details("page_count=0"));
         }
 
         // Page preparation occupies the 10–80% band over the planned
@@ -213,7 +217,7 @@ impl Operation for RotateOperation {
             let completed = (10 + (done as u64 * 70) / (planned as u64).max(1)).min(80);
             if plan_throttle.should_report(completed, done as u64) {
                 ctx.report_progress(
-                    Some("copying pages"),
+                    Some("planning rotations"),
                     completed,
                     100,
                     Some(&format!("page {done} of {planned}")),
@@ -334,7 +338,7 @@ mod tests {
 
     /// Context that cancels after a fixed number of successful checks, so
     /// mid-operation cancellation is deterministic: the first two checks
-    /// (validating, preparing) pass, the third — inside page copying —
+    /// (validating, preparing) pass, the third — inside rotation planning —
     /// fails.
     struct CancelMidwayCtx {
         id: JobId,
@@ -529,6 +533,43 @@ mod tests {
         let serialized = doc.save_to_bytes().expect("serializes");
         let reparsed = load_pdf(&serialized).expect("re-parses");
         assert_eq!(rotations(&reparsed, 3), vec![0, 90, 270]);
+    }
+
+    #[test]
+    fn zero_page_document_reports_its_empty_condition() {
+        // A zero-page document cannot satisfy any rotation request — not
+        // even an empty selection (a valid no-op elsewhere). The error must
+        // name the document's real condition (no pages), never the
+        // selection's (which is valid).
+        let err = RotateOperation
+            .execute(
+                &ctx(),
+                input(fixtures::empty_pages_pdf()),
+                RotateOptions::new(vec![], 90),
+            )
+            .expect_err("zero-page rotation must fail");
+        assert_eq!(err.code(), ErrorCode::InvalidInput);
+        assert!(
+            err.message().contains("no pages"),
+            "must report the empty document, got: {}",
+            err.message()
+        );
+        assert!(
+            !err.message().contains("selection must not be empty"),
+            "must not blame the selection, got: {}",
+            err.message()
+        );
+        // A non-empty selection on an empty document still fails range
+        // validation first, which already names the empty document.
+        let err = RotateOperation
+            .execute(
+                &ctx(),
+                input(fixtures::empty_pages_pdf()),
+                RotateOptions::new(vec![1], 90),
+            )
+            .expect_err("page of an empty document must fail");
+        assert_eq!(err.code(), ErrorCode::PageOutOfRange);
+        assert!(err.message().contains("only 0 pages"), "{err:?}");
     }
 
     #[test]
@@ -808,8 +849,9 @@ mod tests {
 
     #[test]
     fn cancellation_mid_copy_reports_no_completion() {
-        // Two checks pass (validating, preparing); the third — inside page
-        // copying — fails, so no output escapes and 100% is never reported.
+        // Two checks pass (validating, preparing); the third — inside
+        // rotation planning — fails, so no output escapes and 100% is never
+        // reported.
         let ctx = CancelMidwayCtx {
             id: JobId::new(),
             remaining: std::cell::Cell::new(2),
