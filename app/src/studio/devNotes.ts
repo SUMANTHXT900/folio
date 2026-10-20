@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'Scanner review/build flow (F-24/D55)',
+    date: '2026-10-20',
+    notes: [
+      'Review opens on the queued photo immediately; ML detection decodes at <=1600px and scales the quad back to original pixels, so warp still uses full resolution.',
+      'The separate All pages ready screen is gone: review Build PDF performs one import and auto-starts one build. The scanner stays mounted until the commit succeeds, and a failed import keeps the queue.',
+      'Build is gated on detection and crop settle (`data-build-state=ready`); detection/warp timeouts and automatic rollback of partial imports prevent silent originals and duplicate retries.',
+    ],
+  },
+  {
     build: 'F-22 experiments retired',
     date: '2026-10-20',
     notes: [

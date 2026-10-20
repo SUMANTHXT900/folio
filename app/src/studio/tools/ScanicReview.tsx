@@ -62,6 +62,8 @@ export interface ScanicReviewProps {
   imageHeight: number;
   corners: ScanicCorners | null;
   warpedUrl: string | null;
+  /** A crop render failed/timed out; the photo stays with an honest chip. */
+  warpFailed: boolean;
   detecting: boolean;
   note: string | null;
   pageLabel: string;
@@ -258,6 +260,7 @@ export default function ScanicReview({
   imageHeight,
   corners,
   warpedUrl,
+  warpFailed,
   detecting,
   note,
   pageLabel,
@@ -1033,12 +1036,25 @@ export default function ScanicReview({
       ) : (
         <div data-crop-result className="relative overflow-hidden rounded-xl bg-ink-950">
           {detecting ? (
-            <p
-              role="status"
-              className="flex min-h-56 items-center justify-center text-sm text-paper-100"
-            >
-              Preparing…
-            </p>
+            <>
+              {/* Paint the queued photo immediately; detection then swaps to
+                  the processed result. A blank dark box made review entry feel
+                  slower than the work actually was. */}
+              <img
+                key="detecting-photo"
+                data-crop-result-img
+                src={photoUrl}
+                alt="Photo being processed"
+                className="block max-h-[50dvh] w-full object-contain opacity-70"
+                draggable={false}
+              />
+              <p
+                role="status"
+                className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50"
+              >
+                Detecting crop…
+              </p>
+            </>
           ) : verdict === 'original' ? (
             <>
               <img
@@ -1089,12 +1105,24 @@ export default function ScanicReview({
               </p>
             </>
           ) : (
-            <p
-              role="status"
-              className="flex min-h-56 items-center justify-center px-4 py-8 text-center text-xs text-paper-100/70"
-            >
-              Processing auto-crop…
-            </p>
+            <>
+              {/* Corners exist but the warp is still running: keep the photo
+                  visible with an honest status chip instead of a blank box. */}
+              <img
+                key="warp-pending-photo"
+                data-crop-result-img
+                src={photoUrl}
+                alt="Photo being processed"
+                className="block max-h-[50dvh] w-full object-contain opacity-70"
+                draggable={false}
+              />
+              <p
+                role="status"
+                className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50"
+              >
+                {warpFailed ? 'Auto-crop failed — use original' : 'Processing auto-crop…'}
+              </p>
+            </>
           )}
         </div>
       )}

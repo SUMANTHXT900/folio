@@ -12,7 +12,7 @@ import {
 import { buildImagesPdf, classifyStagedKind, resolveShardCount } from './imageSharding';
 import { useImagePages } from './useImagePages';
 import { PageGrid } from './PageGrid';
-import ScanicCapture, { type ScanicCommittedPage } from './ScanicCapture';
+import ScanicCapture, { type ScanicCommitResult, type ScanicCommittedPage } from './ScanicCapture';
 import { browserImageRenderer, preparePageBytes, type ImageRenderer } from './imagePrepare';
 import type { ImagePage } from './imagePages';
 
@@ -147,7 +147,7 @@ export function toPdfOutput(first: StudioOutput, sourceName: string): StudioOutp
  * any pending transfer is ignored and left for PDF tools.
  */
 export default function ImagesTool() {
-  const { pages, importFiles, move, remove, rotate, clear, reorder } = useImagePages();
+  const { pages, importFiles, move, remove, removeMany, rotate, clear, reorder } = useImagePages();
   const [pageSize, setPageSize] = useState<'fit' | 'standard'>('fit');
   const [scannerOpen, setScannerOpen] = useState(false);
   const [working, setWorking] = useState(false);
@@ -175,49 +175,84 @@ export default function ImagesTool() {
   // page-size changes invalidate the card ONLY then (order-affecting change
   // postdating the build). Stale-build teardown can never wipe a fresh run.
   const completedBuildRef = useRef(false);
+  // Synchronous mirrors for callbacks that must not depend on a later render:
+  // the camera commit starts its build with the exact pre-import collection,
+  // and the build guard refuses overlapping runs (double-tap / auto-build).
+  const pagesRef = useRef(pages);
+  pagesRef.current = pages;
+  const buildingRef = useRef(false);
 
   // Scanic camera reintegration: committed pages are pre-named `scan-NNN.jpg`
   // in capture order. They join the collection through the SAME normalized
   // import path as gallery uploads (`importFiles` → `prepareImportFile`),
-  // so normalized w×h ride into `ImagePage` and the sharding pixel gate
-  // sees real decode cost (raw `addFiles` handles would blind it with
-  // zero-pixel fallbacks). Already-normalized JPEGs retain their bytes
-  // (no recompression), so the commit stays byte-identical while gaining
-  // dims + thumbs. Numbering continues past existing camera pages.
-  const commitCameraPages = (committed: ScanicCommittedPage[]) => {
-    if (committed.length === 0) {
-      setScannerOpen(false);
-      return;
-    }
-    setScannerOpen(false);
+  // so normalization runs exactly ONCE (the scanner no longer prepares the
+  // same files before handing them over). Numbering continues past existing
+  // camera pages. The scanner stays mounted until this resolves; `{ok:false}`
+  // keeps the review queue recoverable on an import failure.
+  const commitCameraPages = async (
+    committed: ScanicCommittedPage[],
+    options?: { buildAfterImport?: boolean },
+  ): Promise<ScanicCommitResult> => {
+    if (committed.length === 0) return { ok: true };
+    const basePages = pagesRef.current;
+    let added: ImagePage[] = [];
     setImporting('Preparing images…');
-    void importFiles(
-      committed.map((p) => p.file),
-      'camera',
-      {
-        onProgress: (completed, total) =>
-          setImporting(`Preparing images… ${completed} of ${total}`),
-      },
-    )
-      .then((summary) => {
-        if (summary.skipped > 0) {
-          setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
-        } else if (summary.failed > 0) {
-          setError(
-            new Error(
-              summary.firstError !== null
-                ? `Couldn't add ${summary.failed} image(s): ${summary.firstError}`
-                : `Couldn't add ${summary.failed} image(s).`,
-            ),
-          );
-        } else {
-          setError(null);
-        }
-      })
-      .catch(setError)
-      .finally(() => {
-        setImporting(null);
-      });
+    setError(null);
+    try {
+      const summary = await importFiles(
+        committed.map((p) => p.file),
+        'camera',
+        {
+          onProgress: (completed, total) =>
+            setImporting(`Preparing images… ${completed} of ${total}`),
+          onCommitted: (pages) => {
+            added = pages;
+          },
+        },
+      );
+      if (summary.cancelled) {
+        // Atomic camera retry: remove the partial batch so retrying cannot
+        // duplicate pages the interrupted import already committed.
+        removeMany(added);
+        added = [];
+        const message = 'Import cancelled.';
+        setError(new Error(message));
+        return { ok: false, message };
+      }
+      if (summary.failed > 0) {
+        removeMany(added);
+        added = [];
+        const message =
+          summary.firstError !== null
+            ? `Couldn't add ${summary.failed} image(s): ${summary.firstError}`
+            : `Couldn't add ${summary.failed} image(s).`;
+        setError(new Error(message));
+        return { ok: false, message };
+      }
+      if (summary.skipped > 0) {
+        // Camera files are always images; keep the honest message if a
+        // malformed file slipped through anyway.
+        setError(new Error('Skipped non-image file(s) — JPEG and PNG only.'));
+      }
+      if (added.length === 0) {
+        const message = 'No pages could be added.';
+        setError(new Error(message));
+        return { ok: false, message };
+      }
+      setError(null);
+      // One build action: the review's Build PDF commits AND starts the real
+      // engine build. No second "Build PDF" screen/tap.
+      if (options?.buildAfterImport) {
+        void buildPages([...basePages, ...added]);
+      }
+      return { ok: true };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Could not add the scanned pages.';
+      setError(e instanceof Error ? e : new Error(message));
+      return { ok: false, message };
+    } finally {
+      setImporting(null);
+    }
   };
   const cameraStartIndex = pages.filter((p) => p.source === 'camera').length;
 
@@ -270,8 +305,14 @@ export default function ImagesTool() {
     setDone(null);
   }, [pages, pageSize]);
 
-  const onBuild = async () => {
-    if (pages.length === 0) return;
+  /**
+   * One build path for both manual and camera commits. Takes the exact page
+   * list so an auto-build started immediately after import cannot read a
+   * stale `pages` state snapshot.
+   */
+  const buildPages = async (pagesToBuild: ImagePage[]) => {
+    if (pagesToBuild.length === 0 || buildingRef.current) return;
+    buildingRef.current = true;
     completedBuildRef.current = false;
     setWorking(true);
     setCancelling(false);
@@ -286,14 +327,14 @@ export default function ImagesTool() {
       // M5: pre-stage policy on pre-stage sums (single source of truth for
       // the decision lives in `buildImagesPdf`'s post-stage evaluation;
       // small batches agree by construction — see `preStageShardEstimate`).
-      const preStage = preStageShardEstimate(pages);
+      const preStage = preStageShardEstimate(pagesToBuild);
       if (import.meta.env.DEV) {
         console.debug(
-          `[folio-images] pre-stage policy: ${pages.length} pages, ${preStage.totalBytes} bytes → ${preStage.shards} shard(s)`,
+          `[folio-images] pre-stage policy: ${pagesToBuild.length} pages, ${preStage.totalBytes} bytes → ${preStage.shards} shard(s)`,
         );
       }
       const prepared = await stageImagePages(
-        pages,
+        pagesToBuild,
         browserImageRenderer,
         (completed, total) => {
           if (stageController.signal.aborted) return;
@@ -315,11 +356,15 @@ export default function ImagesTool() {
       // Known normalized dims ride along as the pixel gate's decode-cost
       // input (raw handles carry 0 only when truly unknown — camera pages
       // now arrive normalized via importFiles, so their pixels are real).
-      const stagedPixels = pages.map((p) => (p.width > 0 && p.height > 0 ? p.width * p.height : 0));
+      const stagedPixels = pagesToBuild.map((p) =>
+        p.width > 0 && p.height > 0 ? p.width * p.height : 0,
+      );
       // P3 item 7: real image kinds ride into the sharding output gate —
       // import-normalized JPEGs estimate near-passthrough, so they keep
       // sharding; unknown kinds stay conservative (early single-worker).
-      const stagedKinds = pages.map((p) => classifyStagedKind({ name: p.name, mime: p.file.type }));
+      const stagedKinds = pagesToBuild.map((p) =>
+        classifyStagedKind({ name: p.name, mime: p.file.type }),
+      );
       const job = buildImagesPdf({
         stagedIds: staged,
         stagedSizes,
@@ -344,7 +389,7 @@ export default function ImagesTool() {
       // exactly this name.
       const sourceName = smartOutputName(
         'images',
-        pages.map((p) => p.name),
+        pagesToBuild.map((p) => p.name),
       );
       // Source-only handoff item: the single PDF from `images_to_pdf`
       // (single-worker or sharded — both resolve one ordered PDF here).
@@ -365,12 +410,17 @@ export default function ImagesTool() {
         setError(e);
       }
     } finally {
+      buildingRef.current = false;
       setWorking(false);
       setCancelling(false);
       setProgress(null);
       stageAbortRef.current = null;
       for (const id of staged) releaseStagedBytes(id);
     }
+  };
+
+  const onBuild = () => {
+    void buildPages(pages);
   };
 
   const onCancel = async () => {
@@ -495,7 +545,7 @@ export default function ImagesTool() {
 
           {!done && pages.length > 0 && (
             <div className="flex items-center gap-3">
-              <Button onClick={onBuild} disabled={working} className="w-full">
+              <Button onClick={onBuild} disabled={working || importing !== null} className="w-full">
                 {working
                   ? 'Building…'
                   : `Build PDF · ${pages.length} image${pages.length === 1 ? '' : 's'}`}
@@ -532,7 +582,7 @@ export default function ImagesTool() {
       {scannerOpen && (
         <ScanicCapture
           startIndex={cameraStartIndex}
-          onCommit={commitCameraPages}
+          onCommit={(committed) => commitCameraPages(committed, { buildAfterImport: true })}
           onExit={() => setScannerOpen(false)}
         />
       )}

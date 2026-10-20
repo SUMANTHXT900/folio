@@ -94,6 +94,7 @@ function seedCollection(overrides: { clear?: () => void } = {}): ImagePage[] {
     importFiles: vi.fn(),
     move: vi.fn(),
     remove: vi.fn(),
+    removeMany: vi.fn(),
     rotate: vi.fn(),
     clear: overrides.clear ?? vi.fn(),
     reorder: vi.fn(),

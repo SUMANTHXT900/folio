@@ -34,6 +34,12 @@ export interface ImportSummary {
 
 export interface ImportCallbacks {
   onProgress?: (completed: number, total: number, result: PrepareImportResult) => void;
+  /**
+   * Fires once with the pages this import actually committed (after URLs and
+   * ids exist). Camera commits use it to start the build with the exact new
+   * collection instead of relying on a later render.
+   */
+  onCommitted?: (pages: ImagePage[]) => void;
   signal?: AbortSignal;
 }
 
@@ -91,7 +97,12 @@ export function useImagePages() {
     return `img-${idRef.current}`;
   };
 
-  const addEntries = useCallback((entries: EntryInput[]): string[] => {
+  /**
+   * Internal page-making path: returns the created pages so `importFiles`
+   * can hand the exact committed batch to `onCommitted` without waiting for
+   * a render. Public `addEntries` keeps its historical id[] contract.
+   */
+  const addEntriesWithPages = useCallback((entries: EntryInput[]): ImagePage[] => {
     // Created OUTSIDE the updater: updaters may double-invoke under
     // StrictMode, which would leak URLs and burn ids (see usePdfFiles).
     const made = entries.map((e) => {
@@ -114,8 +125,13 @@ export function useImagePages() {
       });
     });
     setPages((prev) => [...prev, ...made]);
-    return made.map((p) => p.id);
+    return made;
   }, []);
+
+  const addEntries = useCallback(
+    (entries: EntryInput[]): string[] => addEntriesWithPages(entries).map((p) => p.id),
+    [addEntriesWithPages],
+  );
 
   /** Adds picked files; non-JPEG/PNG entries are skipped and counted. */
   const addFiles = useCallback(
@@ -168,7 +184,14 @@ export function useImagePages() {
       // second sweep to collect them) nor call setState on an unmounted
       // hook. The prepared batch is dropped; its File/Blob handles are GC'd
       // (no object URLs were ever minted for them).
-      if (batch.length > 0 && mountedRef.current) addEntries(batch);
+      if (batch.length > 0 && mountedRef.current) {
+        const committed = addEntriesWithPages(batch);
+        try {
+          callbacks.onCommitted?.(committed);
+        } catch {
+          // A callback must never turn a successful import into a failure.
+        }
+      }
       for (const outcome of outcomes) {
         if (outcome.error !== null && firstError === null) {
           firstError = outcome.error;
@@ -182,7 +205,7 @@ export function useImagePages() {
         firstError,
       };
     },
-    [addEntries],
+    [addEntriesWithPages],
   );
 
   const move = useCallback((id: string, dir: -1 | 1) => {
@@ -197,6 +220,18 @@ export function useImagePages() {
     const target = pagesRef.current.find((p) => p.id === id);
     if (target !== undefined) revokePageUrls(target);
     setPages((prev) => removePage(prev, id));
+  }, []);
+
+  /**
+   * Rollback helper for async commits: revokes the exact pages by identity
+   * (even before the render that would update `pagesRef`) and removes them
+   * from the pending state. Used when a camera import partially fails.
+   */
+  const removeMany = useCallback((targets: ImagePage[]) => {
+    if (targets.length === 0) return;
+    for (const target of targets) revokePageUrls(target);
+    const ids = new Set(targets.map((p) => p.id));
+    setPages((prev) => prev.filter((p) => !ids.has(p.id)));
   }, []);
 
   const rotate = useCallback((id: string) => {
@@ -216,6 +251,7 @@ export function useImagePages() {
     importFiles,
     move,
     remove,
+    removeMany,
     rotate,
     clear,
     reorder,

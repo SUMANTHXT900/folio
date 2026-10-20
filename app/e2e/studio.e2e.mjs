@@ -502,6 +502,28 @@ async function waitForPreparingGone(page, timeoutMs = 90000) {
   }
 }
 
+// Crops render after detection: Build is gated on every warped verdict
+// owning its render, so review checks must wait for the enabled Build gate.
+async function waitForBuildReady(page, timeoutMs = 30000) {
+  try {
+    await waitTotal(
+      page,
+      () => {
+        try {
+          const bar = document.querySelector('[data-batch-bar]');
+          return bar !== null && bar.getAttribute('data-build-state') === 'ready';
+        } catch {
+          return false;
+        }
+      },
+      { timeout: timeoutMs, polling: 250 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function readPreparingDetail(page) {
   return page.evaluate(() => {
     try {
@@ -586,6 +608,7 @@ async function clickCTAAndAwaitReview(page, expectedCount) {
   }
   const preparingDetail = preparingSeen ? await readPreparingDetail(page) : null;
   const preparingGone = await waitForPreparingGone(page, preparingSeen ? 90000 : 5000);
+  if (preparingGone) await waitForBuildReady(page);
   return { clicked: true, preparingSeen, preparingGone, preparingDetail };
 }
 
@@ -2377,7 +2400,7 @@ async function main() {
         JSON.stringify(queuePhase),
       );
       // Reworked review chrome: filmstrip with numbered thumbs + add button,
-      // batch bar with Discard scans + Next. All fail honestly when absent.
+      // batch bar with Discard scans + Build PDF. All fail honestly when absent.
       const filmState = await page.evaluate(() => {
         try {
           const film = document.querySelector('[data-scan-filmstrip]');
@@ -2415,15 +2438,15 @@ async function main() {
           return {
             labels,
             hasDiscard: labels.includes('Discard scans'),
-            hasNext: labels.includes('Next'),
+            hasBuild: labels.some((label) => label.startsWith('Build PDF')),
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner batch bar offers Discard scans + Next',
-        batchState !== null && batchState.hasDiscard && batchState.hasNext,
+        'scanner batch bar offers Discard scans + Build PDF',
+        batchState !== null && batchState.hasDiscard && batchState.hasBuild,
         JSON.stringify(batchState),
       );
       // Add-button round-trip: review → camera → review CTA → review again.
@@ -2652,29 +2675,25 @@ async function main() {
             const r = btn.getBoundingClientRect();
             return { w: Math.round(r.width), h: Math.round(r.height) };
           };
-          const bar = document.querySelector('[data-batch-bar]');
-          const nextBtn =
-            [...(bar?.querySelectorAll('button') ?? [])].find(
-              (b) => b.textContent?.trim() === 'Next',
-            ) ?? null;
-          const nr = nextBtn?.getBoundingClientRect() ?? null;
+          const buildBtn = document.querySelector('[data-build-pdf]');
+          const nr = buildBtn?.getBoundingClientRect() ?? null;
           return {
             adjust: box('Adjust corners'),
-            batchNext: nr === null ? null : { w: Math.round(nr.width), h: Math.round(nr.height) },
+            batchBuild: nr === null ? null : { w: Math.round(nr.width), h: Math.round(nr.height) },
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner touch targets meet 44px (Adjust/Next)',
+        'scanner touch targets meet 44px (Adjust/Build PDF)',
         touchReview !== null &&
           touchReview.adjust !== null &&
-          touchReview.batchNext !== null &&
+          touchReview.batchBuild !== null &&
           touchReview.adjust.w >= 44 &&
           touchReview.adjust.h >= 44 &&
-          touchReview.batchNext.w >= 44 &&
-          touchReview.batchNext.h >= 44,
+          touchReview.batchBuild.w >= 44 &&
+          touchReview.batchBuild.h >= 44,
         JSON.stringify(touchReview),
       );
       // Per-page accept is deleted: every page auto-accepts its current crop.
@@ -2779,10 +2798,28 @@ async function main() {
         progressEntry !== null && /1 of 2 viewed/.test(progressEntry),
         JSON.stringify(progressEntry),
       );
+      // Review entry now paints immediately while ML finishes; adjust stays
+      // disabled until the page is ready, so wait for the enabled Build gate.
+      try {
+        await waitTotal(
+          page,
+          () => {
+            try {
+              const build = document.querySelector('[data-build-pdf]');
+              return build !== null && build.disabled === false;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+      } catch {
+        /* adjust probe below fails honestly if never ready */
+      }
       // Adjust-next contract: `[data-adjust-next]` "Next page" beside Apply
       // navigates WITHOUT warp/decision change — the open draft is dropped,
       // the hero becomes the other page's canvas, progress advances (visited
-      // grows 1→2 of 2 viewed), and batch Next stays armed on the ≥1-page
+      // grows 1→2 of 2 viewed), and Build PDF stays armed on the ≥1-page
       // gate only (no warp decision consumed). L-12: dispatch, waitForFunction
       // the post-condition, measure in a LATER evaluate. Missing hook fails
       // honestly (never falls back to pager/filmstrip). After measuring, step
@@ -2882,35 +2919,33 @@ async function main() {
           adjustNextAdvanced = false;
         }
       }
+      // The dirty-draft keep starts a page-1 re-warp; Build waits for it.
+      await waitForBuildReady(page);
       const adjustNextState = await page.evaluate((before) => {
         try {
           const img = document.querySelector('[data-crop-result-img]');
           const src = img ? img.getAttribute('src') : null;
           const p = document.querySelector('[data-review-progress]');
-          const bar = document.querySelector('[data-batch-bar]');
-          const batchNext =
-            [...(bar?.querySelectorAll('button') ?? [])].find(
-              (x) => x.textContent?.trim() === 'Next',
-            ) ?? null;
+          const batchBuild = document.querySelector('[data-build-pdf]');
           return {
             srcSwapped: typeof src === 'string' && src.length > 0 && src !== before,
             label: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
             adjustClosed: document.querySelector('[data-crop-adjust]') === null,
-            batchNextPresent: batchNext !== null,
-            batchNextEnabled: batchNext !== null && batchNext.disabled === false,
+            batchBuildPresent: batchBuild !== null,
+            batchBuildEnabled: batchBuild !== null && batchBuild.disabled === false,
           };
         } catch {
           return null;
         }
       }, heroSrcPage1);
       check(
-        'scanner adjust-next advances page without warp/decision change (other canvas, progress 1→2 of 2 viewed, batch Next still armed)',
+        'scanner adjust-next advances page without warp/decision change (other canvas, progress 1→2 of 2 viewed, Build PDF still armed)',
         adjustNextAdvanced &&
           adjustNextState !== null &&
           adjustNextState.srcSwapped === true &&
           adjustNextState.label !== null &&
           /2 of 2 viewed/.test(adjustNextState.label) &&
-          adjustNextState.batchNextEnabled === true,
+          adjustNextState.batchBuildEnabled === true,
         JSON.stringify(adjustNextState),
       );
       if (adjustNextClicked) {
@@ -2922,18 +2957,18 @@ async function main() {
           }
         });
         try {
+          // Adjust-next auto-keeps a dirty draft, so page 1 re-warps (its src
+          // legitimately changes); wait for the page identity, not the old src.
           await waitTotal(
             page,
-            (before) => {
+            () => {
               try {
-                const src = document.querySelector('[data-crop-result-img]')?.getAttribute('src');
-                return typeof src === 'string' && src.length > 0 && src === before;
+                return /Page 1 of 2/.test(document.body.innerText ?? '');
               } catch {
                 return false;
               }
             },
-            { timeout: 30000 },
-            heroSrcPage1,
+            { timeout: 5000 },
           );
         } catch {
           /* the filmstrip tap below re-measures from whatever page is current */
@@ -3128,15 +3163,11 @@ async function main() {
           pagerFwdState.nextDisabled === true,
         JSON.stringify(pagerFwdState),
       );
-      // Batch Next needs zero accepts: every page auto-accepts its crop, so
-      // Next is already enabled before anything is ever clicked.
-      const batchNextArmed = await page.evaluate(() => {
+      // Build PDF needs zero accepts: every page auto-accepts its crop, so
+      // the button is already enabled once preparation settles.
+      const batchBuildArmed = await page.evaluate(() => {
         try {
-          const bar = document.querySelector('[data-batch-bar]');
-          const b =
-            [...(bar?.querySelectorAll('button') ?? [])].find(
-              (x) => x.textContent?.trim() === 'Next',
-            ) ?? null;
+          const b = document.querySelector('[data-build-pdf]');
           if (!b) return null;
           return { present: true, disabled: b.disabled };
         } catch {
@@ -3144,9 +3175,9 @@ async function main() {
         }
       });
       check(
-        'scanner batch Next is enabled with zero accept clicks (auto-accept)',
-        batchNextArmed !== null && batchNextArmed.disabled === false,
-        JSON.stringify(batchNextArmed),
+        'scanner Build PDF is enabled with zero accept clicks (auto-accept)',
+        batchBuildArmed !== null && batchBuildArmed.disabled === false,
+        JSON.stringify(batchBuildArmed),
       );
       // Destructive batch action now (fresh queue re-captured below) so the
       // surviving adjust/Apply/reactive/Build-PDF flow keeps its 2-page shape.
@@ -4155,8 +4186,8 @@ async function main() {
         JSON.stringify({ base: toggleBase, photo: togglePhoto, restored: toggleRestored }),
       );
       // Post-recapture all-viewed sweep: tap filmstrip thumb 2 so every page
-      // counts viewed before Next (Next may gate on all-viewed; harmless
-      // otherwise). Dispatch, waitForFunction, then measure (L-12).
+      // counts viewed before Build PDF (harmless if it does not gate).
+      // Dispatch, waitForFunction, then measure (L-12).
       const sweepBase = await page.evaluate(() => {
         try {
           return document.querySelector('[data-crop-result-img]')?.getAttribute('src') ?? null;
@@ -4187,174 +4218,79 @@ async function main() {
           sweepBase,
         );
       } catch {
-        /* measured at the done screen below */
+        /* measured in the post-build state below */
       }
-      // Batch Next → done with zero accept clicks: auto-accept already holds
-      // every page, so Next is armed from the start.
-      const clickBatchNext = () =>
-        page.evaluate(() => {
-          try {
-            const bar = document.querySelector('[data-batch-bar]');
-            const inBar = [...(bar?.querySelectorAll('button') ?? [])].find(
-              (b) => b.textContent?.trim() === 'Next',
-            );
-            const fallback = [...document.querySelectorAll('button')].find(
-              (b) => b.textContent?.trim() === 'Next',
-            );
-            (inBar ?? fallback)?.click();
-          } catch {
-            /* noop */
-          }
-        });
-      const waitDone = async (timeoutMs = 30000) => {
+      // Build PDF is the single post-review action: it commits, imports once,
+      // and auto-starts the engine build (no separate done screen/second tap).
+      try {
+        await waitTotal(
+          page,
+          () => {
+            try {
+              const b = document.querySelector('[data-build-pdf]');
+              return b !== null && b.disabled === false;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 30000 },
+        );
+      } catch {
+        /* measured below */
+      }
+      await page.evaluate(() => {
         try {
-          await waitTotal(
-            page,
-            () => {
-              try {
-                const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
-                return labels.includes('Build PDF') && labels.includes('Back to camera');
-              } catch {
-                return false;
-              }
-            },
-            { timeout: timeoutMs },
-          );
-          return true;
+          document.querySelector('[data-build-pdf]')?.click();
         } catch {
-          return false;
+          /* noop */
         }
-      };
-      await clickBatchNext();
-      const nextDone = await waitDone();
-      const nextState = await page.evaluate(() => {
+      });
+      let scannerClosed = false;
+      try {
+        await waitTotal(
+          page,
+          () => {
+            try {
+              return (
+                document.querySelector('[data-scanner-root]') === null &&
+                document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length >= 2
+              );
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 60000 },
+        );
+        scannerClosed = true;
+      } catch {
+        scannerClosed = false;
+      }
+      const afterBuild = await page.evaluate(() => {
         try {
-          const labels = [...document.querySelectorAll('button')].map((b) => b.textContent);
-          const p = document.querySelector('[data-review-progress]');
           return {
-            doneVisible: labels.includes('Build PDF') && labels.includes('Back to camera'),
-            progress: p ? (p.getAttribute('aria-label') ?? p.textContent ?? '') : null,
+            scannerGone: document.querySelector('[data-scanner-root]') === null,
+            pageRows: document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li').length,
+            secondBuildGate: [...document.querySelectorAll('button')].some((b) =>
+              (b.textContent ?? '').trim().startsWith('Build PDF'),
+            ),
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner batch Next reaches done screen with zero accept clicks',
-        nextDone && nextState !== null && nextState.doneVisible,
-        JSON.stringify(nextState),
+        'scanner Build PDF commits and closes to Images with imported pages',
+        scannerClosed && afterBuild !== null && afterBuild.pageRows >= 2,
+        JSON.stringify(afterBuild),
       );
       check(
-        'scanner done screen progress reads 2 of 2 viewed',
-        nextState !== null &&
-          typeof nextState.progress === 'string' &&
-          /2 of 2 viewed/.test(nextState.progress),
-        JSON.stringify(nextState),
+        'scanner build is one action (no second Build PDF gate after commit)',
+        afterBuild !== null && afterBuild.secondBuildGate === false,
+        JSON.stringify(afterBuild),
       );
-      // Done → camera → review round-trip (Back to camera + review CTA),
-      // then Next → done again for the surviving Build-PDF flow.
-      if (nextDone) {
-        await page.evaluate(() => {
-          try {
-            [...document.querySelectorAll('button')]
-              .find((b) => b.textContent === 'Back to camera')
-              ?.click();
-          } catch {
-            /* noop */
-          }
-        });
-        try {
-          await waitTotal(
-            page,
-            () => {
-              try {
-                return document.querySelector('[data-scan-capture]') !== null;
-              } catch {
-                return false;
-              }
-            },
-            { timeout: 30000 },
-          );
-        } catch {
-          /* measured via the review wait below */
-        }
-        // Processed entries skip ML (race resolves via the ready queue).
-        await clickCTAAndAwaitReview(page, 2);
-        let roundTripped = false;
-        try {
-          await waitTotal(
-            page,
-            () => {
-              try {
-                return document.querySelector('[data-scan-queue]') !== null;
-              } catch {
-                return false;
-              }
-            },
-            { timeout: 30000 },
-          );
-          await waitForResultImg(page);
-          roundTripped = true;
-        } catch {
-          roundTripped = false;
-        }
-        const roundTripState = await page.evaluate((reached) => {
-          try {
-            return {
-              cameraLeft: reached,
-              backInReview:
-                document.querySelector('[data-scan-queue]') !== null &&
-                document.querySelector('[data-crop-result-img]') !== null,
-            };
-          } catch {
-            return null;
-          }
-        }, roundTripped);
-        check(
-          'scanner done Back-to-camera returns via review CTA (round-trip)',
-          roundTripState !== null && roundTripState.backInReview,
-          JSON.stringify(roundTripState),
-        );
-        await clickBatchNext();
-        const redone = await waitDone();
-        check('scanner batch Next returns to done after round-trip', redone);
-      }
-      await page.evaluate(() => {
-        try {
-          [...document.querySelectorAll('button')]
-            .find((b) => b.textContent === 'Build PDF')
-            ?.click();
-        } catch {
-          /* noop */
-        }
-      });
-      // Done-screen Build PDF commits + exits to the Images tool; the tool's
-      // own build button starts the engine job (same pattern as the main
-      // Images section — the download link only exists after it).
-      await waitTotal(
-        page,
-        () => {
-          try {
-            return (
-              document.querySelector('[data-scanner-root]') === null &&
-              [...document.querySelectorAll('ul[aria-label="Pages in PDF order"] > li')].length >= 2
-            );
-          } catch {
-            return false;
-          }
-        },
-        { timeout: 60000 },
-      );
-      await page.evaluate(() => {
-        try {
-          [...document.querySelectorAll('button')]
-            .find((b) => b.textContent?.startsWith('Build PDF'))
-            ?.click();
-        } catch {
-          /* noop */
-        }
-      });
-      // D48 ContinueCard: the build lands on the choose branch — open its
+      // D48 ContinueCard: the auto-started build lands on the choose branch —
+      // open its Download branch so the anchor wait below resolves. No second
+      // Build PDF tap exists in this flow.
       // Download branch so the anchor wait below resolves.
       await openDownloadBranch(page);
       try {

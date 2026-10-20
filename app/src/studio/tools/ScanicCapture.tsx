@@ -113,10 +113,10 @@
  * warped pages are NEW renders (never original bytes; originals still pass
  * through byte-identical when inside the import pixel budget), and JPEG q0.9
  * full-res cuts multi-MB PNG bloat to a fraction with no readable-text loss
- * (4-page 22MB class problem). Commits run through `prepareImportFile`
+ * (4-page 22MB class problem). Commits hand candidate Files to ImagesTool's
  * normalization (same pixel budget as gallery imports) so 48MP sensor photos
- * can't bypass it — the commit never loses a page (normalization failure
- * falls back to the candidate file). Committed warped files keep
+ * can't bypass it; a failed import keeps the review queue recoverable instead
+ * of dropping the captures. Committed warped files keep
  * `scan-NNN.jpg` names with `image/jpeg` type.
  *
  * Corner adjust lives in `./ScanicReview` (dependency-free handles on the
@@ -128,7 +128,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { prepareImportFile } from './imageImport';
 import type { ScanicCorners } from './scan/index';
 import {
   DEFAULT_DETECTOR,
@@ -596,9 +595,21 @@ export interface ScanicCommittedPage {
   name: string;
 }
 
+/**
+ * Commit outcome. `void`/`true` keeps the historical fire-and-forget
+ * contract; `{ok:false}` keeps the scanner open with the queue intact and
+ * shows the returned message, so an import failure never silently discards
+ * the captured pages.
+ */
+export type ScanicCommitResult = { ok: true } | { ok: false; message: string } | void;
+
 export interface ScanicCaptureProps {
-  /** Receives accepted pages in capture order (warped JPEG or original File). */
-  onCommit: (pages: ScanicCommittedPage[]) => void;
+  /**
+   * Receives accepted pages in capture order (warped JPEG or original File).
+   * The scanner stays mounted until this resolves; `{ok:false}` keeps the
+   * review queue recoverable.
+   */
+  onCommit: (pages: ScanicCommittedPage[]) => Promise<ScanicCommitResult> | ScanicCommitResult;
   /** Leaves the scanner without committing (Back in ImagesTool). */
   onExit: () => void;
   /** Offset for `scan-NNN.jpg` numbering (existing camera pages). */
@@ -606,7 +617,29 @@ export interface ScanicCaptureProps {
 }
 
 type CameraState = 'requesting' | 'live' | 'denied' | 'unavailable' | 'insecure';
-type Phase = 'camera' | 'review' | 'done';
+type Phase = 'camera' | 'review';
+
+/**
+ * Detection-only decode budget. Scanic downscales to ≤800px internally, so
+ * reading back a full 12MP frame on the main thread is pure waste (and was
+ * the review-entry stall). Corners are scaled back to the original frame
+ * before they reach the queue, so warp still uses full-resolution pixels.
+ */
+const DETECT_DECODE_LONG_EDGE = 1600;
+
+/** Upper bound for one detection attempt; a stuck worker must not block Build. */
+const DETECT_TIMEOUT_MS = 20_000;
+const DETECT_TIMEOUT_NOTE = 'Detection took too long — the full frame will be used.';
+
+/**
+ * Upper bound for one crop render. Build is gated on warp completion, so a
+ * stuck worker must fall back visibly instead of disabling Build forever.
+ */
+const WARP_TIMEOUT_MS = 30_000;
+const WARP_TIMEOUT_NOTE = 'Auto-crop took too long — use the original instead.';
+
+/** Internal timeout marker shared by detection and warp guards. */
+const SCAN_TIMEOUT_ERROR = 'scan-work-timeout';
 
 interface QueueEntry {
   id: number;
@@ -617,6 +650,14 @@ interface QueueEntry {
   /** Detection baseline in image-space pixels; null while queued/detecting/failed. */
   corners: ScanicCorners | null;
   warpedUrl: string | null;
+  /**
+   * True while a warp (eager or Apply) is in flight for this page. Build is
+   * gated on it so an immediate Build cannot silently commit the original
+   * while the auto-crop result is still being rendered.
+   */
+  warping: boolean;
+  /** True after a crop render failed/timed out; the photo stays with an honest chip. */
+  warpFailed: boolean;
   /**
    * Queue-only lifecycle: `queued` parks the untouched original with its
    * photo thumb (shutter never decodes, never touches a worker);
@@ -714,6 +755,107 @@ async function decodeFileToImageData(file: File): Promise<ImageData> {
     if (!canvas || !ctx) throw new Error('2D canvas unavailable for scan decode');
     ctx.drawImage(el, 0, 0);
     return ctx.getImageData(0, 0, w, h);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Scales a detected quad from the capped detection frame to original pixels. */
+export function scaleScanicCorners(
+  corners: ScanicCorners,
+  scaleX: number,
+  scaleY: number,
+): ScanicCorners {
+  const scale = (point: { x: number; y: number }) => ({
+    x: point.x * scaleX,
+    y: point.y * scaleY,
+  });
+  return {
+    topLeft: scale(corners.topLeft),
+    topRight: scale(corners.topRight),
+    bottomRight: scale(corners.bottomRight),
+    bottomLeft: scale(corners.bottomLeft),
+  };
+}
+
+/** Lets the browser paint the review shell before ML decode work begins. */
+function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+/** Rejects when `promise` outlives `ms`; the underlying work is left to settle. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(SCAN_TIMEOUT_ERROR)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * Detection decode: decode the original (EXIF-oriented by `createImageBitmap`)
+ * but read back at most [`DETECT_DECODE_LONG_EDGE`] on the long edge. Returns
+ * the original oriented dimensions so the caller can scale the detected quad
+ * back into full-resolution coordinates.
+ */
+async function decodeFileForDetection(file: File): Promise<{
+  image: ImageData;
+  width: number;
+  height: number;
+}> {
+  if (typeof createImageBitmap === 'function') {
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error(`could not decode ${file.name}`);
+    }
+    try {
+      const width = bitmap.width;
+      const height = bitmap.height;
+      if (!(width > 0 && height > 0)) throw new Error(`could not decode ${file.name}`);
+      const scale = Math.min(1, DETECT_DECODE_LONG_EDGE / Math.max(width, height));
+      const decodeWidth = Math.max(1, Math.round(width * scale));
+      const decodeHeight = Math.max(1, Math.round(height * scale));
+      const canvas = makeCanvas(decodeWidth, decodeHeight);
+      const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+      if (!canvas || !ctx) throw new Error('2D canvas unavailable for scan decode');
+      ctx.drawImage(bitmap, 0, 0, decodeWidth, decodeHeight);
+      return {
+        image: ctx.getImageData(0, 0, decodeWidth, decodeHeight),
+        width,
+        height,
+      };
+    } finally {
+      try {
+        bitmap.close();
+      } catch {
+        // Release is best-effort; the readback is already detached.
+      }
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const { el, w, h } = await loadImage(url);
+    if (w === 0 || h === 0) throw new Error(`could not decode ${file.name}`);
+    const scale = Math.min(1, DETECT_DECODE_LONG_EDGE / Math.max(w, h));
+    const decodeWidth = Math.max(1, Math.round(w * scale));
+    const decodeHeight = Math.max(1, Math.round(h * scale));
+    const canvas = makeCanvas(decodeWidth, decodeHeight);
+    const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+    if (!canvas || !ctx) throw new Error('2D canvas unavailable for scan decode');
+    ctx.drawImage(el, 0, 0, decodeWidth, decodeHeight);
+    return { image: ctx.getImageData(0, 0, decodeWidth, decodeHeight), width: w, height: h };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -899,6 +1041,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [entries, setEntries] = useState<QueueEntry[]>([]);
   const [phase, setPhase] = useState<Phase>('camera');
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [building, setBuilding] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const buildingRef = useRef(false);
   const [camState, setCamState] = useState<CameraState>('requesting');
   const [camErrorKind, setCamErrorKind] = useState<
     'denied' | 'missing' | 'overconstrained' | 'unavailable'
@@ -1239,6 +1384,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           imageHeight: 0,
           corners: null,
           warpedUrl: null,
+          warping: false,
+          warpFailed: false,
           status: 'queued' as const,
           decision: 'warped' as const,
           note: null,
@@ -1289,7 +1436,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         ),
       );
       try {
-        let image: ImageData;
+        let decoded: { image: ImageData; width: number; height: number };
         let decodeMs: number | null = null;
         let exif: ExifProbeResult | null = null;
         try {
@@ -1297,7 +1444,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             typeof performance !== 'undefined' && typeof performance.now === 'function'
               ? performance.now()
               : Date.now();
-          image = await decodeFileToImageData(entry.original);
+          decoded = await withTimeout(decodeFileForDetection(entry.original), DETECT_TIMEOUT_MS);
           const decodeEnd =
             typeof performance !== 'undefined' && typeof performance.now === 'function'
               ? performance.now()
@@ -1308,8 +1455,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           } catch {
             exif = null;
           }
-        } catch {
+        } catch (error) {
           if (!mountedRef.current) return;
+          const note =
+            error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+              ? DETECT_TIMEOUT_NOTE
+              : 'Could not decode this image — the full frame will be used.';
           setEntries((prev) =>
             prev.map((e) =>
               e.id === entry.id
@@ -1318,7 +1469,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     imageWidth: 0,
                     imageHeight: 0,
                     status: 'ready' as const,
-                    note: 'Could not decode this image — the full frame will be used.',
+                    warpFailed: false,
+                    note,
                   }
                 : e,
             ),
@@ -1326,8 +1478,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           return;
         }
         if (!mountedRef.current) return;
-        const w = image.width;
-        const h = image.height;
+        const w = decoded.width;
+        const h = decoded.height;
+        const decodeWidth = decoded.image.width;
+        const decodeHeight = decoded.image.height;
         setEntries((prev) =>
           prev.map((e) =>
             e.id === entry.id
@@ -1338,47 +1492,49 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         try {
           // ML-only (D46): a null quad means the ML found no page, and the
           // entry settles croppable full-frame below. No guessed crops, ever.
-          const result = await getScanClient().detect(
-            image,
-            DEFAULT_DETECTOR,
-            decodeMs !== null ? { decodeMs } : undefined,
+          const result = await withTimeout(
+            getScanClient().detect(
+              decoded.image,
+              DEFAULT_DETECTOR,
+              decodeMs !== null ? { decodeMs } : undefined,
+            ),
+            DETECT_TIMEOUT_MS,
           );
           logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
           if (!mountedRef.current) return;
-          if (result.corners !== null) {
-            setEntries((prev) =>
-              prev.map((e) =>
-                e.id === entry.id
-                  ? {
-                      ...e,
-                      status: 'ready' as const,
-                      corners: result.corners,
-                      note: null,
-                    }
-                  : e,
-              ),
-            );
-            return;
-          }
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === entry.id
-                ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
-                : e,
-            ),
-          );
-        } catch {
-          // Worker crash/unavailable: degrade to full-frame, honestly labelled.
-          // An ML miss inside the worker lands here the same way.
-          if (!mountedRef.current) return;
+          const corners =
+            result.corners === null
+              ? null
+              : scaleScanicCorners(result.corners, w / decodeWidth, h / decodeHeight);
           setEntries((prev) =>
             prev.map((e) =>
               e.id === entry.id
                 ? {
                     ...e,
                     status: 'ready' as const,
+                    warpFailed: false,
+                    corners,
+                    note: corners === null ? FULL_FRAME_MISS_NOTE : null,
+                  }
+                : e,
+            ),
+          );
+        } catch (error) {
+          // Worker crash/unavailable/timeout: degrade to full-frame, honestly labelled.
+          if (!mountedRef.current) return;
+          const note =
+            error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+              ? DETECT_TIMEOUT_NOTE
+              : 'Auto-detect failed on this image — the full frame will be used.';
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entry.id
+                ? {
+                    ...e,
+                    status: 'ready' as const,
+                    warpFailed: false,
                     corners: null,
-                    note: 'Auto-detect failed on this image — the full frame will be used.',
+                    note,
                   }
                 : e,
             ),
@@ -2084,7 +2240,14 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 : e,
             ),
           );
-          let image: ImageData;
+          // Paint the review shell (already committed) before the decode
+          // readback starts. Without this yield the first review frame and
+          // the main-thread decode compete, which is the review-entry stall.
+          await yieldToPaint();
+          if (drainGenRef.current !== gen || !mountedRef.current) return;
+          if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+
+          let decoded: { image: ImageData; width: number; height: number };
           let decodeMs: number | null = null;
           let exif: ExifProbeResult | null = null;
           try {
@@ -2092,7 +2255,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               typeof performance !== 'undefined' && typeof performance.now === 'function'
                 ? performance.now()
                 : Date.now();
-            image = await decodeFileToImageData(entry.original);
+            decoded = await withTimeout(decodeFileForDetection(entry.original), DETECT_TIMEOUT_MS);
             const decodeEnd =
               typeof performance !== 'undefined' && typeof performance.now === 'function'
                 ? performance.now()
@@ -2103,9 +2266,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             } catch {
               exif = null;
             }
-          } catch {
+          } catch (error) {
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+            const note =
+              error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+                ? DETECT_TIMEOUT_NOTE
+                : 'Could not decode this image — the full frame will be used.';
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entry.id
@@ -2114,7 +2281,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                       imageWidth: 0,
                       imageHeight: 0,
                       status: 'ready' as const,
-                      note: 'Could not decode this image — the full frame will be used.',
+                      warpFailed: false,
+                      note,
                     }
                   : e,
               ),
@@ -2123,48 +2291,59 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           }
           if (drainGenRef.current !== gen || !mountedRef.current) return;
           if (!entriesRef.current.some((e) => e.id === entry.id)) return;
-          const w = image.width;
-          const h = image.height;
+          // Original oriented dimensions — the quad below is scaled back to
+          // this space so warp keeps full-resolution pixels.
+          const w = decoded.width;
+          const h = decoded.height;
+          const decodeWidth = decoded.image.width;
+          const decodeHeight = decoded.image.height;
           setEntries((prev) =>
             prev.map((e) => (e.id === entry.id ? { ...e, imageWidth: w, imageHeight: h } : e)),
           );
           try {
             // ML-only (D46): a null quad means the ML found no page, and the
             // entry settles croppable full-frame below. No guessed crops, ever.
-            const result = await detectionLaneClient(pool.clients, workerIndex).detect(
-              image,
-              DEFAULT_DETECTOR,
-              decodeMs !== null ? { decodeMs } : undefined,
+            const result = await withTimeout(
+              detectionLaneClient(pool.clients, workerIndex).detect(
+                decoded.image,
+                DEFAULT_DETECTOR,
+                decodeMs !== null ? { decodeMs } : undefined,
+              ),
+              DETECT_TIMEOUT_MS,
             );
             logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
-            if (result.corners !== null) {
-              setEntries((prev) =>
-                prev.map((e) =>
-                  e.id === entry.id
-                    ? { ...e, status: 'ready' as const, corners: result.corners, note: null }
-                    : e,
-                ),
-              );
-              return;
-            }
+            const corners =
+              result.corners === null
+                ? null
+                : scaleScanicCorners(result.corners, w / decodeWidth, h / decodeHeight);
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entry.id
-                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
+                  ? {
+                      ...e,
+                      status: 'ready' as const,
+                      warpFailed: false,
+                      corners,
+                      note: corners === null ? FULL_FRAME_MISS_NOTE : null,
+                    }
                   : e,
               ),
             );
-          } catch {
-            // Worker crash/unavailable/cancel-raced: degrade to full-frame,
-            // honestly labelled. A cancelled generation drops above instead.
+          } catch (error) {
+            // Worker crash/unavailable/timeout/cancel-raced: degrade to
+            // full-frame, honestly labelled. A cancelled generation drops above.
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
+            const note =
+              error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+                ? DETECT_TIMEOUT_NOTE
+                : FULL_FRAME_MISS_NOTE;
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entry.id
-                  ? { ...e, status: 'ready' as const, corners: null, note: FULL_FRAME_MISS_NOTE }
+                  ? { ...e, status: 'ready' as const, warpFailed: false, corners: null, note }
                   : e,
               ),
             );
@@ -2212,6 +2391,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const goToReview = useCallback(
     (index?: number) => {
       setReviewIndex(index ?? 0);
+      setBuildError(null);
       setPhase('review');
       void startReviewDrain();
     },
@@ -2260,14 +2440,25 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       // valid, so paging mid-warp cannot strand it). Detection is untouched.
       if (warpInflightRef.current.get(id) !== undefined) getWarpClient().terminate();
       setCardError(null);
+      setEntries((prev) =>
+        prev.map((e) => (e.id === id ? { ...e, warping: true, warpFailed: false } : e)),
+      );
       let image: ImageData;
       try {
         // Fresh full-res copy per warp: the worker transfers (neuters) the
         // pixels, and nothing decoded is retained between warps.
-        image = await decodeFileToImageData(entry.original);
-      } catch {
-        if (mountedRef.current && warpSeqRef.current.get(id) === seq)
-          setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+        image = await withTimeout(decodeFileToImageData(entry.original), WARP_TIMEOUT_MS);
+      } catch (error) {
+        if (mountedRef.current && warpSeqRef.current.get(id) === seq) {
+          setEntries((prev) =>
+            prev.map((e) => (e.id === id ? { ...e, warping: false, warpFailed: true } : e)),
+          );
+          setCardError(
+            error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+              ? WARP_TIMEOUT_NOTE
+              : 'Warp failed on this page — nothing changed. Use the original instead.',
+          );
+        }
         return;
       }
       if (!mountedRef.current) return;
@@ -2275,11 +2466,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (!entriesRef.current.some((e) => e.id === id)) return;
       warpInflightRef.current.set(id, seq);
       try {
-        const warped = await getWarpClient().extract(image, corners);
+        const warped = await withTimeout(getWarpClient().extract(image, corners), WARP_TIMEOUT_MS);
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
         if (!entriesRef.current.some((e) => e.id === id)) return;
-        const blob = await imageDataToJpeg(warped, 0.9);
+        const blob = await withTimeout(imageDataToJpeg(warped, 0.9), WARP_TIMEOUT_MS);
         if (!blob) throw new Error('no jpeg');
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
@@ -2289,7 +2480,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         const url = trackUrl(URL.createObjectURL(blob));
         lastWarpedQuadRef.current.set(id, quadKey);
         setEntries((prev) =>
-          prev.map((e) => (e.id === id ? { ...e, corners, warpedUrl: url } : e)),
+          prev.map((e) =>
+            e.id === id ? { ...e, corners, warpedUrl: url, warping: false, warpFailed: false } : e,
+          ),
         );
       } catch (error) {
         if (!mountedRef.current) return;
@@ -2304,11 +2497,21 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           // retry re-enters through the eager effect (warpRetryTick), which
           // clears the note on start and commits on success.
           eagerAttemptRef.current.delete(id);
+          setEntries((prev) =>
+            prev.map((e) => (e.id === id ? { ...e, warping: false, warpFailed: false } : e)),
+          );
           setCardError('Auto-crop was interrupted — retrying…');
           setWarpRetryTick((t) => t + 1);
           return;
         }
-        setCardError('Warp failed on this page — nothing changed. Use the original instead.');
+        setEntries((prev) =>
+          prev.map((e) => (e.id === id ? { ...e, warping: false, warpFailed: true } : e)),
+        );
+        setCardError(
+          error instanceof Error && error.message === SCAN_TIMEOUT_ERROR
+            ? WARP_TIMEOUT_NOTE
+            : 'Warp failed on this page — nothing changed. Use the original instead.',
+        );
       } finally {
         if (warpInflightRef.current.get(id) === seq) warpInflightRef.current.delete(id);
       }
@@ -2411,51 +2614,66 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   }, [phase, currentId, safeIndex]);
 
   /**
-   * Commits the queue in capture order through `prepareImportFile`
-   * normalization (the same import pixel budget gallery uploads run through,
-   * so a 48MP sensor photo can't bypass it): warped verdicts commit their
-   * warp JPEG, original verdicts (or warped verdicts with no warp yet)
-   * commit the byte-identical original — renamed to `scan-NNN.jpg`, never
-   * re-encoded in place. Normalization runs sequentially (one decode at a
-   * time, the import memory bound) and any per-file failure falls back to
-   * the candidate file, so the commit never loses a page. Warp blobs are
-   * dropped on commit: the committed Files own the bytes from here on.
+   * Commits the queue in capture order. The scanner owns capture/verdict
+   * choice only; the single import-normalization pass (decode, thumb,
+   * pixel-budget resize) belongs to `ImagesTool.importFiles`, which receives
+   * these Files and hands back the committed pages. Warp verdicts commit
+   * their warp JPEG; original verdicts commit the byte-identical original —
+   * renamed to `scan-NNN.jpg`, never re-encoded in place here. Build is
+   * gated until every warped verdict owns its render (or the user explicitly
+   * chooses the original), so a tap can never silently downgrade a crop.
+   *
+   * The scanner stays mounted until `onCommit` resolves: a failed import
+   * returns `{ok:false}` and keeps the review queue recoverable instead of
+   * dropping the captures on the floor.
    */
   const buildPdf = useCallback(async () => {
-    const pages: ScanicCommittedPage[] = [];
-    for (let i = 0; i < accepted.length; i += 1) {
-      const entry = accepted[i];
+    if (buildingRef.current) return;
+    const entriesNow = entriesRef.current;
+    if (entriesNow.length === 0) return;
+    if (entriesNow.some((entry) => entry.status !== 'ready')) {
+      setBuildError('Wait for every page to finish preparing, then build.');
+      return;
+    }
+    if (entriesNow.some((entry) => entry.decision !== 'original' && entry.warping)) {
+      setBuildError('Wait for the crop previews to finish, or choose Use original.');
+      return;
+    }
+    buildingRef.current = true;
+    setBuilding(true);
+    setBuildError(null);
+    const pages: ScanicCommittedPage[] = entriesNow.map((entry, i) => {
       const name = formatScanName(startIndex + i);
-      let candidate: File;
       if (entry.decision !== 'original') {
         const blob = warpedBlobsRef.current.get(entry.id);
-        if (blob) candidate = new File([blob], name, { type: 'image/jpeg' });
-        else
-          candidate = new File([entry.original], name, {
-            type: entry.original.type || 'image/jpeg',
-          });
-      } else {
-        // Verdict `original`: the queued File, byte-identical — renamed,
-        // never re-encoded (unless over the import pixel budget below).
-        candidate = new File([entry.original], name, {
+        if (blob) return { file: new File([blob], name, { type: 'image/jpeg' }), name };
+      }
+      return {
+        file: new File([entry.original], name, {
           type: entry.original.type || 'image/jpeg',
-        });
+        }),
+        name,
+      };
+    });
+    try {
+      const result = await onCommit(pages);
+      if (!mountedRef.current) return;
+      if (result !== undefined && !result.ok) {
+        setBuildError(result.message);
+        return;
       }
-      try {
-        const prepared = await prepareImportFile(candidate);
-        const out =
-          prepared.file instanceof File
-            ? prepared.file
-            : new File([prepared.file], prepared.name, { type: 'image/jpeg' });
-        pages.push({ file: out, name: out.name });
-      } catch {
-        pages.push({ file: candidate, name });
-      }
+      warpedBlobsRef.current.clear();
+      onExit();
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setBuildError(
+        error instanceof Error ? error.message : 'Could not build the PDF from these pages.',
+      );
+    } finally {
+      buildingRef.current = false;
+      if (mountedRef.current) setBuilding(false);
     }
-    warpedBlobsRef.current.clear();
-    onCommit(pages);
-    onExit();
-  }, [accepted, onCommit, onExit, startIndex]);
+  }, [onCommit, onExit, startIndex]);
 
   const cameraHelp =
     camState === 'insecure'
@@ -2472,12 +2690,30 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * Preparing progress (review phase only): done = `ready` entries, total =
    * queue length. NON-BLOCKING: ready pages stay interactive under a slim
    * `[data-review-preparing]` banner (L-23 viewing-is-verdict) — the pager,
-   * filmstrip, Add, and Next never gate on preparing. Pending thumbs carry
-   * the … overlay until they settle `ready`; eager warp still waits for it.
+   * filmstrip, and Add never gate on preparing. Build PDF is the exception:
+   * it waits for both detection and the crop render so it cannot commit a
+   * raw original behind the user's back. Pending thumbs carry the … overlay
+   * until they settle `ready`; eager warp still waits for it.
    */
   const preparingTotal = queue.length;
   const preparingDone = queue.filter((e) => e.status === 'ready').length;
   const preparing = phase === 'review' && queue.length > 0 && preparingDone < preparingTotal;
+  /**
+   * A page still rendering its crop would commit the original if Build ran
+   * now. Keep the build gated until every warped verdict owns its render;
+   * "Use original" is the explicit escape hatch.
+   */
+  const cropsPending = queue.some(
+    (e) => e.status === 'ready' && e.decision !== 'original' && e.warping,
+  );
+  /** Data hook for tests/E2E: the review can only build from `ready`. */
+  const buildState = building
+    ? 'building'
+    : preparing
+      ? 'preparing'
+      : cropsPending
+        ? 'crops'
+        : 'ready';
 
   /**
    * ONE status pill, rendered ONLY when actionable (minimal finder — a quiet
@@ -2980,6 +3216,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             imageHeight={current.imageHeight}
             corners={current.corners}
             warpedUrl={current.warpedUrl}
+            warpFailed={current.warpFailed}
             detecting={current.status !== 'ready'}
             note={current.note}
             pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
@@ -3050,60 +3287,64 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               + Add
             </button>
           </div>
-          {/* Batch bar: discard-all (confirm-free, everything) vs Next.
-              Next needs >=1 page (implicit accept — no per-page gate). */}
+          {/* Batch bar: discard-all vs the single real build action. Build is
+              gated on every page settling `ready` AND its crop render
+              settling — otherwise a tap would silently commit full-frame
+              originals for pages whose crop was still being computed. */}
           <div
             data-batch-bar
+            data-build-state={buildState}
             className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
           >
             <button
               type="button"
+              disabled={building}
               onClick={discardAll}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:text-ink-300 dark:hover:bg-ink-700"
+              className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-ink-300 dark:hover:bg-ink-700"
             >
               Discard scans
             </button>
             <button
               type="button"
-              disabled={queue.length === 0}
-              onClick={() => setPhase('done')}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
-
-      {phase === 'done' && (
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))] text-center">
-          <p className="font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
-            {accepted.length > 0 ? 'All pages ready' : 'No pages kept'}
-          </p>
-          <p
-            data-review-progress
-            aria-label={`${visitedCount} of ${accepted.length} viewed`}
-            className="text-xs text-ink-400 dark:text-ink-300"
-          >
-            {visitedCount} of {accepted.length} viewed
-          </p>
-          <div className="flex flex-wrap justify-center gap-2">
-            <button
-              type="button"
-              disabled={accepted.length === 0}
+              data-build-pdf
+              disabled={queue.length === 0 || preparing || cropsPending || building}
               onClick={() => void buildPdf()}
               className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
             >
-              Build PDF
-            </button>
-            <button
-              type="button"
-              onClick={() => setPhase('camera')}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              Back to camera
+              {building
+                ? 'Building PDF…'
+                : preparing
+                  ? `Preparing pages… ${preparingDone} of ${preparingTotal}`
+                  : cropsPending
+                    ? 'Finishing crops…'
+                    : `Build PDF · ${accepted.length} page${accepted.length === 1 ? '' : 's'}`}
             </button>
           </div>
+          {buildError !== null && (
+            <p data-build-error role="alert" className="text-xs text-red-600 dark:text-red-400">
+              {buildError}
+            </p>
+          )}
+        </div>
+      )}
+
+      {building && (
+        <div
+          data-build-overlay
+          role="status"
+          aria-live="polite"
+          className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-paper-50/95 px-6 text-center backdrop-blur-sm dark:bg-ink-900/95"
+        >
+          <span
+            aria-hidden
+            className="h-9 w-9 animate-spin rounded-full border-2 border-brass-400 border-t-transparent motion-reduce:animate-none"
+          />
+          <p className="font-display text-lg font-semibold tracking-tight text-ink-900 dark:text-paper-100">
+            Building PDF…
+          </p>
+          <p className="max-w-xs text-sm text-ink-500 dark:text-ink-300">
+            {`Adding ${accepted.length} page${accepted.length === 1 ? '' : 's'}, then creating the PDF.`}
+          </p>
         </div>
       )}
     </div>

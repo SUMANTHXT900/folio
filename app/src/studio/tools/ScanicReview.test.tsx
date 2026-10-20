@@ -36,6 +36,7 @@ function baseProps(overrides: Partial<ScanicReviewProps> = {}): ScanicReviewProp
     imageHeight: H,
     corners: detectedCorners(),
     warpedUrl: 'warped.jpg' as string | null,
+    warpFailed: false,
     detecting: false,
     note: null as string | null,
     pageLabel: 'Page 1 of 2',
@@ -247,12 +248,26 @@ describe('ScanicReview', () => {
     expect(screen.getByText('Auto-detect found no page — adjust to crop manually.')).toBeTruthy();
   });
 
-  it('shows a Processing skeleton when corners exist but no warp yet — never the bare photo', () => {
+  it('shows the queued photo with a Processing chip when corners exist but no warp yet', () => {
     const { container } = render(<ScanicReview {...baseProps({ warpedUrl: null })} />);
     const result = container.querySelector('[data-crop-result]');
-    expect(result?.querySelectorAll('img').length).toBe(0);
+    expect(result?.querySelectorAll('img').length).toBe(1);
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
     expect(screen.getByText('Processing auto-crop…')).toBeTruthy();
     expect(container.querySelector('[data-detect-overlay]')).toBeNull();
+  });
+
+  it('labels a failed crop render honestly instead of pretending it is still processing', () => {
+    const { container } = render(
+      <ScanicReview {...baseProps({ warpedUrl: null, warpFailed: true })} />,
+    );
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
+    expect(screen.getByText('Auto-crop failed — use original')).toBeTruthy();
+    expect(screen.queryByText('Processing auto-crop…')).toBeNull();
   });
 
   it('Use original swaps the single canvas to the unprocessed photo with an honest chip', () => {
@@ -280,11 +295,14 @@ describe('ScanicReview', () => {
     expect(screen.queryByText('Original photo — unprocessed')).toBeNull();
   });
 
-  it('shows a Preparing skeleton while detecting', () => {
+  it('shows the queued photo with a Detecting chip while detecting', () => {
     const { container } = render(<ScanicReview {...baseProps({ detecting: true })} />);
     const result = container.querySelector('[data-crop-result]');
-    expect(result?.textContent).toContain('Preparing…');
-    expect(result?.querySelectorAll('img').length).toBe(0);
+    expect(result?.textContent).toContain('Detecting crop…');
+    expect(result?.querySelectorAll('img').length).toBe(1);
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
   });
 
   it('reactively swaps the single canvas src when a fresh warp lands', () => {
@@ -296,9 +314,12 @@ describe('ScanicReview', () => {
     expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
       'warped-2.jpg',
     );
-    // Losing the warp falls back to the skeleton — still never a bare photo.
+    // Losing the warp falls back to the photo + Processing chip — never a blank box.
     rerender(<ScanicReview {...baseProps({ warpedUrl: null })} />);
-    expect(container.querySelector('[data-crop-result]')?.querySelectorAll('img').length).toBe(0);
+    expect(container.querySelector('[data-crop-result]')?.querySelectorAll('img').length).toBe(1);
+    expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
+      'photo.jpg',
+    );
     expect(screen.getByText('Processing auto-crop…')).toBeTruthy();
   });
 

@@ -2,7 +2,11 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
-## v1.12.3 — Audit reliability pass + capture diagnostics (`dev`, 2026-10-20)
+## v1.12.4 - Scanner review/build flow repair (`dev`, 2026-10-20)
+
+Review entry now paints the queued photo immediately instead of decoding full-resolution pixels on the main thread first. ML detection decodes at <=1600px on the long edge and scales the detected quad back to original pixels, so warp still uses full resolution; detection and warp are time-bounded. The separate "All pages ready" screen is gone: review `Build PDF` hands candidates to one `importFiles` pass and auto-starts one `buildPages` run, with no duplicate `prepareImportFile`. Build is gated on detection plus crop settle (`data-build-state="ready"`), the scanner stays mounted until the commit resolves, and failed/partial imports keep or roll back the queue instead of losing or duplicating captures. Full gate: frontend 792/792 across 56 files, production build 53 entries / 7903.47 KiB, canonical E2E 102/102 + 4 SKIP. Cloudflare Pages `dev` deployment `c50ee343`; alias serves `/assets/index-DjH0_YOG.js` (v1.12.4, build time `2026-10-20T17:13:37.475Z`).
+
+## v1.12.3 - Audit reliability pass + capture diagnostics (`dev`, 2026-10-20)
 
 Whole-repo audit (20-agent review) implemented as P0–P3 fix waves: engine panic closures and wire-shape guards, mid-run cancellation proven on all 10 operations, worker message validation, honest errors/cancel/progress/downloads, keyboard and screen-reader support across tools and dialogs, scanner capture-race fixes, and security headers. Dev-only capture-timing diagnostics (per-step spans + Download timings JSON) for localizing the F-22 shutter feel on real phones. Full gate green: engine 433, frontend 783, build 53 entries / 7896.14 KiB, E2E 104/104 + 4 SKIP. Follow-up on dev: experiment B (bare-capture switch) for the F-22 A/B.
 

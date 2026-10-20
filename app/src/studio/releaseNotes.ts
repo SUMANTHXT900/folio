@@ -18,6 +18,15 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.4 release',
+    date: '2026-10-20',
+    notes: [
+      'The scanner review opens instantly and has one Build PDF action: pages are added and the PDF starts building without a second tap.',
+      'Auto-crop settles before Build is enabled, so a build no longer silently uses an uncropped photo.',
+      'If adding pages fails, your scans stay in review so you can retry instead of losing the queue.',
+    ],
+  },
+  {
     build: 'v1.12.3 release',
     date: '2026-10-20',
     notes: [

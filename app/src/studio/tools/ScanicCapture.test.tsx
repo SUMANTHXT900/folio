@@ -31,8 +31,10 @@ import ScanicCapture, {
   hasZoomCapability,
   isLandscapeScreen,
   isStableFrame,
+  scaleScanicCorners,
   scoreBackCamera,
   shouldAutoFire,
+  type ScanicCommitResult,
 } from './ScanicCapture';
 import type { ScanicCorners } from './scan/index';
 
@@ -128,10 +130,16 @@ async function injectAndReview(...files: File[]) {
   fireEvent.click(cta);
   await findQ('[data-scan-queue]');
   // The review drain is deferred ML: wait until every page settles `ready`
-  // (the slim preparing banner clears) before interacting.
-  await waitFor(() => {
-    expect(document.querySelector('[data-review-preparing]')).toBeNull();
-  });
+  // AND its crop render settles, so Build is enabled before interacting.
+  const barReady = () => {
+    const bar = document.querySelector('[data-batch-bar]');
+    expect(bar?.getAttribute('data-build-state')).toBe('ready');
+  };
+  await waitFor(barReady);
+  // Eager warps start in an effect after the first ready render; give them a
+  // tick, then require the gate to be stable before handing control back.
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await waitFor(barReady);
 }
 
 /** Waits until the review preparing banner clears (all pages `ready`). */
@@ -238,6 +246,24 @@ describe('formatScanName', () => {
   it('zero-pads capture-order names', () => {
     expect(formatScanName(0)).toBe('scan-001.jpg');
     expect(formatScanName(11)).toBe('scan-012.jpg');
+  });
+});
+
+describe('detection coordinate scaling', () => {
+  it('maps a capped detection quad back to original pixels', () => {
+    const scaled = scaleScanicCorners(detectedCorners(), 2, 2);
+    expect(scaled).toEqual({
+      topLeft: { x: 128, y: 96 },
+      topRight: { x: 1152, y: 96 },
+      bottomRight: { x: 1152, y: 864 },
+      bottomLeft: { x: 128, y: 864 },
+    });
+  });
+
+  it('handles non-square scale factors independently', () => {
+    const scaled = scaleScanicCorners(detectedCorners(), 1.25, 2);
+    expect(scaled.topLeft).toEqual({ x: 80, y: 96 });
+    expect(scaled.bottomRight).toEqual({ x: 720, y: 864 });
   });
 });
 
@@ -474,15 +500,10 @@ describe('result-FIRST queue', () => {
     fireEvent.click(q('[data-page-next]'));
     await screen.findByText('Page 2 of 2');
     await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
-    const next = screen.getByText('Next', { exact: true }) as HTMLButtonElement;
-    expect(next.disabled).toBe(false);
-    fireEvent.click(next);
-    await screen.findByText('All pages ready');
-
-    expect(screen.getByText('Build PDF', { exact: true })).toBeTruthy();
-    expect(screen.getByText('Back to camera', { exact: true })).toBeTruthy();
-
-    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    const build = q('[data-build-pdf]') as HTMLButtonElement;
+    expect(build.disabled).toBe(false);
+    expect(build.textContent).toContain('Build PDF');
+    fireEvent.click(build);
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     expect(onExit).toHaveBeenCalledTimes(1);
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
@@ -504,11 +525,9 @@ describe('result-FIRST queue', () => {
     render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [7, 7, 7]));
     fireEvent.click(screen.getByText('Use original', { exact: true }));
-    // Toggle verdict: stays on the same page (no auto-advance to done).
+    // Toggle verdict: stays on the same page (no auto-advance).
     expect(screen.getByText('Page 1 of 1')).toBeTruthy();
-    fireEvent.click(screen.getByText('Next', { exact: true }));
-    await screen.findByText('All pages ready');
-    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    fireEvent.click(q('[data-build-pdf]'));
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
@@ -529,14 +548,51 @@ describe('result-FIRST queue', () => {
     fireEvent.click(screen.getByText('Use original', { exact: true }));
     fireEvent.click(screen.getByText('Use original', { exact: true }));
     expect(screen.getByText('Page 1 of 1')).toBeTruthy();
-    fireEvent.click(screen.getByText('Next', { exact: true }));
-    await screen.findByText('All pages ready');
-    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    fireEvent.click(q('[data-build-pdf]'));
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].file.type).toBe('image/jpeg');
     expect(await pages[0].file.text()).toBe('jpeg-bytes');
+  });
+
+  it('keeps the review queue recoverable when the commit fails', async () => {
+    const onCommit = vi
+      .fn<() => Promise<ScanicCommitResult>>()
+      .mockResolvedValue({ ok: false, message: 'Import failed.' });
+    const onExit = vi.fn();
+    render(<ScanicCapture onCommit={onCommit} onExit={onExit} />);
+    await injectAndReview(photo('a.jpg', [1]));
+    await waitFor(() => {
+      expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    fireEvent.click(q('[data-build-pdf]'));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    expect((await findQ('[data-build-error]')).textContent).toContain('Import failed.');
+    expect(onExit).not.toHaveBeenCalled();
+    expect(q('[data-scan-queue]')).toBeTruthy();
+    expect(q('[data-build-pdf]')).toBeTruthy();
+  });
+
+  it('accepts only one commit while a build handoff is in flight', async () => {
+    let settle!: (result: ScanicCommitResult) => void;
+    const onCommit = vi.fn(
+      () =>
+        new Promise<ScanicCommitResult>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    render(<ScanicCapture onCommit={onCommit} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]));
+
+    const build = q('[data-build-pdf]') as HTMLButtonElement;
+    fireEvent.click(build);
+    fireEvent.click(build);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(q('[data-build-overlay]')).toBeTruthy();
+
+    await act(async () => settle({ ok: true }));
   });
 
   it('discards a page from the queue', async () => {
@@ -571,11 +627,11 @@ describe('eager warp', () => {
     const img = (await findQ('[data-crop-result-img]')) as HTMLImageElement;
     expect(img.src).toMatch(/^blob:mock-/);
     await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
-    // Visited on show; Next is gated open (>=1 page) without any accept.
+    // Visited on show; Build is gated open (>=1 ready page) without any accept.
     await waitFor(() => {
       expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 1 viewed');
     });
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('warps once per quad — no re-warp loop for the same corners', async () => {
@@ -633,6 +689,33 @@ describe('eager warp paging (no stranded victim)', () => {
     __clientMocks.terminate.mockReset();
   });
 
+  it('gates Build PDF until the current crop render settles', async () => {
+    HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
+      cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+    };
+    const pending: Array<{
+      resolve: (v: unknown) => void;
+      reject: (e: unknown) => void;
+    }> = [];
+    stubDeferredExtract(pending);
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    injectFiles(photo('a.jpg', [1]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    await findQ('[data-scan-queue]');
+    await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(1));
+    // Ready but mid-warp: Build must not silently commit the original.
+    const build = q('[data-build-pdf]') as HTMLButtonElement;
+    expect(build.disabled).toBe(true);
+    expect(build.textContent).toBe('Finishing crops…');
+    await act(async () => {
+      for (const p of pending.splice(0)) p.resolve(fakeWarpImage());
+    });
+    await waitFor(() => {
+      expect(q('[data-batch-bar]').getAttribute('data-build-state')).toBe('ready');
+    });
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('pages mid-warp without killing the other page warp — both pages commit', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
@@ -681,7 +764,12 @@ describe('eager warp paging (no stranded victim)', () => {
     stubDeferredExtract(pending);
     stubTerminateToCancel(pending);
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
-    await injectAndReview(photo('a.jpg', [1]));
+    // Enter review manually: this test intentionally leaves the eager warp
+    // pending, so the Build gate cannot settle before the cancel/retry.
+    injectFiles(photo('a.jpg', [1]));
+    fireEvent.click(await findQ('[data-review-cta]'));
+    await findQ('[data-scan-queue]');
+    await waitForPrepared();
     await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBe(1));
     // Worker loss races the warp: the pending warp rejects as cancelled.
     await act(async () => {
@@ -733,7 +821,8 @@ describe('eager warp paging (no stranded victim)', () => {
       pending.shift()?.resolve(fakeWarpImage());
     });
     await new Promise((r) => setTimeout(r, 50));
-    expect(document.querySelector('[data-crop-result-img]')).toBeNull();
+    const pendingImg = document.querySelector('[data-crop-result-img]') as HTMLImageElement | null;
+    expect(pendingImg?.alt).toBe('Photo being processed');
     expect(screen.queryByText(/Processing auto-crop/)).not.toBeNull();
     // The fresh warp commits when it resolves.
     await act(async () => {
@@ -1109,10 +1198,11 @@ describe('deferred review drain', () => {
     const preparing = await findQ('[data-review-preparing]');
     expect(preparing.getAttribute('role')).toBe('status');
     expect(preparing.textContent).toMatch(/Preparing pages… \d+ of 2/);
-    // …pager, filmstrip, Add, and Next stay enabled while preparing
-    // (non-blocking review — viewing-is-verdict)…
+    // …pager, filmstrip, and Add stay enabled while preparing
+    // (non-blocking review — viewing-is-verdict), but Build is gated until
+    // every crop settles so it cannot silently commit raw originals.
     expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(true);
     expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(false);
     for (const thumb of Array.from(document.querySelectorAll('[data-film-thumb]'))) {
       expect((thumb as HTMLButtonElement).disabled).toBe(false);
@@ -1135,6 +1225,9 @@ describe('deferred review drain', () => {
     fireEvent.click(cta);
     await findQ('[data-review-preparing]');
     expect(q('[data-review-preparing]').textContent).toMatch(/Preparing pages… \d+ of 2/);
+    // The drain yields a paint before decoding, so wait until a detect is
+    // actually in flight before cancelling it.
+    await waitFor(() => expect(mockDetect).toHaveBeenCalled());
     fireEvent.click(q('[data-review-preparing-cancel]'));
     // Cancel lands back on the camera phase with the queue intact…
     await waitFor(() => {
@@ -1145,7 +1238,7 @@ describe('deferred review drain', () => {
     // …and re-entering review re-drains the interrupted pages.
     fireEvent.click(q('[data-review-cta]'));
     await findQ('[data-review-preparing]');
-    expect(mockDetect.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(mockDetect.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
   it('lets review navigate while preparing (non-blocking: ready pages stay interactive)', async () => {
@@ -1168,9 +1261,9 @@ describe('deferred review drain', () => {
     fireEvent.click(q('[data-page-next]'));
     await screen.findByText('Page 2 of 2');
     expect(document.querySelector('[data-review-preparing]')).not.toBeNull();
-    // Add-back and batch Next stay live too.
+    // Add-back stays live; Build waits for every crop to settle.
     expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(true);
     // Preparing cancel still parks back to the camera with the queue intact.
     fireEvent.click(q('[data-review-preparing-cancel]'));
     await waitFor(() => {
@@ -1191,7 +1284,7 @@ describe('deferred review drain', () => {
 });
 
 describe('review filmstrip + batch bar', () => {
-  it('renders numbered thumbs, pager, add-back, and an ungated Next that reaches done', async () => {
+  it('renders numbered thumbs, pager, add-back, and an enabled Build PDF', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
@@ -1201,8 +1294,8 @@ describe('review filmstrip + batch bar', () => {
     expect(document.body.querySelectorAll('[data-film-thumb]').length).toBe(2);
     expect(q('[data-scan-add]').getAttribute('aria-label')).toBe('Back to camera');
     expect(q('[data-batch-bar]')).toBeTruthy();
-    // Implicit accept: Next is gated open (>=1 page) with zero accept clicks.
-    expect((screen.getByText('Next', { exact: true }) as HTMLButtonElement).disabled).toBe(false);
+    // Implicit accept: Build is gated open (>=1 ready page) with zero accept clicks.
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
     // Initial show visits page 1.
     await waitFor(() => {
       expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('1 of 2 viewed');
@@ -1231,9 +1324,9 @@ describe('review filmstrip + batch bar', () => {
     // Both visited: progress stays full.
     expect(q('[data-review-progress]').getAttribute('aria-label')).toBe('2 of 2 viewed');
 
-    // Next reaches the done screen.
-    fireEvent.click(screen.getByText('Next', { exact: true }));
-    await screen.findByText('All pages ready');
+    // Build is the only post-review action; no separate done screen.
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText('All pages ready')).toBeNull();
   });
 
   it('Discard scans drops everything back to the camera, confirm-free', async () => {
@@ -1411,9 +1504,7 @@ describe('original-blob capture (ImageCapture)', () => {
     await findQ('[data-scan-queue]');
     await waitForPrepared();
     fireEvent.click(screen.getByText('Use original', { exact: true }));
-    fireEvent.click(screen.getByText('Next', { exact: true }));
-    await screen.findByText('All pages ready');
-    fireEvent.click(screen.getByText('Build PDF', { exact: true }));
+    fireEvent.click(q('[data-build-pdf]'));
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);

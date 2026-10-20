@@ -9,6 +9,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useImagePages, type ImportSummary } from './useImagePages';
+import type { ImagePage } from './imagePages';
 
 let counter = 0;
 const created: string[] = [];
@@ -197,6 +198,20 @@ describe('useImagePages', () => {
         expect(page.width).toBe(2500);
         expect(page.height).toBe(1875);
       }
+    });
+
+    it('hands the exact committed pages to onCommitted once', async () => {
+      stubDecode({ width: 100, height: 100 });
+      const { result } = renderHook(() => useImagePages());
+      const committed: ImagePage[][] = [];
+      await act(async () => {
+        await result.current.importFiles([upload('a.jpg'), upload('b.jpg')], 'camera', {
+          onCommitted: (pages) => committed.push(pages),
+        });
+      });
+      expect(committed).toHaveLength(1);
+      expect(committed[0].map((p) => p.name)).toEqual(['a.jpg', 'b.jpg']);
+      expect(committed[0].map((p) => p.id)).toEqual(result.current.pages.map((p) => p.id));
     });
 
     it('keeps already-committed pages on cancellation', async () => {
