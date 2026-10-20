@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — Diagnostics stripped for prod merge (−861/+0)
+
+- **Objective.** Remove the F-22 capture-timing diagnostics (spans module, marks, timings button + tests) so `dev` merges clean into `main`/production.
+- **Work (main session, no subagent).** Deleted `captureSpans.ts` + 3 test files; stripped 22 mark calls + import from `ScanicCapture.tsx` (incl. dead `stripQueueCount` no-op effect + `pageNo`); stripped import + button + export fn from `DownloadCard.tsx`. Pure deletion diff (−861/+0). devNotes history kept (append-only; card hostname-gated, prod-safe).
+- **Verification.** tsc + lint + format clean; 129 scoped + 783 full vitest green; engine 433 green; production build green; canonical E2E below.
+- **Remaining.** E2E re-run (in flight); then `main` fast-forward + production deploy.
+
 ## 2026-10-20 — F-22 experiments retired (bare slower, grab taxed the tap)
 
 - **Evidence.** Phone A/B: bare takePhoto avg 1009ms vs max-res 873ms (laptop 388ms) — the max request is not the cost; bare loses on speed and resolution. Provisional thumb's sync grab added 6–44ms pill→start (baseline 0.1–0.4ms) and feel regressed.

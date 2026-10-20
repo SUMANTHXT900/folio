@@ -148,7 +148,6 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
-import { logCaptureSpansTable, markCaptureSpan, resetCaptureSpans } from './captureSpans';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -1079,9 +1078,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
   useEffect(() => {
     mountedRef.current = true;
-    // F-22 shutter localize (dev-only spans, measure-only): a mount opens a
-    // fresh timing session. Every mark below no-ops off dev hosts.
-    resetCaptureSpans();
     return () => {
       mountedRef.current = false;
       // The camera dies with the mount: stop tracks + drop the video binding
@@ -1253,10 +1249,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       // Queue-only shutter: no decode, no worker, no finder busy state — but
       // the pill flashes once (actionable voice) so the tap reads as kept.
       flashCaptured();
-      // F-22 shutter localize (dev-only spans): the untouched original is
-      // parked. No-op off dev hosts; queue behavior untouched.
-      markCaptureSpan('file-parked');
-      markCaptureSpan('thumb-url');
       return position;
     },
     [trackUrl, flashCaptured],
@@ -1311,8 +1303,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               ? performance.now()
               : Date.now();
           decodeMs = decodeEnd - decodeStart;
-          // F-22 shutter localize (dev-only span): fresh full-res decode copy.
-          markCaptureSpan('drain-decode');
           try {
             exif = await probeExifOrientation(entry.original);
           } catch {
@@ -1353,8 +1343,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             DEFAULT_DETECTOR,
             decodeMs !== null ? { decodeMs } : undefined,
           );
-          // F-22 shutter localize (dev-only span): single-entry ML detect done.
-          markCaptureSpan('drain-detect');
           logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
           if (!mountedRef.current) return;
           if (result.corners !== null) {
@@ -1840,10 +1828,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (capturingRef.current) return;
     capturingRef.current = true;
     setCapturing(true);
-    // F-22 shutter localize (dev-only spans): shutter fired + the Capturing…
-    // pill state requested. No-op off dev hosts; capture behavior untouched.
-    markCaptureSpan('tap');
-    markCaptureSpan('pill');
     const video = videoRef.current;
     const track = streamRef.current?.getVideoTracks()[0] ?? null;
     setCaptureError(null);
@@ -1871,9 +1855,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 if (typeof maxW === 'number' && typeof maxH === 'number') {
                   photoSettings = { imageWidth: maxW, imageHeight: maxH };
                   photoCapsRef.current.set(trackKey, photoSettings);
-                  // F-22 shutter localize: the caps round-trip was paid (cached
-                  // tracks skip this — honestly, no fetch, no span).
-                  markCaptureSpan('caps');
                 }
               }
             } catch {
@@ -1881,13 +1862,10 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               photoSettings = undefined;
             }
           }
-          // F-22 shutter localize: the sensor hold, start to blob in hand.
-          markCaptureSpan('takePhoto-start');
           const blob =
             photoSettings !== undefined
               ? await capture.takePhoto(photoSettings)
               : await capture.takePhoto();
-          markCaptureSpan('takePhoto-end');
           if (!mountedRef.current) return;
           if (!blob || blob.size === 0) throw new Error('empty photo');
           // Untouched original from here on: the queue never re-encodes it.
@@ -2099,8 +2077,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         process: async (entry, workerIndex) => {
           if (drainGenRef.current !== gen || !mountedRef.current) return;
           if (!entriesRef.current.some((e) => e.id === entry.id)) return;
-          // F-22 shutter localize: 1-based page position for per-page spans.
-          const pageNo = pending.indexOf(entry) + 1;
           setEntries((prev) =>
             prev.map((e) =>
               e.id === entry.id
@@ -2122,8 +2098,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                 ? performance.now()
                 : Date.now();
             decodeMs = decodeEnd - decodeStart;
-            // F-22 shutter localize (dev-only span): fresh full-res decode copy.
-            markCaptureSpan('drain-decode', { n: pageNo });
             try {
               exif = await probeExifOrientation(entry.original);
             } catch {
@@ -2145,8 +2119,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   : e,
               ),
             );
-            // F-22 shutter localize (dev-only span): page settled ready.
-            markCaptureSpan('drain-commit', { n: pageNo });
             return;
           }
           if (drainGenRef.current !== gen || !mountedRef.current) return;
@@ -2164,8 +2136,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               DEFAULT_DETECTOR,
               decodeMs !== null ? { decodeMs } : undefined,
             );
-            // F-22 shutter localize (dev-only span): drain ML detect done.
-            markCaptureSpan('drain-detect', { n: pageNo });
             logDetectTelemetryDev({ w, h }, result, { decodeMs, exif });
             if (drainGenRef.current !== gen || !mountedRef.current) return;
             if (!entriesRef.current.some((e) => e.id === entry.id)) return;
@@ -2177,8 +2147,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     : e,
                 ),
               );
-              // F-22 shutter localize (dev-only span): page settled ready.
-              markCaptureSpan('drain-commit', { n: pageNo });
               return;
             }
             setEntries((prev) =>
@@ -2188,8 +2156,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   : e,
               ),
             );
-            // F-22 shutter localize (dev-only span): page settled ready.
-            markCaptureSpan('drain-commit', { n: pageNo });
           } catch {
             // Worker crash/unavailable/cancel-raced: degrade to full-frame,
             // honestly labelled. A cancelled generation drops above instead.
@@ -2202,8 +2168,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   : e,
               ),
             );
-            // F-22 shutter localize (dev-only span): page settled ready.
-            markCaptureSpan('drain-commit', { n: pageNo });
           }
         },
       });
@@ -2317,8 +2281,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (!entriesRef.current.some((e) => e.id === id)) return;
         const blob = await imageDataToJpeg(warped, 0.9);
         if (!blob) throw new Error('no jpeg');
-        // F-22 shutter localize (dev-only span): warp render encoded.
-        markCaptureSpan('drain-warp');
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
         if (!entriesRef.current.some((e) => e.id === id)) return;
@@ -2329,8 +2291,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         setEntries((prev) =>
           prev.map((e) => (e.id === id ? { ...e, corners, warpedUrl: url } : e)),
         );
-        // F-22 shutter localize (dev-only span): warp committed to the page.
-        markCaptureSpan('drain-commit');
       } catch (error) {
         if (!mountedRef.current) return;
         // Superseded (a newer Apply — or a Re-detect — bumped the
@@ -2451,17 +2411,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   }, [phase, currentId, safeIndex]);
 
   /**
-   * F-22 shutter localize (dev-only spans, measure-only): marks when the
-   * camera strip re-renders with N queued pages. No-op off dev hosts;
-   * render output untouched.
-   */
-  const stripQueueCount = queue.length;
-  useEffect(() => {
-    if (phase !== 'camera' || stripQueueCount === 0) return;
-    markCaptureSpan('strip-rendered', { n: stripQueueCount });
-  }, [phase, stripQueueCount]);
-
-  /**
    * Commits the queue in capture order through `prepareImportFile`
    * normalization (the same import pixel budget gallery uploads run through,
    * so a 48MP sensor photo can't bypass it): warped verdicts commit their
@@ -2473,8 +2422,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * dropped on commit: the committed Files own the bytes from here on.
    */
   const buildPdf = useCallback(async () => {
-    // F-22 shutter localize (dev-only spans): commit started.
-    markCaptureSpan('build-start');
     const pages: ScanicCommittedPage[] = [];
     for (let i = 0; i < accepted.length; i += 1) {
       const entry = accepted[i];
@@ -2506,10 +2453,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       }
     }
     warpedBlobsRef.current.clear();
-    // F-22 shutter localize: commit done — single console.table summary when
-    // gated on (desktop debugging). No-op off dev hosts.
-    markCaptureSpan('build-end');
-    logCaptureSpansTable();
     onCommit(pages);
     onExit();
   }, [accepted, onCommit, onExit, startIndex]);
