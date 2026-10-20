@@ -17,6 +17,13 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'Experiment B: sheet toggle',
+    date: '2026-10-20',
+    notes: [
+      'The bare-capture experiment gains a dev-only Capture quality row in the More sheet (Max detail default, Fast capture for measurement) — no console needed on phones.',
+    ],
+  },
+  {
     build: 'Experiment B: bare capture',
     date: '2026-10-20',
     notes: [

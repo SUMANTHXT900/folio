@@ -26,6 +26,27 @@ const { __clientMocks, __poolMocks } = vi.hoisted(() => ({
   },
 }));
 
+// Dev-gate control for the capture-quality toggle: the component reuses
+// `isCaptureSpansEnabled()` (no-arg call reads the hostname). The mock
+// preserves every other export and only gates the no-arg call, so the
+// explicit-hostname unit contract in captureSpans.test.ts is untouched.
+const { __spansGate } = vi.hoisted(() => ({ __spansGate: { enabled: true } }));
+
+vi.mock('./captureSpans', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('./captureSpans')>();
+  return {
+    ...orig,
+    isCaptureSpansEnabled: (...args: unknown[]) => {
+      if (args.length > 0) {
+        return (orig.isCaptureSpansEnabled as (...a: never[]) => boolean)(
+          ...(args as never[]),
+        );
+      }
+      return __spansGate.enabled;
+    },
+  };
+});
+
 vi.mock('./scan/scanicClient', () => ({
   ScanicClient: vi.fn(function (this: unknown) {
     return __clientMocks;
@@ -139,6 +160,7 @@ let urlCounter = 0;
 
 beforeEach(() => {
   urlCounter = 0;
+  __spansGate.enabled = true;
   try {
     window.localStorage.clear();
   } catch {
@@ -237,5 +259,100 @@ describe('bare-capture experiment flag (folio-bare-capture)', () => {
     fireEvent.click(q('[data-scan-capture]'));
     await waitFor(() => expect(takePhoto).toHaveBeenCalledTimes(2));
     expect(takePhoto.mock.calls[1]).toHaveLength(0);
+  });
+});
+
+describe('capture-quality toggle (dev-gated More-sheet row)', () => {
+  function qualityButtons(): { max: HTMLElement; fast: HTMLElement; group: HTMLElement } {
+    const group = q('[data-capture-quality]');
+    const btns = Array.from(group.querySelectorAll('button'));
+    const max = btns.find((b) => b.textContent?.trim() === 'Max detail');
+    const fast = btns.find((b) => b.textContent?.trim() === 'Fast capture (test)');
+    if (!max || !fast) throw new Error('missing capture-quality options');
+    return { max: max as HTMLElement, fast: fast as HTMLElement, group };
+  }
+
+  it('renders on dev hosts with honest copy and Max detail selected by default', async () => {
+    __spansGate.enabled = true;
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-capture-quality]');
+    const { max, fast, group } = qualityButtons();
+    expect(group.getAttribute('role')).toBe('group');
+    expect(group.getAttribute('aria-label')).toBe('Capture quality');
+    // 44px segmented targets, same pattern as the Capture mode row.
+    for (const btn of [max, fast]) {
+      expect(btn.className).toMatch('min-h-[44px]');
+    }
+    // Honest copy: never implies Fast is better.
+    expect(document.querySelector('[data-capture-quality-note]')?.textContent).toBe(
+      'Native-default resolution — for measurement only',
+    );
+    // Default OFF: Max detail pressed, flag untouched.
+    expect(max.getAttribute('aria-pressed')).toBe('true');
+    expect(fast.getAttribute('aria-pressed')).toBe('false');
+    expect(window.localStorage.getItem('folio-bare-capture')).toBeNull();
+  });
+
+  it('is hidden on prod hosts while the rest of the More sheet is byte-identical', async () => {
+    __spansGate.enabled = false;
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    // Sheet itself still mounts with every production hook…
+    await findQ('[data-scan-sheet]');
+    expect(document.querySelector('[data-scan-mode]')).not.toBeNull();
+    expect(document.querySelector('[data-mirror-toggle]')).not.toBeNull();
+    expect(document.querySelector('[data-camera-select]')).not.toBeNull();
+    // …but the quality row leaves no trace.
+    expect(document.querySelector('[data-capture-quality]')).toBeNull();
+    expect(document.querySelector('[data-capture-quality-note]')).toBeNull();
+    expect(document.querySelector('[data-scan-sheet]')?.textContent).not.toMatch(
+      'Capture quality',
+    );
+    expect(document.querySelector('[data-scan-sheet]')?.textContent).not.toMatch(
+      'Fast capture',
+    );
+  });
+
+  it('tapping Fast capture sets localStorage 1', async () => {
+    __spansGate.enabled = true;
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-capture-quality]');
+    const { max, fast } = qualityButtons();
+    fireEvent.click(fast);
+    expect(window.localStorage.getItem('folio-bare-capture')).toBe('1');
+    expect(fast.getAttribute('aria-pressed')).toBe('true');
+    expect(max.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('tapping Max detail clears the flag', async () => {
+    __spansGate.enabled = true;
+    window.localStorage.setItem('folio-bare-capture', '1');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-capture-quality]');
+    const { max, fast } = qualityButtons();
+    // Persisted ON pre-selects Fast on open.
+    expect(fast.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(max);
+    expect(window.localStorage.getItem('folio-bare-capture')).toBeNull();
+    expect(max.getAttribute('aria-pressed')).toBe('true');
+    expect(fast.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('persisted value pre-selects on open (ON selects Fast, absent selects Max)', async () => {
+    __spansGate.enabled = true;
+    window.localStorage.setItem('folio-bare-capture', '1');
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-capture-quality]');
+    let { max, fast } = qualityButtons();
+    expect(fast.getAttribute('aria-pressed')).toBe('true');
+    expect(max.getAttribute('aria-pressed')).toBe('false');
+    cleanup();
+
+    __spansGate.enabled = true;
+    window.localStorage.clear();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-capture-quality]');
+    ({ max, fast } = qualityButtons());
+    expect(max.getAttribute('aria-pressed')).toBe('true');
+    expect(fast.getAttribute('aria-pressed')).toBe('false');
   });
 });

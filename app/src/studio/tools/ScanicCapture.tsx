@@ -148,7 +148,7 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
-import { logCaptureSpansTable, markCaptureSpan, resetCaptureSpans } from './captureSpans';
+import { isCaptureSpansEnabled, logCaptureSpansTable, markCaptureSpan, resetCaptureSpans } from './captureSpans';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -176,6 +176,26 @@ let persistedCameraDeviceId: string | null = null;
 
 /** Cross-session camera pick (the user's eventual explicit choice). */
 export const CAMERA_STORAGE_KEY = 'folio.scan.cameraId';
+
+/**
+ * Bare-capture experiment flag (F-22 experiment B): the SAME key the
+ * shutter (`captureFrame`) reads per-capture — `'1'` takes the
+ * sensor-native default (bare `takePhoto()`), anything else is Max detail.
+ * Toggle-owned only; the capture path itself is untouched.
+ */
+export const BARE_CAPTURE_STORAGE_KEY = 'folio-bare-capture';
+
+/**
+ * Default OFF: only the exact value `'1'` opts into bare capture.
+ * Absent/invalid/unreadable storage is Max detail (existing behavior).
+ */
+function readBareCaptureFlag(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(BARE_CAPTURE_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Length cap for a stored camera pick. Real `deviceId` values are short
@@ -931,6 +951,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [redetecting, setRedetecting] = useState(false);
   /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  /**
+   * Dev-only capture-quality toggle (More sheet): Max detail (default) vs
+   * Fast bare capture. Initialized from the same `folio-bare-capture`
+   * localStorage flag the shutter reads per-capture; no other store.
+   */
+  const [bareCapture, setBareCapture] = useState<boolean>(() => readBareCaptureFlag());
   /**
    * Overflow sheet (More): flash, flip, mirror, camera select, capture
    * mode, and import all live here so the finder stays clean. The sheet
@@ -2751,6 +2777,61 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           </button>
         </div>
       </div>
+      {isCaptureSpansEnabled() && (
+        <div className="px-1 py-1">
+          <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400 dark:text-ink-300">
+            Capture quality
+          </p>
+          <div
+            data-capture-quality
+            role="group"
+            aria-label="Capture quality"
+            className="inline-flex w-full rounded-full border border-paper-300 p-1 dark:border-ink-700"
+          >
+            <button
+              type="button"
+              aria-pressed={!bareCapture}
+              onClick={() => {
+                try {
+                  globalThis.localStorage?.removeItem(BARE_CAPTURE_STORAGE_KEY);
+                } catch {
+                  // Private mode / blocked storage — state still updates.
+                }
+                setBareCapture(false);
+              }}
+              className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                !bareCapture
+                  ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                  : 'text-ink-500 dark:text-ink-300'
+              }`}
+            >
+              Max detail
+            </button>
+            <button
+              type="button"
+              aria-pressed={bareCapture}
+              onClick={() => {
+                try {
+                  globalThis.localStorage?.setItem(BARE_CAPTURE_STORAGE_KEY, '1');
+                } catch {
+                  // Private mode / blocked storage — state still updates.
+                }
+                setBareCapture(true);
+              }}
+              className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
+                bareCapture
+                  ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
+                  : 'text-ink-500 dark:text-ink-300'
+              }`}
+            >
+              Fast capture (test)
+            </button>
+          </div>
+          <p data-capture-quality-note role="note" className={sheetNote}>
+            Native-default resolution — for measurement only
+          </p>
+        </div>
+      )}
       <SheetRowButton
         icon="▦"
         label="Add image files instead"
