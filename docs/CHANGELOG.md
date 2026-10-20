@@ -4,7 +4,7 @@ Versions and dates below are verified against git history (`git log --format='%h
 
 ## v1.12.3 — Audit reliability pass + capture diagnostics (`dev`, 2026-10-20)
 
-Whole-repo audit (20-agent review) implemented as P0–P3 fix waves: engine panic closures and wire-shape guards, mid-run cancellation proven on all 10 operations, worker message validation, honest errors/cancel/progress/downloads, keyboard and screen-reader support across tools and dialogs, scanner capture-race fixes, and security headers. Dev-only capture-timing diagnostics (per-step spans + Download timings JSON) for localizing the F-22 shutter feel on real phones. Full gate green: engine 433, frontend 783, build 53 entries / 7896.14 KiB, E2E 104/104 + 4 SKIP.
+Whole-repo audit (20-agent review) implemented as P0–P3 fix waves: engine panic closures and wire-shape guards, mid-run cancellation proven on all 10 operations, worker message validation, honest errors/cancel/progress/downloads, keyboard and screen-reader support across tools and dialogs, scanner capture-race fixes, and security headers. Dev-only capture-timing diagnostics (per-step spans + Download timings JSON) for localizing the F-22 shutter feel on real phones. Full gate green: engine 433, frontend 783, build 53 entries / 7896.14 KiB, E2E 104/104 + 4 SKIP. Follow-up on dev: experiment B (bare-capture switch) for the F-22 A/B.
 
 ## v1.12.2 — Full PWA installability (`dev`, 2026-10-18)
 

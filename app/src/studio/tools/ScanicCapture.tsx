@@ -1835,6 +1835,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * Canvas-draw is a fallback ONLY when ImageCapture is unavailable or
    * `takePhoto()` throws (older browsers, virtual cameras) — commented at
    * the branch, same unmirrored `drawImage` semantics as before.
+   *
+   * Experiment B (F-22) bare-capture switch: `localStorage["folio-bare-capture"]
+   * === "1"` skips the max request and calls bare `takePhoto()` (sensor-native
+   * default) so the phone can compare max-res vs native-default with measured
+   * evidence. Default OFF — absent or any other value keeps the byte-identical
+   * max path. Read once per capture (never cached across sessions); harmless
+   * on prod (default off; the dev-gated spans module already gates by host).
    */
   const captureFrame = useCallback(async () => {
     if (capturingRef.current) return;
@@ -1856,13 +1863,27 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (ImageCaptureCtor) {
         try {
           const capture = new ImageCaptureCtor(track);
+          // Experiment B (F-22) bare-capture switch, read once per capture:
+          // "1" takes the sensor-native default (bare takePhoto, no max
+          // request). Anything else (absent/invalid/unreadable storage) is
+          // OFF — the byte-identical max path below.
+          let bareCapture = false;
+          try {
+            bareCapture = globalThis.localStorage?.getItem('folio-bare-capture') === '1';
+          } catch {
+            bareCapture = false;
+          }
           const trackKey =
             typeof (track as { id?: unknown }).id === 'string'
               ? (track as { id: string }).id
               : 'default';
-          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined =
-            photoCapsRef.current.get(trackKey);
-          if (photoSettings === undefined) {
+          // Bare mode skips the per-track cache read too: a cached max from
+          // an earlier OFF capture on this track must never leak into a bare
+          // capture.
+          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined = bareCapture
+            ? undefined
+            : photoCapsRef.current.get(trackKey);
+          if (!bareCapture && photoSettings === undefined) {
             try {
               if (typeof capture.getPhotoCapabilities === 'function') {
                 const caps = await capture.getPhotoCapabilities();
@@ -1883,6 +1904,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           }
           // F-22 shutter localize: the sensor hold, start to blob in hand.
           markCaptureSpan('takePhoto-start');
+          // Experiment B: single unambiguous line when bare mode fires (the
+          // dev-gated spans module has no `bare` detail seam — see follow-up
+          // in the task report — so the phone console carries the mode).
+          if (bareCapture) {
+            console.info('[scan-capture] bare takePhoto (experiment B: no photoSettings)');
+          }
           const blob =
             photoSettings !== undefined
               ? await capture.takePhoto(photoSettings)

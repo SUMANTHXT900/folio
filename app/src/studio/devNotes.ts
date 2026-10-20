@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'Experiment B: bare capture',
+    date: '2026-10-20',
+    notes: [
+      'Dev-only experiment switch (localStorage folio-bare-capture=1) for native-default takePhoto vs max-res, measured by the capture-timing spans.',
+      'Default path byte-identical; F-22 verdict pending phone A/B (takePhoto ms + output dims + sharpness).',
+    ],
+  },
+  {
     build: 'Audit fixes + capture diagnostics',
     date: '2026-10-20',
     notes: [
