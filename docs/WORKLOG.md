@@ -2,6 +2,12 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — Experiment B dev deploy (bare-capture switch, bundle index-zemLptel.js)
+
+- **Work.** `folio-bare-capture` localStorage switch (bare `takePhoto()` vs max-res, default OFF, byte-identical default path); 9 flag tests + 95 existing ScenicCapture tests green; tsc clean; devNotes entry.
+- **Deploy.** Pushed `dev` → `origin/dev`; `wrangler pages deploy dist --branch dev` → `https://5da62c04.folio-pdf.pages.dev`; alias verified serving `/assets/index-zemLptel.js`. Production untouched.
+- **Remaining.** Phone A/B per the procedure (same page/light/distance, both modes, timings JSONs back); then build A regardless.
+
 ## 2026-10-20 — v1.12.3 dev deploy (audit waves + diagnostics, bundle index-CbMCsP32.js)
 
 - **Freshness rule followed.** Version 1.12.2 → 1.12.3, dated `devNotes` (audit fixes + diagnostics) + `releaseNotes` (v1.12.3) entries, `CHANGELOG.md` v1.12.3 entry.
