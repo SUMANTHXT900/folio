@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — v1.12.3 dev deploy (audit waves + diagnostics, bundle index-CbMCsP32.js)
+
+- **Freshness rule followed.** Version 1.12.2 → 1.12.3, dated `devNotes` (audit fixes + diagnostics) + `releaseNotes` (v1.12.3) entries, `CHANGELOG.md` v1.12.3 entry.
+- **Verification (observed).** Full central gate pre-deploy: engine 433 + fmt/clippy, frontend tsc/lint/format clean, 783 vitest, build green (53 entries / 7899.68 KiB), canonical E2E 104/104 + 4 SKIP.
+- **Deploy.** Commits `b473fea` (P0–P3) + `6280e91` (diagnostics) + freshness pushed `dev` → `origin/dev`; `wrangler pages deploy dist --branch dev` → `https://6c614c41.folio-pdf.pages.dev`; alias `dev.folio-pdf.pages.dev` verified serving `/assets/index-CbMCsP32.js` (matches local build). Production (`main`) untouched.
+- **Remaining.** Shoot photos on the phone against the dev build and send back the timings JSON (F-22 next fix rides on it); canonical E2E laptop-side optional (already green here).
+
 ## 2026-10-20 — F-22 capture-timing diagnostics (dev-gated spans + JSON export)
 
 - **Objective.** Localize the residual shutter-tap freeze on the user's phone with measured spans instead of guesses (L-28): per-step timing + heap at every capture-pipeline step, exportable as JSON beside the PDF download, dev builds only.
