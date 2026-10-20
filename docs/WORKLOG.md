@@ -2,6 +2,13 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — Production promotion to v1.12.3 (git `main` + Cloudflare prod)
+
+- **Git.** `main` fast-forwarded to `dev` (`88d833e..cecf83b`, ff-only, no force) and pushed `main` → `origin/main`. Strip commit verified pre-merge (tsc/lint/format clean, 783 vitest, engine 433, E2E 104/104 + 4 SKIP).
+- **Cloudflare.** Same `dist/` build redeployed with `--branch main` → `https://57c404a2.folio-pdf.pages.dev` (headers + CSP live). Production `https://folio-pdf.pages.dev` verified serving `/assets/index-DRFS8XwU.js` on both apex and direct URL.
+- **Docs sync.** STATUS pending-work + repo-state + main lines, README version badge (→1.12.3). Ships: audit-fix waves P0–P3 (no dev-only diagnostics — stripped pre-merge).
+- **Remaining.** `dev` continues as staging; F-22 field confirmation still open (any new idea needs measured evidence first).
+
 ## 2026-10-20 — Diagnostics stripped for prod merge (−861/+0)
 
 - **Objective.** Remove the F-22 capture-timing diagnostics (spans module, marks, timings button + tests) so `dev` merges clean into `main`/production.
