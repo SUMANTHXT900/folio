@@ -2,6 +2,12 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
+## 2026-10-20 — F-22 experiments retired (bare slower, grab taxed the tap)
+
+- **Evidence.** Phone A/B: bare takePhoto avg 1009ms vs max-res 873ms (laptop 388ms) — the max request is not the cost; bare loses on speed and resolution. Provisional thumb's sync grab added 6–44ms pill→start (baseline 0.1–0.4ms) and feel regressed.
+- **Work (main session, no subagent).** Removed bare branch + flag + More-sheet toggle + 9 flag tests; removed provisional grab + gallery swap + 3 thumb tests (−719/+8). Kept: max-res path, D53 guard, spans diagnostics, honest copy. Suites: 95/95 ScanicCapture, tsc + prettier clean.
+- **Remaining.** Deploy to dev below; F-22 open — remaining lever is sensor physics + pill/guard feedback, pending any new idea with measured evidence first.
+
 ## 2026-10-20 — Option A hybrid shutter thumb (implemented in main session, no subagent)
 
 - **Work.** Provisional video-frame thumb in the gallery (~50ms post-tap) while takePhoto holds the sensor; real entry replaces + revokes it on park; silent fallback on any platform gap; not counted as a page; capturing badge while provisional. Zero-encode invariant, guard/finally, E2E hooks untouched.

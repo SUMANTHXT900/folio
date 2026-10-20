@@ -148,12 +148,7 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
-import {
-  isCaptureSpansEnabled,
-  logCaptureSpansTable,
-  markCaptureSpan,
-  resetCaptureSpans,
-} from './captureSpans';
+import { logCaptureSpansTable, markCaptureSpan, resetCaptureSpans } from './captureSpans';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -181,26 +176,6 @@ let persistedCameraDeviceId: string | null = null;
 
 /** Cross-session camera pick (the user's eventual explicit choice). */
 export const CAMERA_STORAGE_KEY = 'folio.scan.cameraId';
-
-/**
- * Bare-capture experiment flag (F-22 experiment B): the SAME key the
- * shutter (`captureFrame`) reads per-capture — `'1'` takes the
- * sensor-native default (bare `takePhoto()`), anything else is Max detail.
- * Toggle-owned only; the capture path itself is untouched.
- */
-export const BARE_CAPTURE_STORAGE_KEY = 'folio-bare-capture';
-
-/**
- * Default OFF: only the exact value `'1'` opts into bare capture.
- * Absent/invalid/unreadable storage is Max detail (existing behavior).
- */
-function readBareCaptureFlag(): boolean {
-  try {
-    return globalThis.localStorage?.getItem(BARE_CAPTURE_STORAGE_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Length cap for a stored camera pick. Real `deviceId` values are short
@@ -957,12 +932,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   /** Manual (default) vs self-timed stability shutter. Manual NEVER auto-fires. */
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
   /**
-   * Dev-only capture-quality toggle (More sheet): Max detail (default) vs
-   * Fast bare capture. Initialized from the same `folio-bare-capture`
-   * localStorage flag the shutter reads per-capture; no other store.
-   */
-  const [bareCapture, setBareCapture] = useState<boolean>(() => readBareCaptureFlag());
-  /**
    * Overflow sheet (More): flash, flip, mirror, camera select, capture
    * mode, and import all live here so the finder stays clean. The sheet
    * panel stays mounted while closed (hooks hold, nothing unmounts).
@@ -1075,12 +1044,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * so overlapping taps no-op instead of serializing on the sensor.
    */
   const [capturing, setCapturing] = useState(false);
-  // Option A (F-22 hybrid) provisional frame thumb: a video-frame grab shown
-  // in the gallery ~50ms after tap while takePhoto holds the sensor (~860ms
-  // measured). Preview-only artifact — never committed, never decoded;
-  // cleared + revoked the moment the real entry parks in enqueueCapture.
-  const [pendingShotUrl, setPendingShotUrl] = useState<string | null>(null);
-  const pendingShotRef = useRef<string | null>(null);
   const capturingRef = useRef(false);
   /**
    * Per-track photo-capability cache: `getPhotoCapabilities()` is an async
@@ -1263,14 +1226,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     (file: File): number => {
       const id = idRef.current + 1;
       idRef.current = id;
-      // Option A: the real entry just parked — drop the provisional frame
-      // thumb (revoked, never leaked; unmount sweeps tracked URLs anyway).
-      const prev = pendingShotRef.current;
-      pendingShotRef.current = null;
-      if (prev !== null) {
-        revokeUrl(prev);
-        setPendingShotUrl(null);
-      }
       let photoUrl = '';
       try {
         photoUrl = trackUrl(URL.createObjectURL(file));
@@ -1304,7 +1259,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       markCaptureSpan('thumb-url');
       return position;
     },
-    [trackUrl, flashCaptured, revokeUrl],
+    [trackUrl, flashCaptured],
   );
 
   /**
@@ -1870,46 +1825,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   }, [torchOn]);
 
   /**
-   * Option A (F-22 hybrid) provisional thumb: draws the live preview frame
-   * into a small JPEG (~50ms) so the tap reads as kept while takePhoto holds
-   * the sensor. Preview-only — never committed, never decoded, replaced by
-   * the real queued entry on resolve. Any failure (no video frame, no 2D
-   * canvas, no toBlob) resolves to silent null: the shutter behaves exactly
-   * as before, thumb landing with the park. Never delays takePhoto: the
-   * encode callback settles on its own, guarded by the inflight flag.
-   */
-  const grabProvisionalThumb = useCallback(() => {
-    try {
-      const v = videoRef.current;
-      if (!v || v.videoWidth === 0 || v.videoHeight === 0) return;
-      const scale = Math.min(1, 320 / Math.max(v.videoWidth, v.videoHeight));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.floor(v.videoWidth * scale));
-      canvas.height = Math.max(1, Math.floor(v.videoHeight * scale));
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-      if (typeof canvas.toBlob !== 'function') return;
-      canvas.toBlob(
-        (b) => {
-          if (!b || !mountedRef.current || !capturingRef.current) return;
-          try {
-            const url = trackUrl(URL.createObjectURL(b));
-            pendingShotRef.current = url;
-            setPendingShotUrl(url);
-          } catch {
-            // Preview-only: never fail the shutter.
-          }
-        },
-        'image/jpeg',
-        0.7,
-      );
-    } catch {
-      // Preview-only: any platform gap falls back to today's behavior.
-    }
-  }, [trackUrl]);
-
-  /**
    * Original-blob shutter: the ImageCapture API returns the sensor's native
    * Blob (`takePhoto()`) — zero canvas, zero toBlob, zero re-encode, no
    * quality param. takePhoto output is sensor-native and therefore
@@ -1920,13 +1835,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * Canvas-draw is a fallback ONLY when ImageCapture is unavailable or
    * `takePhoto()` throws (older browsers, virtual cameras) — commented at
    * the branch, same unmirrored `drawImage` semantics as before.
-   *
-   * Experiment B (F-22) bare-capture switch: `localStorage["folio-bare-capture"]
-   * === "1"` skips the max request and calls bare `takePhoto()` (sensor-native
-   * default) so the phone can compare max-res vs native-default with measured
-   * evidence. Default OFF — absent or any other value keeps the byte-identical
-   * max path. Read once per capture (never cached across sessions); harmless
-   * on prod (default off; the dev-gated spans module already gates by host).
    */
   const captureFrame = useCallback(async () => {
     if (capturingRef.current) return;
@@ -1936,9 +1844,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     // pill state requested. No-op off dev hosts; capture behavior untouched.
     markCaptureSpan('tap');
     markCaptureSpan('pill');
-    // Option A: provisional frame thumb fires sync here — it never awaits
-    // takePhoto, so the gallery shows the tap in ~50ms, not ~860ms.
-    grabProvisionalThumb();
     const video = videoRef.current;
     const track = streamRef.current?.getVideoTracks()[0] ?? null;
     setCaptureError(null);
@@ -1951,27 +1856,13 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       if (ImageCaptureCtor) {
         try {
           const capture = new ImageCaptureCtor(track);
-          // Experiment B (F-22) bare-capture switch, read once per capture:
-          // "1" takes the sensor-native default (bare takePhoto, no max
-          // request). Anything else (absent/invalid/unreadable storage) is
-          // OFF — the byte-identical max path below.
-          let bareCapture = false;
-          try {
-            bareCapture = globalThis.localStorage?.getItem('folio-bare-capture') === '1';
-          } catch {
-            bareCapture = false;
-          }
           const trackKey =
             typeof (track as { id?: unknown }).id === 'string'
               ? (track as { id: string }).id
               : 'default';
-          // Bare mode skips the per-track cache read too: a cached max from
-          // an earlier OFF capture on this track must never leak into a bare
-          // capture.
-          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined = bareCapture
-            ? undefined
-            : photoCapsRef.current.get(trackKey);
-          if (!bareCapture && photoSettings === undefined) {
+          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined =
+            photoCapsRef.current.get(trackKey);
+          if (photoSettings === undefined) {
             try {
               if (typeof capture.getPhotoCapabilities === 'function') {
                 const caps = await capture.getPhotoCapabilities();
@@ -1992,12 +1883,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           }
           // F-22 shutter localize: the sensor hold, start to blob in hand.
           markCaptureSpan('takePhoto-start');
-          // Experiment B: single unambiguous line when bare mode fires (the
-          // dev-gated spans module has no `bare` detail seam — see follow-up
-          // in the task report — so the phone console carries the mode).
-          if (bareCapture) {
-            console.info('[scan-capture] bare takePhoto (experiment B: no photoSettings)');
-          }
           const blob =
             photoSettings !== undefined
               ? await capture.takePhoto(photoSettings)
@@ -2066,7 +1951,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       capturingRef.current = false;
       if (mountedRef.current) setCapturing(false);
     }
-  }, [enqueueCapture, grabProvisionalThumb]);
+  }, [enqueueCapture]);
 
   /** Shutter tap: records the fire time so auto mode never double-fires. */
   const manualCapture = useCallback(() => {
@@ -2639,9 +2524,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           : null;
 
   const lastQueued = queue.length === 0 ? null : queue[queue.length - 1];
-  // Option A: provisional frame thumb wins until the real entry parks (never
-  // counted as a page — it is preview-only until takePhoto resolves).
-  const gallerySrc = pendingShotUrl ?? lastQueued?.photoUrl ?? null;
 
   /**
    * Preparing progress (review phase only): done = `ready` entries, total =
@@ -2842,61 +2724,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           </button>
         </div>
       </div>
-      {isCaptureSpansEnabled() && (
-        <div className="px-1 py-1">
-          <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400 dark:text-ink-300">
-            Capture quality
-          </p>
-          <div
-            data-capture-quality
-            role="group"
-            aria-label="Capture quality"
-            className="inline-flex w-full rounded-full border border-paper-300 p-1 dark:border-ink-700"
-          >
-            <button
-              type="button"
-              aria-pressed={!bareCapture}
-              onClick={() => {
-                try {
-                  globalThis.localStorage?.removeItem(BARE_CAPTURE_STORAGE_KEY);
-                } catch {
-                  // Private mode / blocked storage — state still updates.
-                }
-                setBareCapture(false);
-              }}
-              className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                !bareCapture
-                  ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
-                  : 'text-ink-500 dark:text-ink-300'
-              }`}
-            >
-              Max detail
-            </button>
-            <button
-              type="button"
-              aria-pressed={bareCapture}
-              onClick={() => {
-                try {
-                  globalThis.localStorage?.setItem(BARE_CAPTURE_STORAGE_KEY, '1');
-                } catch {
-                  // Private mode / blocked storage — state still updates.
-                }
-                setBareCapture(true);
-              }}
-              className={`inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full px-5 text-sm font-medium transition-colors ${
-                bareCapture
-                  ? 'bg-ink-900 text-paper-50 dark:bg-paper-50 dark:text-ink-900'
-                  : 'text-ink-500 dark:text-ink-300'
-              }`}
-            >
-              Fast capture (test)
-            </button>
-          </div>
-          <p data-capture-quality-note role="note" className={sheetNote}>
-            Native-default resolution — for measurement only
-          </p>
-        </div>
-      )}
       <SheetRowButton
         icon="▦"
         label="Add image files instead"
@@ -3068,9 +2895,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   onClick={() => goToReview(queue.length - 1)}
                   className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-paper-50/25 bg-ink-950/60 text-paper-100 backdrop-blur transition-colors disabled:opacity-40"
                 >
-                  {gallerySrc ? (
+                  {lastQueued?.photoUrl ? (
                     <img
-                      src={gallerySrc}
+                      src={lastQueued.photoUrl}
                       alt=""
                       decoding="async"
                       className="h-full w-full rounded-xl object-cover"
@@ -3078,14 +2905,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   ) : (
                     <span aria-hidden className="text-lg">
                       ▦
-                    </span>
-                  )}
-                  {pendingShotUrl !== null && capturing && (
-                    <span
-                      aria-hidden
-                      className="absolute inset-0 flex items-center justify-center rounded-xl bg-ink-950/40 text-sm text-paper-100"
-                    >
-                      …
                     </span>
                   )}
                   {queue.length > 0 && (

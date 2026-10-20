@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'F-22 experiments retired',
+    date: '2026-10-20',
+    notes: [
+      'Bare capture measured slower (1009ms vs 873ms max) — experiment removed, max-res stays the only path.',
+      'Provisional frame thumb removed: its sync grab cost 6–44ms on the tap path and feel regressed. Shutter back to the clean max path.',
+    ],
+  },
+  {
     build: 'Option A: instant shutter thumb',
     date: '2026-10-20',
     notes: [
