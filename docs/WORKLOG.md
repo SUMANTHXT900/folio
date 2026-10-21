@@ -2,13 +2,20 @@
 
 Chronological record of meaningful development events. Each entry records objective, work, findings, decisions, verification, and remaining work — not command-by-command activity. Lesson references in code comments (Lesson 0–14) belong to engine development that predates this log's detail level; they are cited where the code cites them.
 
-## 2026-10-20 — Scanner review/build flow repair (F-24, D55)
+## 2026-10-21 - Production promotion to v1.12.4 (git `main` + Cloudflare prod)
+
+- **Git.** `main` fast-forwarded to the v1.12.4 release line (`7793762` plus this promotion record; ff-only, no force) and pushed `main` -> `origin/main`. `dev` remains the staging line; no code changes during promotion.
+- **Cloudflare.** Same `dist/` build redeployed with `--branch main` -> `https://5d48a7cd.folio-pdf.pages.dev`. Production `https://folio-pdf.pages.dev` verified serving `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`; `/sw.js` 200 with `no-store`; both apex and direct URL checked.
+- **Docs sync.** README version badge -> 1.12.4; STATUS main/repo state, BUGS F-22/F-24, DECISIONS D55, and CHANGELOG v1.12.4 promotion evidence updated.
+- **Remaining.** Phone field confirmation of review entry feel, one-tap build, and crop settle timing (F-24); F-22 shutter feel.
+
+## 2026-10-20 - Scanner review/build flow repair (F-24, D55)
 
 - **Objective.** Fix the phone-reported review-entry stall/flash and the double `Build PDF` flow without changing the capture pipeline or engine contract.
 - **Work.** Review now paints the queued photo immediately and defers ML until after a paint yield; detection decodes at ≤1600px and scales the detected quad back to original pixels, so warp keeps full resolution. `ScanicCapture.buildPdf` no longer runs `prepareImportFile`: it hands candidate Files to `ImagesTool`, whose single `importFiles` pass is observed through the new `onCommitted` callback, and the new `buildPages(pagesToBuild)` starts one engine build automatically. The `done` phase and its second build action are deleted; the scanner stays mounted until commit resolves, and `{ok:false}` keeps the queue. `QueueEntry.warping` + detection/warp timeouts gate `Build PDF` (`data-build-state="ready"`) and prevent a tap from silently committing a raw original while a crop is rendering.
 - **Findings.** Code confirmed two normalization passes (`buildPdf` + `commitCameraPages` → `importFiles`), a close-before-import failure path, and a full-resolution main-thread decode at review entry. The E2E “filmstrip tap” check also carried a stale 30s src wait after adjust-next auto-kept a dirty draft; replaced with a page-identity wait.
 - **Verification.** `tsc` clean; 792/792 vitest across 56 files; eslint/prettier clean; production build green (53 entries / 7903.47 KiB); canonical E2E 102/102 + 4 SKIP (optional corpus absent).
-- **Release.** v1.12.4: version bump, dev/release notes, changelog. Cloudflare Pages `folio-pdf` branch `dev` deployment `c50ee343`; alias `https://dev.folio-pdf.pages.dev` verified serving `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`; `/sw.js` 200 with `no-store`. GitHub `dev` push shipped; production (`main`) stays v1.12.3.
+- **Release.** v1.12.4: version bump, dev/release notes, changelog. Cloudflare Pages `folio-pdf` branch `dev` deployment `c50ee343`; alias `https://dev.folio-pdf.pages.dev` verified serving `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`; `/sw.js` 200 with `no-store`. GitHub `dev` push shipped; production (`main`) promoted to v1.12.4 on 2026-10-21 (see entry above).
 - **Remaining.** Field confirmation on the user's phone: review entry feel, one-tap build, and crop settle timing on a real device.
 
 ## 2026-10-20 — Production promotion to v1.12.3 (git `main` + Cloudflare prod)

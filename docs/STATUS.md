@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current as of v1.10.1 on `dev` (2026-10-05 — D46 ML-only + full precache; scoped verification, full suite + E2E pending laptop-side). v1.10.0 interaction pass + v1.9.7 update repair on dev Cloudflare. Production (`main`) still carries v1.9.5.
+> Current as of v1.12.4 on `dev` and `main` (2026-10-21 - scanner review/build flow repair, F-24/D55). Dev deployment `c50ee343`; production deployment `5d48a7cd`; both serve bundle `index-DjH0_YOG.js` (version 1.12.4 + build-time proof).
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
@@ -40,7 +40,7 @@
 
 ## Current work
 
-- **Scanner review/build flow repair shipped as v1.12.4 on `dev` (F-24, D55; 2026-10-20, scoped-to-full verification for this change).** Review entry paints the queued photo immediately; ML decodes at ≤1600px and scales the quad back to full-res; detection/warp are time-bounded. The separate “All pages ready” screen is gone: review `Build PDF` performs one `importFiles` pass and auto-starts one `buildPages` run; the scanner stays mounted until commit resolves (`{ok:false}` keeps the queue). Build is gated on detection + crop settle (`data-build-state="ready"`). Verified: `tsc` clean, 792/792 vitest across 56 files, eslint/prettier clean, production build green (53 entries / 7903.47 KiB), canonical E2E 102/102 + 4 SKIP. Deployed to Cloudflare Pages `dev` (`c50ee343`); alias `https://dev.folio-pdf.pages.dev` serves `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`. GitHub `dev` push shipped with this record; phone field confirmation pending.
+- **Scanner review/build flow repair shipped as v1.12.4 on `dev` (F-24, D55; 2026-10-20, scoped-to-full verification for this change).** Review entry paints the queued photo immediately; ML decodes at ≤1600px and scales the quad back to full-res; detection/warp are time-bounded. The separate “All pages ready” screen is gone: review `Build PDF` performs one `importFiles` pass and auto-starts one `buildPages` run; the scanner stays mounted until commit resolves (`{ok:false}` keeps the queue). Build is gated on detection + crop settle (`data-build-state="ready"`). Verified: `tsc` clean, 792/792 vitest across 56 files, eslint/prettier clean, production build green (53 entries / 7903.47 KiB), canonical E2E 102/102 + 4 SKIP. Deployed to Cloudflare Pages `dev` (`c50ee343`); alias `https://dev.folio-pdf.pages.dev` serves `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`. GitHub `dev` push shipped; promoted to `main` + Cloudflare production 2026-10-21 (deployment `5d48a7cd`, same `/assets/index-DjH0_YOG.js`). Phone field confirmation pending.
 
 - **ML + viewfinder Phase 1 is in flight on `dev` (D51, DOCS-ONLY record — no numbers claimed here, full E2E explicitly DEFERRED).** ML-CORE lane owns `scan/` (session options, retained warm client, K-lane pending-count hygiene, stage spans + confidence record + read-only EXIF probe); VF-BUILD lane owns `ScanicCapture`/`ScanicReview` (4-module surgical refactor, non-blocking review). No suite was executed in this docs pass and no source file was touched here — lane pass counts, if any, are lane-reported only and none were observed here. Deferred to measured Phase 2: resolution A/B, threshold gating, pre-downscale, bounded capture, WebGPU/WebGL (brief-cited 27 MB cap + deprecation evidence, unverified here), threads/COOP-COEP (preserved per D33). Field gates before any latency/accuracy claim: phone-tier latency, threshold-sweep photos, viewfinder feel (see `docs/DECISIONS.md` D51, `docs/BUGS.md` F-22 follow-up + F-21 note, `docs/PERFORMANCE.md` Phase-1 register). Validated baselines below untouched.
 
@@ -62,7 +62,7 @@
 
 ## Pending work
 
-- `main` now carries the Folio v1.12.3 build (audit-fix waves P0–P3 + diagnostics strip, merged from `dev` 2026-10-20) and serves production at `https://folio-pdf.pages.dev` (prod deploy `57c404a2`, bundle `index-DRFS8XwU.js`, verified on apex + direct URL); `dev` continues as the staging line.
+- `main` now carries the Folio v1.12.4 scanner-flow build (review paints first + one Build PDF action; promoted from `dev` 2026-10-21) and serves production at `https://folio-pdf.pages.dev` (prod deploy `5d48a7cd`, bundle `index-DjH0_YOG.js`, verified on apex + direct URL); `dev` continues as the staging line.
 
 ## Blocked work
 
@@ -118,10 +118,10 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `dev` post-strip (F-22 diagnostics stripped for prod; v1.12.4 scanner-flow line). `package.json` 1.12.4 - v2.0.0 bump HELD (see release checklist above); production (`main`) now serves the v1.12.3 audit-fix build (promoted 2026-10-20, prod deploy `57c404a2`).
+- Branch: `dev`. HEAD: `dev` post-strip (F-22 diagnostics stripped for prod; v1.12.4 scanner-flow line). `package.json` 1.12.4 - v2.0.0 bump HELD (see release checklist above); production (`main`) now serves the v1.12.4 scanner-flow build (promoted 2026-10-21, prod deploy `5d48a7cd`).
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace. The `scan/` crate is deleted (D33).
 - Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
-- `main` at v1.12.3 audit-fix build (merged from `dev` 2026-10-20, deployed to production as `57c404a2`).
+- `main` at v1.12.4 scanner-flow build (merged from `dev` 2026-10-21, deployed to production as `5d48a7cd`).
 - Generated/ignored: `wasm/pkg/`, `engine/target/`, `app/dist/`, `app/node_modules/`, optional `test pdfs/` corpus, E2E artifacts — none committed.
 
 ## Immediate next steps
