@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.7 portrait camera experience',
+    date: '2026-11-12',
+    notes: [
+      'Portrait viewfinder fills the screen and captures the same visible framing. Double-tap refocus and sun brightness controls are accessible directly over the preview where supported.',
+    ],
+  },
+  {
     build: 'v1.12.6 camera framing and controls',
     date: '2026-11-12',
     notes: [

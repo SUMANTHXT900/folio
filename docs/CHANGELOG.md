@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.7 — Portrait camera experience (`dev`, 2026-11-12)
+
+Portrait cover preview replaces landscape letterboxing; frame capture matches the visible center crop. Double-tap requests supported refocus, with a visible focus marker. Exposure compensation and refocus controls move from More to the viewfinder. Brightness remains disabled where unsupported. This does not guarantee focus at the tapped point or optical 1x on hardware lacking those APIs.
+
 ## v1.12.6 — Scanner framing and camera controls (`dev`, 2026-11-12)
 
 Full-frame preview removes cover cropping. Supported camera zoom requests 1 clamped to device bounds; continuous autofocus/autoexposure are requested when supported. More sheet gains capability-gated refocus and brightness controls with an unsupported explanation. Hardware lens magnification remains platform-dependent.

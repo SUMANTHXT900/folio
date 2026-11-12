@@ -1191,6 +1191,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     exposure?: { min: number; max: number; step: number };
     focusModes: string[];
   }>({ focusModes: [] });
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
   const [exposure, setExposure] = useState(0);
   const [cameraControlNote, setCameraControlNote] = useState<string | null>(null);
   const applyCameraControl = async (constraint: Record<string, unknown>) => {
@@ -1679,6 +1680,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         }
         const track = stream.getVideoTracks()[0];
         setCameraControls({ focusModes: [] });
+        setFocusPoint(null);
         setCameraControlNote(null);
         try {
           const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
@@ -2022,8 +2024,15 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         // Play failure still leaves the last frame drawable in most browsers.
       }
       const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      const rect = video.getBoundingClientRect();
+      const ratio =
+        rect.width > 0 && rect.height > 0
+          ? rect.width / rect.height
+          : video.videoWidth / video.videoHeight;
+      const cropWidth = Math.min(video.videoWidth, video.videoHeight * ratio);
+      const cropHeight = Math.min(video.videoHeight, video.videoWidth / ratio);
+      canvas.width = Math.round(cropWidth);
+      canvas.height = Math.round(cropHeight);
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         setCaptureError(
@@ -2033,7 +2042,17 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       }
       // Unmirrored invariant: drawImage reads raw camera pixels, never the CSS
       // `scaleX(-1)` preview transform — captures are always true-to-scene.
-      ctx.drawImage(video, 0, 0);
+      ctx.drawImage(
+        video,
+        (video.videoWidth - cropWidth) / 2,
+        (video.videoHeight - cropHeight) / 2,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
       const blob = await new Promise<Blob | null>((resolve) => {
         try {
           if (typeof canvas.toBlob !== 'function') {
@@ -2750,57 +2769,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
   const cameraSheet = (
     <div className="flex max-h-[60dvh] flex-col gap-0.5 overflow-y-auto p-1.5">
-      <div className="rounded-xl bg-black/5 p-3 dark:bg-white/5">
-        <p className="text-sm font-semibold">Camera settings</p>
-        <p className="mt-1 text-xs opacity-70">
-          Full frame preview · automatic focus where supported
-        </p>
-        {cameraControls.focusModes.some(
-          (mode) => mode === 'single-shot' || mode === 'continuous',
-        ) && (
-          <button
-            type="button"
-            className="mt-2 min-h-[44px] rounded-lg border px-3 text-sm"
-            onClick={() =>
-              void applyCameraControl({
-                focusMode: cameraControls.focusModes.includes('single-shot')
-                  ? 'single-shot'
-                  : 'continuous',
-              })
-            }
-          >
-            Refocus
-          </button>
-        )}
-        {cameraControls.exposure ? (
-          <label className="mt-3 block text-sm">
-            Brightness
-            <input
-              aria-label="Camera exposure compensation"
-              className="block min-h-[44px] w-full accent-amber-500"
-              type="range"
-              min={cameraControls.exposure.min}
-              max={cameraControls.exposure.max}
-              step={cameraControls.exposure.step}
-              value={exposure}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setExposure(value);
-                void applyCameraControl({ exposureCompensation: value });
-              }}
-            />
-          </label>
-        ) : (
-          <p className="mt-2 text-xs opacity-70">
-            Brightness is automatic; this camera does not expose an adjustment.
-          </p>
-        )}
-        {cameraControlNote && (
-          <p role="status" className="mt-2 text-xs">
-            {cameraControlNote}
-          </p>
-        )}
-      </div>
       {torchSupported && (
         <SheetRowButton
           icon={torchOn ? '🔦' : '💡'}
@@ -2966,9 +2934,89 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   playsInline
                   autoPlay
                   aria-label="Camera preview"
-                  style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
-                  className="absolute inset-0 h-full w-full object-contain"
+                  style={{
+                    touchAction: 'manipulation',
+                    ...(previewMirrored ? { transform: 'scaleX(-1)' } : {}),
+                  }}
+                  onDoubleClick={(event) => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const point = {
+                      x: (event.clientX - rect.left) / rect.width,
+                      y: (event.clientY - rect.top) / rect.height,
+                    };
+                    setFocusPoint(point);
+                    const focusMode = cameraControls.focusModes.includes('single-shot')
+                      ? 'single-shot'
+                      : cameraControls.focusModes.includes('continuous')
+                        ? 'continuous'
+                        : null;
+                    if (focusMode) void applyCameraControl({ focusMode });
+                    else
+                      setCameraControlNote(
+                        'This camera handles focus automatically; touch focus is unavailable.',
+                      );
+                  }}
+                  className="absolute inset-0 h-full w-full object-cover"
                 />
+                <div className="pointer-events-none absolute inset-0 z-10">
+                  {focusPoint && (
+                    <div
+                      aria-hidden
+                      className="absolute h-16 w-16 -translate-x-1/2 -translate-y-1/2 rounded-xl border-2 border-amber-400"
+                      style={{ left: `${focusPoint.x * 100}%`, top: `${focusPoint.y * 100}%` }}
+                    />
+                  )}
+                  <div className="pointer-events-auto absolute right-4 top-1/3 flex w-12 flex-col items-center gap-2 rounded-full bg-black/50 py-3 text-white backdrop-blur-sm">
+                    <span aria-hidden className="text-xl">
+                      ☀
+                    </span>
+                    <input
+                      aria-label="Camera brightness"
+                      title={
+                        cameraControls.exposure
+                          ? 'Adjust brightness'
+                          : 'Automatic brightness only on this camera'
+                      }
+                      type="range"
+                      disabled={!cameraControls.exposure}
+                      min={cameraControls.exposure?.min ?? -1}
+                      max={cameraControls.exposure?.max ?? 1}
+                      step={cameraControls.exposure?.step ?? 0.1}
+                      value={exposure}
+                      className="h-32 w-11 accent-amber-400 [writing-mode:vertical-lr] [direction:rtl]"
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        setExposure(value);
+                        void applyCameraControl({ exposureCompensation: value });
+                      }}
+                    />
+                    <button
+                      type="button"
+                      aria-label="Refocus camera"
+                      className="min-h-[44px] w-11 text-xl"
+                      onClick={() => {
+                        const mode = cameraControls.focusModes.includes('single-shot')
+                          ? 'single-shot'
+                          : cameraControls.focusModes.includes('continuous')
+                            ? 'continuous'
+                            : null;
+                        if (mode) void applyCameraControl({ focusMode: mode });
+                        else setCameraControlNote('This camera does not expose focus control.');
+                      }}
+                    >
+                      ◎
+                    </button>
+                  </div>
+                  <p
+                    role="status"
+                    className="absolute bottom-40 left-4 right-20 rounded-xl bg-black/50 px-3 py-2 text-center text-xs text-white"
+                  >
+                    {cameraControlNote ??
+                      (cameraControls.exposure
+                        ? 'Double-tap to refocus · slide the sun for brightness'
+                        : 'Double-tap to refocus · brightness is automatic on this camera')}
+                  </p>
+                </div>
                 {/* Finder guidance frame: rounded-rect overlay with corner
                     ticks. Top clearance comes from `--finder-clear` (set on
                     the scanner root, responsive via the `sm:` override) so

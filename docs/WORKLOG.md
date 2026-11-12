@@ -847,3 +847,7 @@ Implemented live-video JPEG capture, preview modal keyboard handling, overlappin
 ## 2026-11-12 — Camera framing and controls
 
 Changed preview cover to contain to show uncropped video; initialization requests supported zoom 1, continuous focus and continuous exposure. Added capability-gated exposure compensation slider and refocus button to More. Browser-exposed zoom is not a guarantee of optical 1x; physical phone validation remains needed.
+
+## 2026-11-12 — Portrait camera UX
+
+Replaced letterboxed preview with a portrait cover surface and matched center-crop capture. Added double-tap refocus and inline sun exposure slider. Focus marker records interaction location, not a verified hardware focus point. Hardware behavior requires physical-device validation.

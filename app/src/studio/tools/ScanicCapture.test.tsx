@@ -330,7 +330,7 @@ describe('viewfinder', () => {
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
     expect(video).not.toBeNull();
-    expect(video?.className).toContain('object-contain');
+    expect(video?.className).toContain('object-cover');
     expect(video?.className).toContain('inset-0');
     expect(video?.className).toContain('h-full');
     expect(video?.className).toContain('w-full');
@@ -1794,7 +1794,7 @@ describe('orientation-honest constraints', () => {
       // No ratio styling on the cover video: the full-bleed object-cover
       // layer crops, never stretches (the aspectRatio style is deleted).
       expect(video.style.aspectRatio).toBe('');
-      expect(video.className).toContain('object-contain');
+      expect(video.className).toContain('object-cover');
       expect(video.className).toContain('inset-0');
       // Full-bleed layer keeps no hardcoded aspect/max-w box.
       expect(q('[data-viewfinder]').className).not.toMatch('aspect-');
