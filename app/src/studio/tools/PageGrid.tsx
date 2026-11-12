@@ -339,8 +339,50 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
   // Viewer keyed by page id, not index: reorder/remove while the modal
   // is open keeps showing the same page instead of sliding to a neighbor.
   const [viewerId, setViewerId] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const viewerIndex = viewerId === null ? -1 : pages.findIndex((p) => p.id === viewerId);
   const viewing = viewerIndex < 0 ? null : pages[viewerIndex];
+
+  useEffect(() => {
+    if (!viewing) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    dialog?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setViewerId(null);
+      } else if (event.key === 'Tab' && dialog) {
+        const controls = Array.from(
+          dialog.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (!controls.length) {
+          event.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (
+          event.shiftKey &&
+          (document.activeElement === first || document.activeElement === dialog)
+        ) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      previous?.focus();
+    };
+  }, [viewing?.id]);
 
   // Stable preview callback: rows receive this reference (plus their
   // page id) instead of fresh per-row closures, so memo holds.
@@ -401,6 +443,9 @@ export function PageGrid({ pages, onMove, onReorder, onRemove, onRotate }: PageG
                 className="max-w-3xl w-full max-h-[92dvh] flex flex-col overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
                 role="dialog"
+                aria-modal="true"
+                ref={dialogRef}
+                tabIndex={-1}
                 aria-label={`Preview page ${viewerIndex + 1}: ${viewing.name}`}
               >
                 <div className="flex items-center justify-between mb-2 text-paper-100 shrink-0">

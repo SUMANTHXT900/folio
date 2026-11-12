@@ -18,6 +18,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.5 development update',
+    date: '2026-11-12',
+    notes: [
+      'Camera capture now uses the live video frame. PDF intake errors are visible in Merge, Rotate and Metadata; image previews support Escape and keyboard focus.',
+    ],
+  },
+  {
     build: 'v1.12.4 release',
     date: '2026-10-20',
     notes: [

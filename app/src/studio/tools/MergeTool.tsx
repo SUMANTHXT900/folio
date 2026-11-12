@@ -234,6 +234,14 @@ export default function MergeTool() {
 
   const onMerge = async () => {
     if (files.length < 2) return;
+    if (files.reduce((sum, file) => sum + file.sizeBytes, 0) > 100 * 1024 * 1024) {
+      setError(
+        new Error(
+          'These PDFs exceed the 100 MB total merge limit. Remove a file or use smaller PDFs.',
+        ),
+      );
+      return;
+    }
     ranRef.current = true;
     setWorking(true);
     setDone(null);

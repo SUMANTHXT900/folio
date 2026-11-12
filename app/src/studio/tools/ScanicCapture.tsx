@@ -1190,12 +1190,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [capturing, setCapturing] = useState(false);
   const capturingRef = useRef(false);
   /**
-   * Per-track photo-capability cache: `getPhotoCapabilities()` is an async
-   * round-trip that never changes for a live track, so pay it once per
-   * track instead of once per tap.
-   */
-  const photoCapsRef = useRef(new Map<string, { imageWidth?: number; imageHeight?: number }>());
-  /**
    * Captured-flash: the quiet finder pill flashes `Captured — keep shooting`
    * for CAPTURE_FLASH_MS after each queue-only shutter park, then returns to
    * quiet. Refs never render alone — the tick state repaints on set and on
@@ -1968,18 +1962,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     }
   }, [torchOn]);
 
-  /**
-   * Original-blob shutter: the ImageCapture API returns the sensor's native
-   * Blob (`takePhoto()`) — zero canvas, zero toBlob, zero re-encode, no
-   * quality param. takePhoto output is sensor-native and therefore
-   * UNMIRRORED by construction (the front-preview `scaleX(-1)` is CSS-only
-   * and never reaches the sensor path), preserving the mirror invariant.
-   * Resolution requests the `getPhotoCapabilities()` max when the browser
-   * exposes it (best original); otherwise the bare native default.
-   * Canvas-draw is a fallback ONLY when ImageCapture is unavailable or
-   * `takePhoto()` throws (older browsers, virtual cameras) — commented at
-   * the branch, same unmirrored `drawImage` semantics as before.
-   */
+  /** Capture the live, unmirrored video frame as a JPEG. */
   const captureFrame = useCallback(async () => {
     if (capturingRef.current) return;
     capturingRef.current = true;
@@ -1992,54 +1975,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
         return;
       }
-      const ImageCaptureCtor = getImageCaptureCtor();
-      if (ImageCaptureCtor) {
-        try {
-          const capture = new ImageCaptureCtor(track);
-          const trackKey =
-            typeof (track as { id?: unknown }).id === 'string'
-              ? (track as { id: string }).id
-              : 'default';
-          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined =
-            photoCapsRef.current.get(trackKey);
-          if (photoSettings === undefined) {
-            try {
-              if (typeof capture.getPhotoCapabilities === 'function') {
-                const caps = await capture.getPhotoCapabilities();
-                const maxW = caps.imageWidth?.max;
-                const maxH = caps.imageHeight?.max;
-                if (typeof maxW === 'number' && typeof maxH === 'number') {
-                  photoSettings = { imageWidth: maxW, imageHeight: maxH };
-                  photoCapsRef.current.set(trackKey, photoSettings);
-                }
-              }
-            } catch {
-              // Capabilities unreadable — fall through to the native default.
-              photoSettings = undefined;
-            }
-          }
-          const blob =
-            photoSettings !== undefined
-              ? await capture.takePhoto(photoSettings)
-              : await capture.takePhoto();
-          if (!mountedRef.current) return;
-          if (!blob || blob.size === 0) throw new Error('empty photo');
-          // Untouched original from here on: the queue never re-encodes it.
-          const file = new File([blob], `capture-${idRef.current + 1}.jpg`, {
-            type: blob.type || 'image/jpeg',
-          });
-          enqueueCapture(file);
-          return;
-        } catch {
-          // takePhoto rejected (virtual camera, insecure pipe, in-use track) —
-          // fall through to the canvas-draw fallback below, which reads the
-          // live <video> frame instead of the sensor still.
-        }
-      }
-      // Fallback ONLY: ImageCapture unavailable or takePhoto threw on this
-      // browser/device. Reads raw camera pixels (never the CSS mirror), at the
-      // preview's native frame size — no upscale, no quality param beyond the
-      // legacy JPEG container this path historically produced.
       if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
         setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
         return;

@@ -181,6 +181,17 @@ let urlCounter = 0;
 
 beforeEach(() => {
   urlCounter = 0;
+  Object.defineProperty(HTMLVideoElement.prototype, 'videoWidth', {
+    configurable: true,
+    get: () => 1280,
+  });
+  Object.defineProperty(HTMLVideoElement.prototype, 'videoHeight', {
+    configurable: true,
+    get: () => 720,
+  });
+  HTMLCanvasElement.prototype.toBlob = function (cb) {
+    cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+  };
   __resetCameraChoiceForTests();
   try {
     window.localStorage.clear();
@@ -1477,7 +1488,7 @@ describe('original-blob capture (ImageCapture)', () => {
     return { stop };
   }
 
-  it('takePhoto resolves the sensor-native blob with photoCapabilities max (no canvas re-encode)', async () => {
+  it('captures a video JPEG without requesting a sensor photo', async () => {
     const toBlobTypes: Array<string | undefined> = [];
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void, type?: string) {
       toBlobTypes.push(type);
@@ -1493,11 +1504,10 @@ describe('original-blob capture (ImageCapture)', () => {
     const cta = await findQ('[data-review-cta]');
     expect(cta.textContent).toBe('View 1 pages');
     // Best original: the capabilities max was requested.
-    await waitFor(() => expect(probe.calls()).toBe(1));
-    expect(probe.seen()).toEqual({ imageWidth: 4000, imageHeight: 3000 });
+    expect(probe.calls()).toBe(0);
     // Capture never re-encoded: no canvas export during the shutter itself
     // (warped JPEG q0.9 runs later, in review, via canvasToJpeg only).
-    expect(toBlobTypes.includes('image/jpeg')).toBe(false);
+    expect(toBlobTypes.includes('image/jpeg')).toBe(true);
 
     // Original bytes flow downstream byte-identical.
     fireEvent.click(cta);
@@ -1509,10 +1519,10 @@ describe('original-blob capture (ImageCapture)', () => {
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].file.type).toBe('image/jpeg');
-    expect(await pages[0].file.text()).toBe('sensor-bytes');
+    expect(await pages[0].file.text()).toBe('jpeg-bytes');
   });
 
-  it('takePhoto without exposed capabilities uses the native default', async () => {
+  it('video capture does not require photo capabilities', async () => {
     let seen: unknown = 'unset';
     vi.stubGlobal(
       'ImageCapture',
@@ -1531,7 +1541,7 @@ describe('original-blob capture (ImageCapture)', () => {
     await findQ('[data-scan-capture]');
     fireEvent.click(q('[data-scan-capture]'));
     await findQ('[data-review-cta]');
-    expect(seen === undefined || seen === null).toBe(true);
+    expect(seen).toBe('unset');
   });
 
   it('canvas-draw fallback runs only when ImageCapture is unavailable', async () => {
@@ -2599,26 +2609,13 @@ describe('shutter inflight guard (D53)', () => {
     });
   }
 
-  it('overlapping taps no-op: second tap never re-enters takePhoto, Capturing… shows, then releases', async () => {
+  it('overlapping taps encode one video frame, then release the shutter guard', async () => {
     let takeCalls = 0;
     let resolveTake: ((blob: Blob) => void) | null = null;
-    vi.stubGlobal(
-      'ImageCapture',
-      class {
-        constructor(_track: unknown) {
-          void _track;
-        }
-        async getPhotoCapabilities() {
-          return { imageWidth: { max: 4000 }, imageHeight: { max: 3000 } };
-        }
-        takePhoto() {
-          takeCalls += 1;
-          return new Promise<Blob>((resolve) => {
-            resolveTake = resolve;
-          });
-        }
-      },
-    );
+    HTMLCanvasElement.prototype.toBlob = function (callback) {
+      takeCalls += 1;
+      resolveTake = callback;
+    };
     mockCameraForGuard();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     const shutter = (await findQ('[data-scan-capture]')) as HTMLButtonElement;

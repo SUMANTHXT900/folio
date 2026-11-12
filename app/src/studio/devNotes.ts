@@ -17,6 +17,13 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.12.5 development update',
+    date: '2026-11-12',
+    notes: [
+      'Camera capture now uses the live video frame. PDF intake errors are visible in Merge, Rotate and Metadata; image previews support Escape and keyboard focus.',
+    ],
+  },
+  {
     build: 'Scanner review/build flow (F-24/D55)',
     date: '2026-10-20',
     notes: [
