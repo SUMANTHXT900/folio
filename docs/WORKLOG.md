@@ -843,3 +843,7 @@ Chronological record of meaningful development events. Each entry records object
 ## 2026-11-12 — Video-frame capture and audit fixes
 
 Implemented live-video JPEG capture, preview modal keyboard handling, overlapping intake guard and preflight merge limit. Ownership cleanup remains an investigation because transfers require shared lifetime handling. Phone performance and handwriting quality remain unverified.
+
+## 2026-11-12 — Camera framing and controls
+
+Changed preview cover to contain to show uncropped video; initialization requests supported zoom 1, continuous focus and continuous exposure. Added capability-gated exposure compensation slider and refocus button to More. Browser-exposed zoom is not a guarantee of optical 1x; physical phone validation remains needed.

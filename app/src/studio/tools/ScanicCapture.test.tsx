@@ -319,7 +319,7 @@ describe('ScanicCapture shell', () => {
 });
 
 describe('viewfinder', () => {
-  it('fills the viewport edge-to-edge with cover and floating scrims when live', async () => {
+  it('shows the full frame with contain and floating scrims when live', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
@@ -330,7 +330,7 @@ describe('viewfinder', () => {
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
     expect(video).not.toBeNull();
-    expect(video?.className).toContain('object-cover');
+    expect(video?.className).toContain('object-contain');
     expect(video?.className).toContain('inset-0');
     expect(video?.className).toContain('h-full');
     expect(video?.className).toContain('w-full');
@@ -354,6 +354,7 @@ describe('viewfinder', () => {
 
   it('requests high-res constraints with a continuous-focus effort', async () => {
     const { track } = mockLiveCamera();
+    track.getCapabilities = () => ({ focusMode: ['continuous'] });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     const getUserMedia = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
@@ -1759,7 +1760,7 @@ describe('orientation-honest constraints', () => {
     }
   });
 
-  it('never styles the preview with a forced ratio (full-bleed cover only)', async () => {
+  it('never styles the preview with a forced ratio (full-frame contain only)', async () => {
     const restore = setOrientation('landscape-primary');
     try {
       const stop = vi.fn();
@@ -1793,7 +1794,7 @@ describe('orientation-honest constraints', () => {
       // No ratio styling on the cover video: the full-bleed object-cover
       // layer crops, never stretches (the aspectRatio style is deleted).
       expect(video.style.aspectRatio).toBe('');
-      expect(video.className).toContain('object-cover');
+      expect(video.className).toContain('object-contain');
       expect(video.className).toContain('inset-0');
       // Full-bleed layer keeps no hardcoded aspect/max-w box.
       expect(q('[data-viewfinder]').className).not.toMatch('aspect-');

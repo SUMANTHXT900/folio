@@ -1187,6 +1187,22 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * shutter paint before the first await yields) and drops in `finally`,
    * so overlapping taps no-op instead of serializing on the sensor.
    */
+  const [cameraControls, setCameraControls] = useState<{
+    exposure?: { min: number; max: number; step: number };
+    focusModes: string[];
+  }>({ focusModes: [] });
+  const [exposure, setExposure] = useState(0);
+  const [cameraControlNote, setCameraControlNote] = useState<string | null>(null);
+  const applyCameraControl = async (constraint: Record<string, unknown>) => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [constraint as MediaTrackConstraintSet] });
+      setCameraControlNote(null);
+    } catch {
+      setCameraControlNote('This camera could not apply that setting. Try another camera.');
+    }
+  };
   const [capturing, setCapturing] = useState(false);
   const capturingRef = useRef(false);
   /**
@@ -1662,13 +1678,34 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
           }
         }
         const track = stream.getVideoTracks()[0];
-        // Continuous focus effort where available — silent no-op otherwise.
+        setCameraControls({ focusModes: [] });
+        setCameraControlNote(null);
         try {
-          await track?.applyConstraints({
-            advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
-          });
+          const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
+            zoom?: { min: number; max: number };
+            exposureCompensation?: { min: number; max: number; step?: number };
+            focusMode?: string[];
+            exposureMode?: string[];
+          };
+          const focusModes = caps?.focusMode ?? [];
+          const range = caps?.exposureCompensation;
+          if (!cancelled) {
+            setCameraControls({
+              focusModes,
+              exposure:
+                range && range.max > range.min ? { ...range, step: range.step || 0.1 } : undefined,
+            });
+            setExposure(range ? Math.max(range.min, Math.min(0, range.max)) : 0);
+          }
+          const initial: Record<string, unknown> = {};
+          if (caps?.zoom) initial.zoom = Math.max(caps.zoom.min, Math.min(1, caps.zoom.max));
+          if (focusModes.includes('continuous')) initial.focusMode = 'continuous';
+          if (caps?.exposureMode?.includes('continuous')) initial.exposureMode = 'continuous';
+          if (Object.keys(initial).length) {
+            await track.applyConstraints({ advanced: [initial as MediaTrackConstraintSet] });
+          }
         } catch {
-          // Unsupported on this browser/device — fixed focus still scans.
+          // Hardware controls vary across browsers; the preview remains usable.
         }
         // Facing reconcile: read the LIVE stream settings (actual sensor
         // mode) for `facingMode` when exposed (labelless OEM ids defeat
@@ -2713,6 +2750,57 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   );
   const cameraSheet = (
     <div className="flex max-h-[60dvh] flex-col gap-0.5 overflow-y-auto p-1.5">
+      <div className="rounded-xl bg-black/5 p-3 dark:bg-white/5">
+        <p className="text-sm font-semibold">Camera settings</p>
+        <p className="mt-1 text-xs opacity-70">
+          Full frame preview · automatic focus where supported
+        </p>
+        {cameraControls.focusModes.some(
+          (mode) => mode === 'single-shot' || mode === 'continuous',
+        ) && (
+          <button
+            type="button"
+            className="mt-2 min-h-[44px] rounded-lg border px-3 text-sm"
+            onClick={() =>
+              void applyCameraControl({
+                focusMode: cameraControls.focusModes.includes('single-shot')
+                  ? 'single-shot'
+                  : 'continuous',
+              })
+            }
+          >
+            Refocus
+          </button>
+        )}
+        {cameraControls.exposure ? (
+          <label className="mt-3 block text-sm">
+            Brightness
+            <input
+              aria-label="Camera exposure compensation"
+              className="block min-h-[44px] w-full accent-amber-500"
+              type="range"
+              min={cameraControls.exposure.min}
+              max={cameraControls.exposure.max}
+              step={cameraControls.exposure.step}
+              value={exposure}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setExposure(value);
+                void applyCameraControl({ exposureCompensation: value });
+              }}
+            />
+          </label>
+        ) : (
+          <p className="mt-2 text-xs opacity-70">
+            Brightness is automatic; this camera does not expose an adjustment.
+          </p>
+        )}
+        {cameraControlNote && (
+          <p role="status" className="mt-2 text-xs">
+            {cameraControlNote}
+          </p>
+        )}
+      </div>
       {torchSupported && (
         <SheetRowButton
           icon={torchOn ? '🔦' : '💡'}
@@ -2879,7 +2967,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   autoPlay
                   aria-label="Camera preview"
                   style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
-                  className="absolute inset-0 h-full w-full object-cover"
+                  className="absolute inset-0 h-full w-full object-contain"
                 />
                 {/* Finder guidance frame: rounded-rect overlay with corner
                     ticks. Top clearance comes from `--finder-clear` (set on

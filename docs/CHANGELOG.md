@@ -2,6 +2,10 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.6 — Scanner framing and camera controls (`dev`, 2026-11-12)
+
+Full-frame preview removes cover cropping. Supported camera zoom requests 1 clamped to device bounds; continuous autofocus/autoexposure are requested when supported. More sheet gains capability-gated refocus and brightness controls with an unsupported explanation. Hardware lens magnification remains platform-dependent.
+
 ## v1.12.5 — Video-frame capture and intake fixes (`dev`, 2026-11-12)
 
 Camera shutter captures the live unmirrored video frame as JPEG. Image preview gains modal focus handling and Escape; PDF intake errors are visible in Merge/Rotate/Metadata, overlapping intake is guarded, and oversized merge requests fail before engine staging. Physical-phone image quality remains unverified.

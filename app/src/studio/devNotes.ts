@@ -17,6 +17,13 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.12.6 camera framing and controls',
+    date: '2026-11-12',
+    notes: [
+      'Scanner preview shows the full camera frame without cropping. Camera zoom resets to its supported 1 setting on startup. Brightness adjustment and refocus are available when supported by the selected camera.',
+    ],
+  },
+  {
     build: 'v1.12.5 development update',
     date: '2026-11-12',
     notes: [
