@@ -82,7 +82,7 @@ type DateKey = (typeof DATE_FIELDS)[number]['key'];
  * custom keys (both unsupported by the engine, by design).
  */
 export default function MetadataTool() {
-  const { files, setFiles, addFiles, remove } = usePdfFiles();
+  const { files, setFiles, addFiles, remove, error: filesError } = usePdfFiles();
   const file = files[0] ?? null;
   const [meta, setMeta] = useState<DocumentMetadataData | null>(null);
   const [reading, setReading] = useState(false);
@@ -295,6 +295,12 @@ export default function MetadataTool() {
         name="Metadata"
         desc="Read and edit document properties — title, author, dates and more."
       />
+
+      {filesError && (
+        <p role="alert" className="mt-4 text-sm text-red-500">
+          {filesError}
+        </p>
+      )}
 
       {!file && (
         <DropZone

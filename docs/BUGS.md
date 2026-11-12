@@ -4,6 +4,14 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-25 — PDF intake errors hidden in several tools
+
+- **Status.** Fix implemented locally on `dev`, pending full validation and deployment. **Area.** Merge, Rotate and Metadata file intake. These tools now display the error stored by `usePdfFiles` as an alert. See `docs/mobile-audit-research.md` for the audit.
+
+### F-26 — Image page preview dialog lacks modal keyboard handling
+
+- **Status.** Open; identified by source inspection 2026-11-12. **Area.** Images page preview (`PageGrid.tsx`). The dialog lacks Escape handling, modal semantics and focus management. See `docs/mobile-audit-research.md`.
+
 ### F-22 — Shutter-tap freeze (scan capture jank)
 
 - **Status.** Fix shipped in v1.12.4 on `dev` and `main`/production (D53 shutter-instant hardening; production deployment `5d48a7cd`); field re-confirmation pending on the user's phone. **Area.** Scanner (`ScanicCapture.tsx` shutter path). **Severity.** High (user-reported blocker: tap lagged, then recovered; still present after D47 per user phone verdict 2026-10-18).

@@ -107,7 +107,7 @@ const RotateTile = memo(function RotateTile({
 });
 
 export default function RotateTool() {
-  const { files, addFiles, remove, setFiles } = usePdfFiles();
+  const { files, addFiles, remove, setFiles, error: filesError } = usePdfFiles();
   const file = files[0] ?? null;
   const { thumbs, load, fillAll, loading, progress } = usePageThumbs();
   // Shared pending-transfer intake (claim + gen-guarded back-out release).
@@ -322,6 +322,12 @@ export default function RotateTool() {
         name="Rotate pages"
         desc="Rotate individual pages or the whole document."
       />
+
+      {filesError && (
+        <p role="alert" className="mt-4 text-sm text-red-500">
+          {filesError}
+        </p>
+      )}
 
       {!file ? (
         <DropZone
