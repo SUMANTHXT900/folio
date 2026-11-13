@@ -1,6 +1,6 @@
 # Folio — Status
 
-> Current development: v1.12.8 on `dev` (2026-11-13, scanner framing/quality/controls repair D56/F-27). Release verification and deployment evidence: newest WORKLOG entry. Production/main is unchanged at the v1.12.4 scanner-flow line; no promotion is authorized by this task.
+> Current development: v1.12.8 on `dev` (2026-11-13, scanner framing/quality/controls repair D56/F-27), code commit `5c43307`, Cloudflare deployment `6dd0a849`. Dev alias verified serving `index-L5cxRNMs.js`, build `2026-11-13T12:33:27.635Z`, About v1.12.8. Production/main is unchanged at the v1.12.4 scanner-flow line; no promotion is authorized by this task.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase

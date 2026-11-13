@@ -6,7 +6,7 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ### F-27 — Scanner viewport crop discarded detail and looked zoomed in
 
-- **Status.** Fixed in v1.12.8 source; physical-phone validation pending. **Area.** `ScanicCapture.tsx`, camera controls (D56).
+- **Status.** Shipped as v1.12.8 on `dev` (code `5c43307`, Cloudflare `6dd0a849`); physical-phone validation pending. **Area.** `ScanicCapture.tsx`, camera controls (D56).
 - **Evidence.** Reproduction test: a 1280×720 video displayed in a 360×800 viewport saved only 324×720. The old `object-cover` preview and matching center crop silently discarded most horizontal pixels. Zoom was initialized toward 1 but had no user control; the focus marker did not send a sensor point.
 - **Fix.** Full-frame capture/contain preview, hardware-minimum zoom + Wide/slider, JPEG q0.95 for capture and crop, supported-only exposure/AF controls, serialized constraint preservation, refreshable all-exposed-ID camera list, native camera file alternative. No physical-lens access claim.
 - **Verification.** Regression fails before fix; full frontend 800/57 and canonical E2E 103/103 + 4 optional-corpus skips pass. Chromium synthetic-camera comparison retained 1280×720 instead of 333×720 at 390×844; output pixels match live video exactly. Not a phone readability or latency guarantee.

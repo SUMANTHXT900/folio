@@ -8,6 +8,7 @@ Versions and dates below are verified against git history (`git log --format='%h
 - Capability-backed zoom starts at the hardware minimum (including below 1), with Wide reset and a range slider. Values are camera units, not optical multipliers. Compact brightness/autofocus controls replace the permanent sun rail and unverified tap-location marker. Hardware changes are serialized and preserve other settings.
 - Camera list refreshes on device/visibility changes and on demand without collapsing shared labels/groups. Hidden physical lenses cannot be exposed by application code; an explicit native phone-camera input offers an alternative.
 - Capture JPEG q0.92 → q0.95 and crop output q0.90 → q0.95; no upscaling, sensor still request, extra encode, ML-at-shutter, or change to the existing import pixel budget. Fine-text readability and phone performance still require device validation.
+- Deployed `dev` only: code `5c43307`, Cloudflare `6dd0a849`, entry `index-L5cxRNMs.js`, build `2026-11-13T12:33:27.635Z`. Live About confirms v1.12.8; remote synthetic-camera smoke passes with source/saved dimensions equal and zero page errors. Main/production untouched.
 
 ## v1.12.7 — Portrait camera experience (`dev`, 2026-11-12)
 
