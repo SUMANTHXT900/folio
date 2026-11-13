@@ -330,7 +330,7 @@ describe('viewfinder', () => {
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
     expect(video).not.toBeNull();
-    expect(video?.className).toContain('object-cover');
+    expect(video?.className).toContain('object-contain');
     expect(video?.className).toContain('inset-0');
     expect(video?.className).toContain('h-full');
     expect(video?.className).toContain('w-full');
@@ -528,7 +528,7 @@ describe('result-FIRST queue', () => {
     expect(seen.length).toBeGreaterThan(0);
     for (const s of seen) {
       expect(s.type).toBe('image/jpeg');
-      expect(s.quality).toBe(0.9);
+      expect(s.quality).toBe(0.95);
     }
   });
 
@@ -1566,10 +1566,23 @@ describe('original-blob capture (ImageCapture)', () => {
       ) as HTMLVideoElement;
       Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true });
       Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true });
+      vi.spyOn(video, 'getBoundingClientRect').mockReturnValue({
+        width: 360,
+        height: 800,
+        left: 0,
+        top: 0,
+        right: 360,
+        bottom: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
 
       fireEvent.click(q('[data-scan-capture]'));
       await findQ('[data-review-cta]');
-      expect(drawImage).toHaveBeenCalled();
+      // A tall phone viewport must never destroy a landscape sensor's pixels.
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0);
+      expect(video.className).toContain('object-contain');
       expect(toBlobTypes.includes('image/jpeg')).toBe(true);
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetContext;
@@ -1578,6 +1591,86 @@ describe('original-blob capture (ImageCapture)', () => {
 });
 
 describe('camera picker', () => {
+  it('refreshes the complete camera list without collapsing shared labels or groups', async () => {
+    const { track } = mockLiveCamera();
+    const enumerateDevices = vi.fn(async () => [
+      { kind: 'videoinput', deviceId: 'main', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'wide', label: 'Back camera', groupId: 'back' },
+    ]);
+    Object.assign(navigator.mediaDevices, { enumerateDevices });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(q('[data-camera-select]').querySelectorAll('option')).toHaveLength(3);
+    enumerateDevices.mockResolvedValueOnce([
+      { kind: 'videoinput', deviceId: 'main', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'wide', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'tele', label: 'Back camera', groupId: 'back' },
+    ]);
+    fireEvent.click(screen.getByText('Refresh cameras'));
+    await waitFor(() =>
+      expect(q('[data-camera-select]').querySelectorAll('option')).toHaveLength(4),
+    );
+    expect(track.applyConstraints).not.toHaveBeenCalled();
+  });
+
+  it('starts at the widest zoom, applies real controls, and preserves autofocus and zoom', async () => {
+    const settings: Record<string, unknown> = { zoom: 2, exposureCompensation: 0 };
+    let constraints: MediaTrackConstraints = {};
+    const track = {
+      stop: vi.fn(),
+      getCapabilities: () => ({
+        zoom: { min: 0.5, max: 4, step: 0.1 },
+        exposureCompensation: { min: -2, max: 2, step: 0.5 },
+        focusMode: ['continuous'],
+      }),
+      getConstraints: () => constraints,
+      getSettings: () => settings,
+      applyConstraints: vi.fn(async (next: MediaTrackConstraints) => {
+        constraints = next;
+        Object.assign(settings, ...(next.advanced ?? []));
+      }),
+    };
+    const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(async () => stream) },
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(settings.zoom).toBe(0.5);
+    expect(settings.focusMode).toBe('continuous');
+    fireEvent.click(screen.getByLabelText('Adjust camera zoom'));
+    fireEvent.change(screen.getByLabelText('Camera zoom'), { target: { value: '1.5' } });
+    await waitFor(() => expect(settings.zoom).toBe(1.5));
+    fireEvent.click(screen.getByLabelText('Adjust camera brightness'));
+    fireEvent.change(screen.getByLabelText('Camera brightness'), { target: { value: '-1' } });
+    await waitFor(() => expect(settings.exposureCompensation).toBe(-1));
+    expect(settings.zoom).toBe(1.5);
+    expect(settings.focusMode).toBe('continuous');
+    fireEvent.click(screen.getByLabelText('Widest camera view'));
+    await waitFor(() => expect(settings.zoom).toBe(0.5));
+  });
+
+  it('does not render nonfunctional zoom, brightness or focus controls', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(document.querySelector('[data-camera-controls]')).toBeNull();
+    expect(screen.queryByLabelText('Camera brightness')).toBeNull();
+    expect(screen.queryByLabelText('Refocus camera')).toBeNull();
+  });
+
+  it('offers native phone-camera input without slowing the live shutter', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const input = screen.getByLabelText('Take a native camera photo');
+    expect(input.getAttribute('capture')).toBe('environment');
+    fireEvent.change(input, { target: { files: [photo('native.jpg', [1, 2, 3])] } });
+    await findQ('[data-review-cta]');
+    expect(mockDetect).not.toHaveBeenCalled();
+  });
+
   function mockTwoCameras() {
     const stop1 = vi.fn();
     const track1 = {
@@ -1727,11 +1820,13 @@ describe('orientation-honest constraints', () => {
     try {
       expect(isLandscapeScreen()).toBe(false);
       expect(buildVideoConstraints('environment')).toEqual({
+        resizeMode: 'none',
         facingMode: { ideal: 'environment' },
         width: { ideal: 1080 },
         height: { ideal: 1920 },
       });
       expect(buildVideoConstraints('user')).toEqual({
+        resizeMode: 'none',
         facingMode: { ideal: 'user' },
         width: { ideal: 720 },
         height: { ideal: 1280 },
@@ -1794,7 +1889,7 @@ describe('orientation-honest constraints', () => {
       // No ratio styling on the cover video: the full-bleed object-cover
       // layer crops, never stretches (the aspectRatio style is deleted).
       expect(video.style.aspectRatio).toBe('');
-      expect(video.className).toContain('object-cover');
+      expect(video.className).toContain('object-contain');
       expect(video.className).toContain('inset-0');
       // Full-bleed layer keeps no hardcoded aspect/max-w box.
       expect(q('[data-viewfinder]').className).not.toMatch('aspect-');

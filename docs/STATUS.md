@@ -1,9 +1,13 @@
 # Folio — Status
 
-> Current as of v1.12.4 on `dev` and `main` (2026-10-21 - scanner review/build flow repair, F-24/D55). Dev deployment `c50ee343`; production deployment `5d48a7cd`; both serve bundle `index-DjH0_YOG.js` (version 1.12.4 + build-time proof).
+> Current development: v1.12.8 on `dev` (2026-11-13, scanner framing/quality/controls repair D56/F-27). Release verification and deployment evidence: newest WORKLOG entry. Production/main is unchanged at the v1.12.4 scanner-flow line; no promotion is authorized by this task.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
+
+**v1.12.8 scanner repair (`dev`).** Full-frame live-video shutter + q0.95 capture/crop, contain preview with content-aligned thin marks, hardware-minimum zoom with Wide/slider, supported-only exposure/autofocus controls, per-track serialized/preserved settings, camera refresh, and explicit native-camera file input. No sensor still/ML work added to the fast shutter. Browser-hidden physical lenses and real-phone AF/AE/detail/performance remain platform/field gates, not solved by desktop emulation. Frontend 800/57 and canonical E2E 103/103 + 4 optional-corpus skips verified; see WORKLOG for build/deploy evidence.
+
+### Historical phase narrative (v1.9.5; superseded by current summary above)
 
 **v1.9.5 release (`dev`).** D33–D45 scanner shipped to prod (2026-10-04 — see `docs/DECISIONS.md` D33–D45, `docs/CHANGELOG.md` v1.9.5): (1) back-camera scoring default (ultra/macro label demerit + zoom-capability bonus + max-pixel tiebreak; persisted pick still wins; background max-res probe kept); (2) warped commits JPEG q0.9 full-res (warped pages are new renders, never original bytes — originals still byte-identical); (3) `LOUPE_ZOOM` 1.1 → 0.6. The D44 best-camera + flash honesty wave (2026-10-04, user phone feedback): (1) background max-resolution probe suggests a sharper back camera one-tap, never auto-switches; pick persists in localStorage; (2) flash toggle never unmounts on transient failure (note instead; hides only on positive torch:false) + torch resets per camera; (3) `LOUPE_ZOOM` 1.15 → 1.1; (4) build time + dev notes use hardcoded 12-hour clock everywhere; (5) devNotes gets a D44 entry on every wave going forward. Folio theme, 44px targets, no fake controls. The D43 dead-controls + preview/drift/loupe fixes, D42 chrome cleanup + adjust-next redo (D42, 2026-10-04, user phone screenshot): (1) compact labeled top bar (close/title/flash/flip/mirror with visible labels, camera select on its own slim row — zero overlaps, finder clearance); (2) strip docked to the bottom overlay cluster; (3) thin dotted outline returns (small-circle handles kept); (4) calmer loupe (~1.3x); (5) adjust-next button beside Apply (pure navigation, no warp/decision). Folio theme, 44px targets, no fake controls. The D41 original-feed capture + camera picker + thin handles redo, D40 auto-accept review + precision tuning redo, D39 loupe + fullscreen finder redo, D38 portrait-geometry + compact-review redo, D37 single-canvas-review + 8-handle-adjust redo, D36 Google-pattern redo, D35 scanner redo, D34 scanic integration, and D33 strip history are preserved in `docs/DECISIONS.md` D33–D45 and `docs/BUGS.md` F-21. Retained on `dev`: performance passes P0–P2+P4 (P0.2 measured-and-shelved), PWA update manager (D16), JPEG DCT passthrough (D17), PNG→JPEG import + Rearrange-parity page list (D18), naming-first downloads (D21), P3 image-build sharding (D22), usage-based Home ordering (D23), preview hardenings (F-18, portaled-modal F-19, Split opener F-20), and audit-hardening waves 1–7 (rotation nearest-wins, loader caps, glue sanitize, init-fatal, preview single-ownership, cancel-during-encode, benchmark matrix). Wave-A app finish (`e74e71b`: studioThumb removal, merge-readiness honesty, local-phase copy, About 44px targets, disabled-card focus, nav affordance, K4 from_bytes alignment) and the portal-AnimatePresence regression fix (`3ccabeb`, E2E-caught pre-ship) are implemented on `dev`. No v2.0.0 version bump: `package.json` is 1.9.5 (v1.9.5 release commit; v2.0.0 stays HELD — see the release checklist below). F-21 is superseded by D33 for the deleted pipeline; the field gate re-arms on scanic in D34 (see `docs/BUGS.md` F-21).
 
@@ -40,6 +44,8 @@
 
 ## Current work
 
+- **D56/F-27 scanner repair, v1.12.8 (`dev`, 2026-11-13).** Current acceptance: saved live image dimensions equal the video frame at mismatched viewport ratios; zoom exposes full hardware bounds without claiming optical `×`; exposure does not reset zoom/torch/AF; unsupported controls do not render; all enumerated camera IDs remain selectable/refreshed. Desktop tests pass; phone field acceptance pending.
+
 - **Scanner review/build flow repair shipped as v1.12.4 on `dev` (F-24, D55; 2026-10-20, scoped-to-full verification for this change).** Review entry paints the queued photo immediately; ML decodes at ≤1600px and scales the quad back to full-res; detection/warp are time-bounded. The separate “All pages ready” screen is gone: review `Build PDF` performs one `importFiles` pass and auto-starts one `buildPages` run; the scanner stays mounted until commit resolves (`{ok:false}` keeps the queue). Build is gated on detection + crop settle (`data-build-state="ready"`). Verified: `tsc` clean, 792/792 vitest across 56 files, eslint/prettier clean, production build green (53 entries / 7903.47 KiB), canonical E2E 102/102 + 4 SKIP. Deployed to Cloudflare Pages `dev` (`c50ee343`); alias `https://dev.folio-pdf.pages.dev` serves `/assets/index-DjH0_YOG.js` with version `1.12.4` and build time `2026-10-20T17:13:37.475Z`. GitHub `dev` push shipped; promoted to `main` + Cloudflare production 2026-10-21 (deployment `5d48a7cd`, same `/assets/index-DjH0_YOG.js`). Phone field confirmation pending.
 
 - **ML + viewfinder Phase 1 is in flight on `dev` (D51, DOCS-ONLY record — no numbers claimed here, full E2E explicitly DEFERRED).** ML-CORE lane owns `scan/` (session options, retained warm client, K-lane pending-count hygiene, stage spans + confidence record + read-only EXIF probe); VF-BUILD lane owns `ScanicCapture`/`ScanicReview` (4-module surgical refactor, non-blocking review). No suite was executed in this docs pass and no source file was touched here — lane pass counts, if any, are lane-reported only and none were observed here. Deferred to measured Phase 2: resolution A/B, threshold gating, pre-downscale, bounded capture, WebGPU/WebGL (brief-cited 27 MB cap + deprecation evidence, unverified here), threads/COOP-COEP (preserved per D33). Field gates before any latency/accuracy claim: phone-tier latency, threshold-sweep photos, viewfinder feel (see `docs/DECISIONS.md` D51, `docs/BUGS.md` F-22 follow-up + F-21 note, `docs/PERFORMANCE.md` Phase-1 register). Validated baselines below untouched.
@@ -71,14 +77,27 @@ None. No blocked items.
 ## Known limitations
 
 - **Compress is disabled** in the Studio UI — reserved for a future update. The button exists but the action stays disabled rather than pretending to work.
-- **Scanner zoom control removed** — the track-reported zoom range is not a focal-length multiplier (devices showed "1×" while actually using the ultrawide lens), so the control was removed rather than lie; revisit with focal-accurate handling (`docs/BUGS.md` F-11, `docs/ROADMAP.md`).
+- **Scanner zoom is hardware-unit based, not optical magnification** — `dev` now has Wide/reset + capability-gated range (D56); the browser may hide physical lenses. More → Use phone camera offers a native-photo alternative. No guarantee that all three physical phone cameras can be enumerated.
 - **Password-protected PDFs are unsupported** (`UNSUPPORTED_FORMAT`): the engine reports them cleanly instead of failing obscurely.
 - **Metadata `set` with `""` is rejected** — use `Clear`. Read preserves `Some("")` distinctly from absent.
 - **`pdf.inspect` does no text extraction, rendering, or image extraction** — structural inspection only (page count, version, encryption, metadata, optional per-page geometry).
 - **`pdf.images_to_pdf` accepts JPEG/PNG only**; anything else fails as `UNSUPPORTED_FORMAT`.
 - About-page future items live in one unversioned **Coming soon** card (Compress, sharing/annotation ideas — aspirations, never promises; verified in `app/src/studio/About.tsx`). The versioned _planned_ entries ("v1.2.0 · Sign & annotate", "v2.0.0 · Batch & OCR") were removed 2026-09-27; the tree itself retains real history, closing the numbering collision with scanner v2.0 (checklist gate 5).
 
-## Validated baseline (v1.9.5 release commit, `dev`, 2026-10-04 — full suite green)
+## Current release verification (v1.12.8, `dev`, 2026-11-13)
+
+| Check | Observed result |
+| --- | --- |
+| Rust `cargo test --locked` | 433 passed; engine source unchanged |
+| WASM `npm run build:wasm` | rebuilt successfully |
+| Frontend typecheck / lint / format | passed; inherited scanner benchmark formatting corrected without behavior changes |
+| Frontend Vitest | 800 passed / 57 files |
+| Production build | passed; 53 precache entries / 7934.85 KiB, under existing alarm/cap |
+| Canonical Chromium E2E | 103/103 + 4 optional-corpus skips, both Vite dev and built preview |
+| Camera smoke / screenshots | source dimensions equal captured dimensions; 320/390/768/1280px layout checks; zero page errors |
+| Physical phone | pending: text detail, actual lenses, exposure/AF accuracy and performance |
+
+## Historical validated baseline (v1.9.5 release commit, `dev`, 2026-10-04 — full suite green)
 
 > v1.9.5 numbers verified below (102/102 + 4 SKIP). D41–D45 scoped waves are folded into this full re-verification.
 
@@ -118,9 +137,9 @@ The v2.0.0 version bump and release are HELD pending the user's real-device phon
 ## Repository state
 
 - GitHub: `https://github.com/SUMANTHXT900/folio` (renamed from `pdf-studio`; old URL redirects).
-- Branch: `dev`. HEAD: `dev` post-strip (F-22 diagnostics stripped for prod; v1.12.4 scanner-flow line). `package.json` 1.12.4 - v2.0.0 bump HELD (see release checklist above); production (`main`) now serves the v1.12.4 scanner-flow build (promoted 2026-10-21, prod deploy `5d48a7cd`).
+- Branch: `dev`; package version 1.12.8 (D56 scanner repair). Production/main remains the v1.12.4 scanner-flow line. v2.0.0 remains HELD; this task does not promote main.
 - Layout: `engine/` (Rust engine) + `wasm/` (bridge) + `app/` (frontend) + `docs/` (project memory); no Cargo workspace. The `scan/` crate is deleted (D33).
-- Canonical local workspace: `D:\hobby_projects\ideating\folio`. The old `folio-engine` workspace is retired (deleted); nothing references it.
+- Current local workspace: `D:\hobby_projects\folio`. The old `folio-engine` workspace is retired.
 - `main` at v1.12.4 scanner-flow build (merged from `dev` 2026-10-21, deployed to production as `5d48a7cd`).
 - Generated/ignored: `wasm/pkg/`, `engine/target/`, `app/dist/`, `app/node_modules/`, optional `test pdfs/` corpus, E2E artifacts — none committed.
 

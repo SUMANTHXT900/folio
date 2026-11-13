@@ -4,6 +4,13 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-27 — Scanner viewport crop discarded detail and looked zoomed in
+
+- **Status.** Fixed in v1.12.8 source; physical-phone validation pending. **Area.** `ScanicCapture.tsx`, camera controls (D56).
+- **Evidence.** Reproduction test: a 1280×720 video displayed in a 360×800 viewport saved only 324×720. The old `object-cover` preview and matching center crop silently discarded most horizontal pixels. Zoom was initialized toward 1 but had no user control; the focus marker did not send a sensor point.
+- **Fix.** Full-frame capture/contain preview, hardware-minimum zoom + Wide/slider, JPEG q0.95 for capture and crop, supported-only exposure/AF controls, serialized constraint preservation, refreshable all-exposed-ID camera list, native camera file alternative. No physical-lens access claim.
+- **Verification.** Regression fails before fix; full frontend 800/57 and canonical E2E 103/103 + 4 optional-corpus skips pass. Chromium synthetic-camera comparison retained 1280×720 instead of 333×720 at 390×844; output pixels match live video exactly. Not a phone readability or latency guarantee.
+
 ### F-25 — PDF intake errors hidden in several tools
 
 - **Status.** Fix implemented locally on `dev`, pending full validation and deployment. **Area.** Merge, Rotate and Metadata file intake. These tools now display the error stored by `usePdfFiles` as an alert. See `docs/mobile-audit-research.md` for the audit.
@@ -14,7 +21,7 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ### F-22 — Shutter-tap freeze (scan capture jank)
 
-- **Status.** Fix shipped in v1.12.4 on `dev` and `main`/production (D53 shutter-instant hardening; production deployment `5d48a7cd`); field re-confirmation pending on the user's phone. **Area.** Scanner (`ScanicCapture.tsx` shutter path). **Severity.** High (user-reported blocker: tap lagged, then recovered; still present after D47 per user phone verdict 2026-10-18).
+- **Status.** User reports live-frame capture performance is excellent (2026-11-13); preserve that path while repairing quality (D56/F-27). Historical native-photo freeze mitigation shipped in v1.12.4 on `dev` and `main`; current `dev` uses video-frame JPEG, not `takePhoto(max)`. **Area.** Scanner shutter. Phone performance of v1.12.8 still needs confirmation.
 - **Symptoms.** Every capture tap showed `Scanning… hold steady`, froze briefly, then came back. After D47 (no `Scanning…` pill, queue-only shutter), taps still read as frozen on the phone.
 - **Root cause (D47 shape kept; four remaining shutter-path costs, read in-tree 2026-10-18).** (1) `takePhoto(max-res)` holds the camera pipeline for hundreds of ms with zero UI feedback, and an overlapping tap serializes a second `takePhoto` on the same track. (2) Per-tap `getPhotoCapabilities()` round-trip before every `takePhoto`. (3) The best-camera background probe opens every other camera one-by-one right after the stream goes live — exactly when the user starts shooting — stalling the live track. (4) Strip/gallery/filmstrip `<img>`s render the full-res capture blob in tiny thumbs (main-thread decode per tap).
 - **Fix direction.** D47 (kept): shutter parks File + thumb as `queued` (no decode, no worker, idle finder); `goToReview` drains via K-lane pool with the `data-review-preparing` overlay; miss = full frame (D46 rule kept). D53 (2026-10-18): shutter inflight guard (`capturing` flips synchronously on tap — instant `Capturing…` pill + disabled shutter — overlapping taps no-op, released in `finally`); per-track photo-capability cache (one round-trip per track, not per tap); probe starts 600ms past live and skips while shooting/capturing; thumb `<img>`s decode async. Zero-encode invariant kept (original-blob capture, no canvas export on the shutter path — pinned by the existing no-re-encode test).
@@ -119,13 +126,13 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 - **Verification.** E2E merge assertions on real progress labels.
 - **Related lesson.** `docs/LESSONS.md` L-5.
 
-### F-11 — Zoom slider reported wrong scale (control removed)
+### F-11 — Zoom slider reported wrong optical scale
 
-- **Status.** Resolved by removal (revisit with focal-accurate handling). **Area.** Scanner camera dock (`app/src/studio/tools/CameraCapture.tsx`, `cameraCapabilities.ts`). **Severity.** Medium (the control lied to users about the optical state).
+- **Status.** Historical optical-scale bug resolved by removal. D56 reintroduces a capability-gated hardware-unit slider on `dev`, explicitly not an optical multiplier; Wide selects the exposed minimum. **Area.** Scanner camera controls. **Severity.** Medium (the old control lied about the optical state).
 - **Symptoms.** The zoom slider showed "1.0×" while the device was actually using its ultrawide lens (real ~0.6×) — the track's reported zoom range is a device-internal scale, not a focal-length multiplier, so any displayed value was misleading.
 - **Root cause.** `MediaStreamTrack.getCapabilities().zoom` exposes an arbitrary per-device numeric range with no guaranteed mapping to focal length or lens choice; browsers/phones may switch physical lenses behind a single "1×" value.
-- **Fix.** The zoom control (slider, state, `applyConstraints({ advanced: [{ zoom }] })` path, capability model field) was removed entirely; the camera dock keeps torch only. Documented for re-introduction (ROADMAP "Future / not committed") once a focal-accurate approach is available.
-- **Verification.** Unit tests assert no zoom control renders even when the track reports a zoom range (`CameraCapture.test.tsx`, `cameraCapabilities.test.ts`); canonical E2E asserts `zoomControls === 0` in the scanner surface check.
+- **Fix.** Original pipeline control was removed (historical tests belonged to the deleted camera implementation). Current D56 control labels values as camera units, never `×`; exposes the real min/max/step and reads back applied settings.
+- **Verification.** Current tests cover sub-one minima, fixed/invalid ranges, clamping/step snapping, Wide reset and preserved zoom while exposure changes.
 
 ### F-12 — Stale code-split chunk 404 after a deploy ("Failed to fetch dynamically imported module")
 

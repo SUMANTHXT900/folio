@@ -25,8 +25,7 @@
  * the read-only EXIF probe and per-item queue spans (measure-only, no
  * behavior).
  *
- * Viewfinder modules (surgical refactor, pipeline untouched —
- * takePhoto→queue→drain→warp→commit is byte-identical in behavior):
+ * Viewfinder modules (frame→queue→drain→warp→commit):
  * `FinderChrome` (ONE overlay top bar: close + title + More; a single
  * overflow sheet owns every secondary control), `Finder` (video + ticks +
  * one ACTIONABLE status pill, quiet otherwise), shutter cluster (shutter +
@@ -34,26 +33,19 @@
  * `ReviewShell` (non-blocking preparing banner; ready pages stay
  * interactive — viewing-is-verdict).
  *
- * Preview vs detection: the <video> preview pixels are NEVER the detection
- * input — detection runs on the captured still through scanic's own internal
- * downscale (the worker scales to detection size itself). Preview
- * resolution (up to 1080p) only affects what the user sees.
+ * Live shutter saves the FULL video frame at JPEG q0.95. No screen-shaped
+ * crop, upscale, sensor-photo stall, or ML work at shutter time. The queued
+ * frame is detection's original; detection readback remains capped at 1600px.
+ * Native phone-camera input is an explicit higher-detail alternative.
  *
  * Mirror invariant: the front-camera preview is CSS-mirrored (`scaleX(-1)`,
  * industry standard) for a natural selfie feel, but captured frames are
- * ALWAYS unmirrored — `ImageCapture.takePhoto()` returns the sensor-native
- * Blob (never the CSS transform), and the canvas-draw fallback reads raw
- * camera pixels via `drawImage(video)` (likewise never the CSS transform).
+ * ALWAYS unmirrored — canvas draw reads raw camera pixels, never CSS.
  * The back camera is never mirrored.
  *
- * Original-blob capture: the shutter uses the ImageCapture API
- * (`new ImageCapture(track).takePhoto()`) so the queued File is the
- * sensor's native encoding — no canvas, no toBlob, no quality param, zero
- * encode/decode. Canvas-draw is a fallback ONLY when ImageCapture is
- * unavailable or throws (older browsers, Firefox without ImageCapture,
- * virtual cameras that reject takePhoto). takePhoto resolution requests the
- * `getPhotoCapabilities()` max when exposed (best original), else the
- * native default (bare `takePhoto()`).
+ * ImageCapture is used only for the existing camera capability probe,
+ * never by the fast live shutter. Native camera Files remain untouched
+ * until the existing import budget requires normalization.
  *
  * Camera choice: after permission, `enumerateDevices()` lists video inputs;
  * the `[data-camera-select]` native select (alongside the facing quick-flip)
@@ -66,10 +58,8 @@
  * session start — portrait screens keep portrait ideals (1080x1920 back /
  * 720x1280 front); landscape screens request landscape max (1920x1080 with
  * a `width: { min: 1280 }` floor). No portrait crop is ever forced on a
- * landscape sensor. The preview is full-bleed `object-cover` (no forced
- * ratio anywhere, no `aspectRatio` styling on the video — the cover layer
- * crops, never stretches, so a 1440p landscape webcam never renders as a
- * blurry zoomed crop).
+ * landscape sensor. resizeMode:none asks for an uncropped hardware mode;
+ * object-contain shows its full frame. Unsupported resizeMode is ignored.
  *
  * E2E DATA CONTRACT (do not rename):
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
@@ -109,11 +99,9 @@
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
- * JPEG q0.9 renders of the worker's warp output via `imageDataToJpeg(0.9)` —
+ * JPEG q0.95 renders of the worker's warp output via `imageDataToJpeg()` —
  * warped pages are NEW renders (never original bytes; originals still pass
- * through byte-identical when inside the import pixel budget), and JPEG q0.9
- * full-res cuts multi-MB PNG bloat to a fraction with no readable-text loss
- * (4-page 22MB class problem). Commits hand candidate Files to ImagesTool's
+ * through byte-identical when inside the import pixel budget). Commits hand candidate Files to ImagesTool's
  * normalization (same pixel budget as gallery imports) so 48MP sensor photos
  * can't bypass it; a failed import keeps the review queue recoverable instead
  * of dropping the captures. Committed warped files keep
@@ -147,6 +135,13 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
+import FinderControls from './scan/FinderControls';
+import {
+  applyTrackControl,
+  cameraRange,
+  clampCameraValue,
+  type CameraRange,
+} from './scan/cameraControls';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -435,18 +430,23 @@ export function isLandscapeScreen(): boolean {
 export function buildVideoConstraints(
   facing: 'environment' | 'user',
   deviceId?: string | null,
-): MediaTrackConstraints {
+): MediaTrackConstraints & { resizeMode: 'none' } {
   const base: MediaTrackConstraints =
     deviceId !== null && deviceId !== undefined && deviceId !== ''
       ? { deviceId: { exact: deviceId } }
       : { facingMode: { ideal: facing } };
   if (isLandscapeScreen()) {
-    return { ...base, width: { ideal: 1920, min: 1280 }, height: { ideal: 1080 } };
+    return {
+      ...base,
+      resizeMode: 'none',
+      width: { ideal: 1920, min: 1280 },
+      height: { ideal: 1080 },
+    };
   }
   if (facing === 'user') {
-    return { ...base, width: { ideal: 720 }, height: { ideal: 1280 } };
+    return { ...base, resizeMode: 'none', width: { ideal: 720 }, height: { ideal: 1280 } };
   }
-  return { ...base, width: { ideal: 1080 }, height: { ideal: 1920 } };
+  return { ...base, resizeMode: 'none', width: { ideal: 1080 }, height: { ideal: 1920 } };
 }
 
 /**
@@ -863,16 +863,15 @@ async function decodeFileForDetection(file: File): Promise<{
 
 /**
  * Warped-page encoder: worker warp ImageData → full-res `image/jpeg` at
- * quality 0.9 (null when the platform cannot encode).
+ * quality 0.95 (null when the platform cannot encode).
  *
  * Rationale: warped pages are NEW renders (never original bytes — originals
  * still pass through byte-identical when inside the import pixel budget),
- * and JPEG q0.9 full-res cuts multi-MB PNG bloat to a fraction with no
- * readable-text loss (4-page 22MB class problem). Committed warped files
+ * and JPEG avoids the old multi-MB PNG bloat. Committed warped files
  * keep `scan-NNN.jpg` names with `image/jpeg` type. Full-res means the warp
  * output pixels as-is (no downscale); only the container changes.
  */
-function imageDataToJpeg(image: ImageData, quality = 0.9): Promise<Blob | null> {
+function imageDataToJpeg(image: ImageData, quality = 0.95): Promise<Blob | null> {
   return new Promise((resolve) => {
     try {
       const canvas = makeCanvas(image.width, image.height);
@@ -963,7 +962,7 @@ function FinderChrome({ onExit, sheetOpen, onToggleSheet, sheet }: FinderChromeP
           id="scan-sheet"
           className={
             sheetOpen
-              ? 'pointer-events-auto relative w-full rounded-2xl bg-paper-50 shadow-soft dark:bg-ink-900'
+              ? 'pointer-events-auto relative w-full max-w-sm self-end rounded-xl bg-paper-50 shadow-soft dark:bg-ink-900'
               : 'hidden'
           }
         >
@@ -1129,6 +1128,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const probeFiredRef = useRef(false);
   const probeGenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   /**
    * Scan worker clients: detection runs on the mount-lifetime retained client
@@ -1188,22 +1188,119 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * so overlapping taps no-op instead of serializing on the sensor.
    */
   const [cameraControls, setCameraControls] = useState<{
-    exposure?: { min: number; max: number; step: number };
+    exposure?: CameraRange;
+    zoom?: CameraRange;
     focusModes: string[];
   }>({ focusModes: [] });
-  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [previewBox, setPreviewBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [frameSize, setFrameSize] = useState<{ width: number; height: number } | null>(null);
   const [exposure, setExposure] = useState(0);
   const [cameraControlNote, setCameraControlNote] = useState<string | null>(null);
   const applyCameraControl = async (constraint: Record<string, unknown>) => {
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track) return;
+    // Serialize hardware changes; late results from an old camera never repaint.
     try {
-      await track.applyConstraints({ advanced: [constraint as MediaTrackConstraintSet] });
-      setCameraControlNote(null);
+      await applyTrackControl(track, constraint);
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
+      const settings = track.getSettings?.() as Record<string, unknown> | undefined;
+      for (const [key, value] of Object.entries(constraint)) {
+        if (
+          typeof value === 'number' &&
+          typeof settings?.[key] === 'number' &&
+          Math.abs(settings[key] - value) > 0.01
+        ) {
+          throw new Error('Camera ignored the requested value');
+        }
+      }
+      if ('zoom' in constraint && typeof settings?.zoom === 'number') setZoom(settings.zoom);
+      if (
+        'exposureCompensation' in constraint &&
+        typeof settings?.exposureCompensation === 'number'
+      )
+        setExposure(settings.exposureCompensation);
+      setCameraControlNote(
+        'focusMode' in constraint ? 'Autofocus requested — hold the page steady.' : null,
+      );
     } catch {
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
+      const settings = track.getSettings?.() as Record<string, unknown> | undefined;
+      if (typeof settings?.zoom === 'number') setZoom(settings.zoom);
+      if (typeof settings?.exposureCompensation === 'number')
+        setExposure(settings.exposureCompensation);
       setCameraControlNote('This camera could not apply that setting. Try another camera.');
     }
   };
+  const requestFocus = () => {
+    const mode = cameraControls.focusModes.includes('continuous')
+      ? 'continuous'
+      : cameraControls.focusModes.includes('single-shot')
+        ? 'single-shot'
+        : null;
+    if (mode) void applyCameraControl({ focusMode: mode });
+  };
+  const refreshCameras = useCallback(async () => {
+    const stream = streamRef.current;
+    try {
+      const devices = await navigator.mediaDevices?.enumerateDevices?.();
+      if (!mountedRef.current || streamRef.current !== stream || !devices) return;
+      // Do not group by label or groupId: several lenses may share either.
+      setCameras(
+        devices
+          .filter((d) => d.kind === 'videoinput' && d.deviceId !== '')
+          .map((d) => ({ deviceId: d.deviceId, label: d.label.trim() })),
+      );
+    } catch {
+      if (mountedRef.current)
+        setCameraControlNote('Could not refresh cameras. Check camera permission and try again.');
+    }
+  }, []);
+  useEffect(() => {
+    const media = navigator.mediaDevices;
+    if (phase !== 'camera' || camState !== 'live') return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void refreshCameras();
+    };
+    media?.addEventListener?.('devicechange', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      media?.removeEventListener?.('devicechange', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [phase, camState, refreshCameras]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (phase !== 'camera' || !video) return;
+    const measure = () => {
+      if (!video.videoWidth || !video.videoHeight) return;
+      const rect = video.getBoundingClientRect();
+      const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+      const width = video.videoWidth * scale;
+      const height = video.videoHeight * scale;
+      setFrameSize({ width: video.videoWidth, height: video.videoHeight });
+      setPreviewBox({
+        left: (rect.width - width) / 2,
+        top: (rect.height - height) / 2,
+        width,
+        height,
+      });
+    };
+    measure();
+    video.addEventListener('loadedmetadata', measure);
+    video.addEventListener('resize', measure);
+    window.addEventListener('resize', measure);
+    return () => {
+      video.removeEventListener('loadedmetadata', measure);
+      video.removeEventListener('resize', measure);
+      window.removeEventListener('resize', measure);
+    };
+  }, [phase, camState]);
   const [capturing, setCapturing] = useState(false);
   const capturingRef = useRef(false);
   /**
@@ -1569,6 +1666,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const chooseCamera = useCallback(
     (deviceId: string | null) => {
       const next = deviceId === '' ? null : deviceId;
+      if (next === chosenDeviceIdRef.current && streamRef.current !== null) return;
       persistedCameraDeviceId = next;
       chosenDeviceIdRef.current = next;
       setSelectedDeviceId(next);
@@ -1678,9 +1776,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             // Autoplay policy: the user taps the shutter; play resumes then.
           }
         }
+        if (cancelled) return;
         const track = stream.getVideoTracks()[0];
         setCameraControls({ focusModes: [] });
-        setFocusPoint(null);
         setCameraControlNote(null);
         try {
           const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
@@ -1690,22 +1788,38 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             exposureMode?: string[];
           };
           const focusModes = caps?.focusMode ?? [];
-          const range = caps?.exposureCompensation;
+          const range = cameraRange(caps?.exposureCompensation);
+          const zoomRange = cameraRange(caps?.zoom);
           if (!cancelled) {
             setCameraControls({
               focusModes,
-              exposure:
-                range && range.max > range.min ? { ...range, step: range.step || 0.1 } : undefined,
+              exposure: range,
+              zoom: zoomRange,
             });
             setExposure(range ? Math.max(range.min, Math.min(0, range.max)) : 0);
           }
           const initial: Record<string, unknown> = {};
-          if (caps?.zoom) initial.zoom = Math.max(caps.zoom.min, Math.min(1, caps.zoom.max));
+          // Start at the widest exposed view, including values below 1.
+          if (zoomRange) initial.zoom = zoomRange.min;
           if (focusModes.includes('continuous')) initial.focusMode = 'continuous';
           if (caps?.exposureMode?.includes('continuous')) initial.exposureMode = 'continuous';
           if (Object.keys(initial).length) {
-            await track.applyConstraints({ advanced: [initial as MediaTrackConstraintSet] });
+            // Isolate failures: unsupported zoom must not prevent autofocus.
+            for (const [key, value] of Object.entries(initial)) {
+              if (cancelled) return;
+              try {
+                await applyTrackControl(track, { [key]: value });
+              } catch {
+                /* Keep other controls working. */
+              }
+            }
           }
+          if (cancelled) return;
+          const settings = track?.getSettings?.() as Record<string, unknown> | undefined;
+          if (typeof settings?.zoom === 'number') setZoom(settings.zoom);
+          else if (zoomRange) setZoom(zoomRange.min);
+          if (typeof settings?.exposureCompensation === 'number')
+            setExposure(settings.exposureCompensation);
         } catch {
           // Hardware controls vary across browsers; the preview remains usable.
         }
@@ -1713,9 +1827,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         // mode) for `facingMode` when exposed (labelless OEM ids defeat
         // label-sniffing on pick); the label regex on pick stays as the
         // fallback when facingMode is unexposed. The preview itself is
-        // full-bleed `object-cover` with no ratio styling anywhere — the
-        // layer crops, never stretches, so a landscape webcam renders
-        // landscape instead of a blurry zoomed portrait crop.
+        // object-contain shows the complete raw frame regardless of screen shape.
         try {
           const settings = track?.getSettings?.() as
             { width?: number; height?: number; facingMode?: string } | undefined;
@@ -1991,10 +2103,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (!track) return;
     const next = !torchOn;
     try {
-      await track.applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] });
+      await applyTrackControl(track, { torch: next });
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       setTorchOn(next);
       setTorchNote(null);
     } catch {
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       // Transient failure: NEVER unmount the toggle — keep it visible with an
       // honest note. Only `torch: false` capabilities (above) may hide it.
       setTorchNote("Flash isn't available on this camera");
@@ -2024,15 +2138,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         // Play failure still leaves the last frame drawable in most browsers.
       }
       const canvas = document.createElement('canvas');
-      const rect = video.getBoundingClientRect();
-      const ratio =
-        rect.width > 0 && rect.height > 0
-          ? rect.width / rect.height
-          : video.videoWidth / video.videoHeight;
-      const cropWidth = Math.min(video.videoWidth, video.videoHeight * ratio);
-      const cropHeight = Math.min(video.videoHeight, video.videoWidth / ratio);
-      canvas.width = Math.round(cropWidth);
-      canvas.height = Math.round(cropHeight);
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         setCaptureError(
@@ -2042,29 +2149,26 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       }
       // Unmirrored invariant: drawImage reads raw camera pixels, never the CSS
       // `scaleX(-1)` preview transform — captures are always true-to-scene.
-      ctx.drawImage(
-        video,
-        (video.videoWidth - cropWidth) / 2,
-        (video.videoHeight - cropHeight) / 2,
-        cropWidth,
-        cropHeight,
-        0,
-        0,
-        canvas.width,
-        canvas.height,
-      );
+      ctx.drawImage(video, 0, 0);
       const blob = await new Promise<Blob | null>((resolve) => {
         try {
           if (typeof canvas.toBlob !== 'function') {
             resolve(null);
             return;
           }
-          canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+          canvas.toBlob(
+            (b) => {
+              canvas.width = canvas.height = 1;
+              resolve(b);
+            },
+            'image/jpeg',
+            0.95,
+          );
         } catch {
           resolve(null);
         }
       });
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       if (!blob) {
         setCaptureError('Could not capture a frame — try again or add an image file instead.');
         return;
@@ -2461,7 +2565,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
         if (!entriesRef.current.some((e) => e.id === id)) return;
-        const blob = await withTimeout(imageDataToJpeg(warped, 0.9), WARP_TIMEOUT_MS);
+        const blob = await withTimeout(imageDataToJpeg(warped), WARP_TIMEOUT_MS);
         if (!blob) throw new Error('no jpeg');
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
@@ -2771,7 +2875,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     <div className="flex max-h-[60dvh] flex-col gap-0.5 overflow-y-auto p-1.5">
       {torchSupported && (
         <SheetRowButton
-          icon={torchOn ? '🔦' : '💡'}
+          icon="↯"
           label="Flash"
           state={torchOn ? 'On' : 'Off'}
           ariaLabel="Toggle torch"
@@ -2830,6 +2934,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </option>
           ))}
         </select>
+        <div className="flex items-center justify-between gap-2 px-2">
+          <p className="text-xs text-ink-500 dark:text-ink-300">{cameras.length} browser cameras</p>
+          <button
+            type="button"
+            onClick={() => void refreshCameras()}
+            className="min-h-[44px] px-3 text-xs font-medium text-ink-900 dark:text-paper-50"
+          >
+            Refresh cameras
+          </button>
+        </div>
+        <p className={sheetNote}>
+          All cameras shared by your browser are listed. Some phone lenses are only available in the
+          phone camera app. Zoom values are camera units, not optical magnification.
+        </p>
         {deviceFallbackNote !== null && (
           <p data-camera-fallback-note role="status" className={sheetNote}>
             {deviceFallbackNote}
@@ -2895,6 +3013,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         </div>
       </div>
       <SheetRowButton
+        icon="◎"
+        label="Use phone camera"
+        state="Native photo"
+        onClick={() => nativeCameraInputRef.current?.click()}
+      />
+      <p className={sheetNote}>
+        For finer text or lenses the browser cannot access, use your phone camera. Live capture
+        stays fast.
+      </p>
+      {frameSize && (
+        <p className={sheetNote}>
+          Live frame: {frameSize.width} × {frameSize.height} · JPEG quality 95%
+          {frameSize.width * frameSize.height < 1_000_000
+            ? ' · Limited live detail; use phone camera for small text.'
+            : ''}
+        </p>
+      )}
+      <SheetRowButton
         icon="▦"
         label="Add image files instead"
         onClick={() => fileInputRef.current?.click()}
@@ -2917,9 +3053,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       />
 
       {isCamera && (
-        // Full-bleed camera: the viewfinder is an absolute inset-0 layer of
-        // the fixed surface with video object-cover filling it EXACTLY — no
-        // aspect/max-w box, so black bars are impossible by construction.
+        // Full-screen camera surface, complete uncropped frame inside it.
         // All chrome (top bar, filmstrip, controls) floats over the video,
         // so captures can never shift layout by construction. dvh-safe: the
         // fixed root already tracks the dynamic viewport; bottom chrome pads
@@ -2938,85 +3072,9 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                     touchAction: 'manipulation',
                     ...(previewMirrored ? { transform: 'scaleX(-1)' } : {}),
                   }}
-                  onDoubleClick={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    const point = {
-                      x: (event.clientX - rect.left) / rect.width,
-                      y: (event.clientY - rect.top) / rect.height,
-                    };
-                    setFocusPoint(point);
-                    const focusMode = cameraControls.focusModes.includes('single-shot')
-                      ? 'single-shot'
-                      : cameraControls.focusModes.includes('continuous')
-                        ? 'continuous'
-                        : null;
-                    if (focusMode) void applyCameraControl({ focusMode });
-                    else
-                      setCameraControlNote(
-                        'This camera handles focus automatically; touch focus is unavailable.',
-                      );
-                  }}
-                  className="absolute inset-0 h-full w-full object-cover"
+                  onClick={requestFocus}
+                  className="absolute inset-0 h-full w-full object-contain"
                 />
-                <div className="pointer-events-none absolute inset-0 z-10">
-                  {focusPoint && (
-                    <div
-                      aria-hidden
-                      className="absolute h-16 w-16 -translate-x-1/2 -translate-y-1/2 rounded-xl border-2 border-amber-400"
-                      style={{ left: `${focusPoint.x * 100}%`, top: `${focusPoint.y * 100}%` }}
-                    />
-                  )}
-                  <div className="pointer-events-auto absolute right-4 top-1/3 flex w-12 flex-col items-center gap-2 rounded-full bg-black/50 py-3 text-white backdrop-blur-sm">
-                    <span aria-hidden className="text-xl">
-                      ☀
-                    </span>
-                    <input
-                      aria-label="Camera brightness"
-                      title={
-                        cameraControls.exposure
-                          ? 'Adjust brightness'
-                          : 'Automatic brightness only on this camera'
-                      }
-                      type="range"
-                      disabled={!cameraControls.exposure}
-                      min={cameraControls.exposure?.min ?? -1}
-                      max={cameraControls.exposure?.max ?? 1}
-                      step={cameraControls.exposure?.step ?? 0.1}
-                      value={exposure}
-                      className="h-32 w-11 accent-amber-400 [writing-mode:vertical-lr] [direction:rtl]"
-                      onChange={(event) => {
-                        const value = Number(event.target.value);
-                        setExposure(value);
-                        void applyCameraControl({ exposureCompensation: value });
-                      }}
-                    />
-                    <button
-                      type="button"
-                      aria-label="Refocus camera"
-                      className="min-h-[44px] w-11 text-xl"
-                      onClick={() => {
-                        const mode = cameraControls.focusModes.includes('single-shot')
-                          ? 'single-shot'
-                          : cameraControls.focusModes.includes('continuous')
-                            ? 'continuous'
-                            : null;
-                        if (mode) void applyCameraControl({ focusMode: mode });
-                        else setCameraControlNote('This camera does not expose focus control.');
-                      }}
-                    >
-                      ◎
-                    </button>
-                  </div>
-                  <p
-                    role="status"
-                    className="absolute bottom-40 left-4 right-20 rounded-xl bg-black/50 px-3 py-2 text-center text-xs text-white"
-                  >
-                    {cameraControlNote ??
-                      (cameraControls.exposure
-                        ? 'Double-tap to refocus · slide the sun for brightness'
-                        : 'Double-tap to refocus · brightness is automatic on this camera')}
-                  </p>
-                </div>
                 {/* Finder guidance frame: rounded-rect overlay with corner
                     ticks. Top clearance comes from `--finder-clear` (set on
                     the scanner root, responsive via the `sm:` override) so
@@ -3029,11 +3087,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   aria-hidden
                   className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-[var(--finder-clear)] sm:p-10 sm:pt-[var(--finder-clear)]"
                 >
-                  <div className="relative h-full w-full rounded-2xl">
-                    <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
-                    <span className="absolute right-0 top-0 h-9 w-9 rounded-tr-2xl border-r-4 border-t-4 border-paper-50/90" />
-                    <span className="absolute bottom-0 left-0 h-9 w-9 rounded-bl-2xl border-b-4 border-l-4 border-paper-50/90" />
-                    <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
+                  <div className="absolute" style={previewBox ?? { inset: '6rem 1.5rem 12rem' }}>
+                    <span className="absolute left-1 top-1 h-5 w-5 border-l border-t border-paper-50/70" />
+                    <span className="absolute right-1 top-1 h-5 w-5 border-r border-t border-paper-50/70" />
+                    <span className="absolute bottom-1 left-1 h-5 w-5 border-b border-l border-paper-50/70" />
+                    <span className="absolute bottom-1 right-1 h-5 w-5 border-b border-r border-paper-50/70" />
                   </div>
                 </div>
                 {/* Status pill rides top-center below the slim top bar
@@ -3102,6 +3160,38 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink-950/70 via-ink-950/30 to-transparent"
             />
             <div className="pointer-events-auto relative flex flex-col gap-2 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-10">
+              {camState === 'live' && (
+                <FinderControls
+                  key={selectedDeviceId ?? facing}
+                  zoomRange={cameraControls.zoom}
+                  exposureRange={cameraControls.exposure}
+                  zoom={zoom}
+                  exposure={exposure}
+                  focus={cameraControls.focusModes.some(
+                    (mode) => mode === 'continuous' || mode === 'single-shot',
+                  )}
+                  disabled={capturing || sheetOpen}
+                  onZoom={(value) => {
+                    if (!cameraControls.zoom) return;
+                    void applyCameraControl({ zoom: clampCameraValue(value, cameraControls.zoom) });
+                  }}
+                  onExposure={(value) => {
+                    if (!cameraControls.exposure) return;
+                    void applyCameraControl({
+                      exposureCompensation: clampCameraValue(value, cameraControls.exposure),
+                    });
+                  }}
+                  onFocus={requestFocus}
+                />
+              )}
+              {cameraControlNote && (
+                <p
+                  role="status"
+                  className="mx-auto max-w-sm rounded-lg bg-ink-950/90 px-3 py-2 text-center text-xs text-paper-50"
+                >
+                  {cameraControlNote}
+                </p>
+              )}
               <div data-scan-strip className="flex h-12 shrink-0 items-center justify-center">
                 {queue.length === 0 ? (
                   <span aria-hidden="true" className="block h-full w-full" />
@@ -3176,6 +3266,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
 
               {/* Hidden file input: the sheet's Import row + the fallback
                   card share it (files stay on-device). Always mounted. */}
+              <input
+                ref={nativeCameraInputRef}
+                type="file"
+                accept="image/jpeg,image/png"
+                capture="environment"
+                className="hidden"
+                aria-label="Take a native camera photo"
+                onChange={(e) => {
+                  addFilesInstead(Array.from(e.target.files ?? []));
+                  e.target.value = '';
+                  setSheetOpen(false);
+                }}
+              />
               <input
                 ref={fileInputRef}
                 type="file"

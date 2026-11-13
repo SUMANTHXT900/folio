@@ -18,6 +18,15 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.8 scanner repair',
+    date: '2026-11-13',
+    notes: [
+      'The scanner saves the full camera frame instead of cutting it to your screen shape, with less JPEG compression for captured and cropped pages.',
+      'Zoom out to Wide, adjust supported zoom and brightness, or request autofocus from compact camera controls.',
+      'Refresh the camera list, or choose Use phone camera for a native photo. Some phone lenses cannot be accessed directly by browsers.',
+    ],
+  },
+  {
     build: 'v1.12.7 portrait camera experience',
     date: '2026-11-12',
     notes: [

@@ -1543,7 +1543,7 @@ async function main() {
           const mirror = document.querySelector('[data-mirror-toggle]');
           return {
             video: v !== null,
-            objectCover: v !== null && getComputedStyle(v).objectFit === 'cover',
+            objectContain: v !== null && getComputedStyle(v).objectFit === 'contain',
             frame: document.querySelector('[data-finder-frame]') !== null,
             status: document.querySelector('[data-finder-status]')?.textContent?.trim() ?? null,
             mirror: mirror !== null,
@@ -1565,7 +1565,7 @@ async function main() {
       );
       // Viewfinder geometry contract (full-bleed overlay): `[data-viewfinder]`
       // is a FULL-BLEED layer — its rect covers the scanner surface (parent
-      // stage) rect ±2px per edge (no bars), the video is object-cover, and
+      // stage) rect ±2px per edge, the video is object-contain (no crop), and
       // the video rect covers the viewfinder rect ±2px per edge. Missing
       // `[data-viewfinder]` fails honestly (no fallback — the hook is the
       // contract). All total (try/catch).
@@ -1600,20 +1600,20 @@ async function main() {
             surfaceH: Math.round(s.height),
             videoW: Math.round(v.width),
             videoH: Math.round(v.height),
-            objectCover: getComputedStyle(video).objectFit === 'cover',
+            objectContain: getComputedStyle(video).objectFit === 'contain',
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner viewfinder is full-bleed with object-cover video (no bars)',
+        'scanner surface is fullscreen with uncropped object-contain video',
         viewfinderBefore !== null &&
           Math.abs(viewfinderBefore.edge.left) <= 2 &&
           Math.abs(viewfinderBefore.edge.top) <= 2 &&
           Math.abs(viewfinderBefore.edge.right) <= 2 &&
           Math.abs(viewfinderBefore.edge.bottom) <= 2 &&
-          viewfinderBefore.objectCover === true &&
+          viewfinderBefore.objectContain === true &&
           Math.abs(viewfinderBefore.videoEdge.left) <= 2 &&
           Math.abs(viewfinderBefore.videoEdge.top) <= 2 &&
           Math.abs(viewfinderBefore.videoEdge.right) <= 2 &&
@@ -2231,6 +2231,24 @@ async function main() {
       );
       await scanCaptureOnce(page);
       await waitForStripCount(page, 2);
+      const capturePixels = await page.evaluate(async () => {
+        const video = document.querySelector('[data-scanner-root] video');
+        const image = document.querySelector('[data-scan-gallery] img');
+        if (!video || !image) return null;
+        await image.decode();
+        return {
+          frame: [video.videoWidth, video.videoHeight],
+          saved: [image.naturalWidth, image.naturalHeight],
+        };
+      });
+      check(
+        'scanner live capture preserves every sensor-frame pixel (no viewport crop)',
+        capturePixels !== null &&
+          capturePixels.frame[0] > 0 &&
+          capturePixels.frame[0] === capturePixels.saved[0] &&
+          capturePixels.frame[1] === capturePixels.saved[1],
+        JSON.stringify(capturePixels),
+      );
       const queueState = await page.evaluate(() => {
         try {
           const cta = document.querySelector('[data-scan-strip] [data-review-cta]');

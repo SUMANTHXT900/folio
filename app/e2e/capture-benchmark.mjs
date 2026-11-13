@@ -25,19 +25,27 @@ try {
       const maxWidth = capabilities.imageWidth?.max;
       const maxHeight = capabilities.imageHeight?.max;
       const scale = maxWidth && maxHeight ? Math.min(1, 2000 / Math.max(maxWidth, maxHeight)) : 1;
-      const settings = maxWidth && maxHeight ? {
-        imageWidth: Math.round(maxWidth * scale), imageHeight: Math.round(maxHeight * scale),
-      } : undefined;
+      const settings =
+        maxWidth && maxHeight
+          ? {
+              imageWidth: Math.round(maxWidth * scale),
+              imageHeight: Math.round(maxHeight * scale),
+            }
+          : undefined;
       const frame = async () => {
         const canvas = document.createElement('canvas');
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         canvas.getContext('2d').drawImage(video, 0, 0);
-        return new Promise((resolve, reject) => canvas.toBlob(
-          (blob) => blob ? resolve(blob) : reject(new Error('Frame encode failed')), 'image/jpeg', 0.92,
-        ));
+        return new Promise((resolve, reject) =>
+          canvas.toBlob(
+            (blob) => (blob ? resolve(blob) : reject(new Error('Frame encode failed'))),
+            'image/jpeg',
+            0.92,
+          ),
+        );
       };
-      const photo = () => settings ? camera.takePhoto(settings) : camera.takePhoto();
+      const photo = () => (settings ? camera.takePhoto(settings) : camera.takePhoto());
       const measure = async (fn) => {
         await fn(); // warm-up
         const samples = [];
@@ -51,8 +59,12 @@ try {
         }
         return samples;
       };
-      return { track: track.getSettings(), requestedPhoto: settings ?? null,
-        frame: await measure(frame), photo: await measure(photo) };
+      return {
+        track: track.getSettings(),
+        requestedPhoto: settings ?? null,
+        frame: await measure(frame),
+        photo: await measure(photo),
+      };
     } finally {
       stream.getTracks().forEach((track) => track.stop());
     }

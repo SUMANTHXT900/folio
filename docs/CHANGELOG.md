@@ -2,6 +2,13 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.8 — Full-frame scanner and honest camera controls (`dev`, 2026-11-13)
+
+- Live capture preserves the complete video frame instead of destructively center-cropping to the phone viewport. Preview and thin frame marks match those pixels; browser-side crop/scale is discouraged with `resizeMode: none`.
+- Capability-backed zoom starts at the hardware minimum (including below 1), with Wide reset and a range slider. Values are camera units, not optical multipliers. Compact brightness/autofocus controls replace the permanent sun rail and unverified tap-location marker. Hardware changes are serialized and preserve other settings.
+- Camera list refreshes on device/visibility changes and on demand without collapsing shared labels/groups. Hidden physical lenses cannot be exposed by application code; an explicit native phone-camera input offers an alternative.
+- Capture JPEG q0.92 → q0.95 and crop output q0.90 → q0.95; no upscaling, sensor still request, extra encode, ML-at-shutter, or change to the existing import pixel budget. Fine-text readability and phone performance still require device validation.
+
 ## v1.12.7 — Portrait camera experience (`dev`, 2026-11-12)
 
 Portrait cover preview replaces landscape letterboxing; frame capture matches the visible center crop. Double-tap requests supported refocus, with a visible focus marker. Exposure compensation and refocus controls move from More to the viewfinder. Brightness remains disabled where unsupported. This does not guarantee focus at the tapped point or optical 1x on hardware lacking those APIs.

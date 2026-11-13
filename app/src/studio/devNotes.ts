@@ -17,6 +17,15 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.12.8 full-frame scanner',
+    date: '2026-11-13',
+    notes: [
+      'Full-frame live capture replaces the destructive portrait crop. Capture and auto-crop use JPEG quality 0.95 without bringing sensor-photo or ML work back to the shutter.',
+      'Supported hardware zoom starts at its widest setting with Wide reset; brightness and autofocus use compact real-camera controls. Settings preserve each other and read back applied values where available.',
+      'Camera discovery refreshes without merging shared labels. Use phone camera offers a native-photo alternative for finer detail or browser-hidden lenses.',
+    ],
+  },
+  {
     build: 'v1.12.7 portrait camera experience',
     date: '2026-11-12',
     notes: [
