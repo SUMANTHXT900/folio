@@ -2,6 +2,18 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## Unreleased — Scanner review and crop detail (working tree, 2026-11-14)
+
+- Review gives the whole page square edges and a padded dark mat; visible edit/original actions, one functional filmstrip and Apply/Cancel protection reduce review ambiguity and duplicated navigation.
+- Cropped pages use JPEG q0.97 as a measured local experiment. Fast live capture stays q0.95; no stream/detection/import/engine changes. Synthetic detail-error improvement is not yet a phone readability or latency verdict.
+- Local verification passes: frontend 802/57, review smoke 22/22, canonical Chromium 104/104 + four optional-corpus skips, type/lint/format/build. Phone acceptance remains open. No deployment or release is claimed.
+
+## v1.12.9 — Scanner review and crop detail (`dev`, 2026-11-14)
+
+- Review presents the complete page on a centered, square-edged mat, with clearer crop actions and one numbered filmstrip.
+- Cropped-page JPEG quality moves to q0.97; the fast live-frame shutter remains q0.95.
+- Verified locally: frontend 802/57, review smoke 22/22, canonical Chromium E2E 104/104 with four optional-corpus skips, type/lint/format/build. Physical-phone quality, latency and UX acceptance remain pending.
+
 ## v1.12.8 — Full-frame scanner and honest camera controls (`dev`, 2026-11-13)
 
 - Live capture preserves the complete video frame instead of destructively center-cropping to the phone viewport. Preview and thin frame marks match those pixels; browser-side crop/scale is discouraged with `resizeMode: none`.

@@ -67,6 +67,16 @@ function mockAdjustRect(container: HTMLElement) {
 }
 
 describe('ScanicReview', () => {
+  it('frames the result on a padded square-edged mat and exposes a visible cancel while adjusting', () => {
+    const { container } = render(<ScanicReview {...baseProps()} />);
+    const mat = container.querySelector('[data-crop-result]') as HTMLElement;
+    expect(mat.className).toContain('p-');
+    expect(mat.className).toContain('w-full');
+    expect(mat.className).not.toContain('rounded-xl');
+    enterAdjust();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+  });
+
   it('shows ONLY the warped canvas in the single-canvas result view', () => {
     const { container, rerender } = render(<ScanicReview {...baseProps()} />);
     const result = container.querySelector('[data-crop-result]');
@@ -298,7 +308,8 @@ describe('ScanicReview', () => {
   it('shows the queued photo with a Detecting chip while detecting', () => {
     const { container } = render(<ScanicReview {...baseProps({ detecting: true })} />);
     const result = container.querySelector('[data-crop-result]');
-    expect(result?.textContent).toContain('Detecting crop…');
+    expect(screen.getByRole('status').textContent).toContain('Detecting crop…');
+    expect(result?.contains(screen.getByRole('status'))).toBe(false);
     expect(result?.querySelectorAll('img').length).toBe(1);
     expect(container.querySelector('[data-crop-result-img]')?.getAttribute('src')).toBe(
       'photo.jpg',
@@ -406,15 +417,15 @@ describe('ScanicReview', () => {
     expect(screen.getByRole('button', { name: 'Apply' })).toBeTruthy();
   });
 
-  it('action bar uses compact icon buttons with sr-only labels (textContent byte-identical)', () => {
+  it('action bar uses visibly labeled buttons', () => {
     render(<ScanicReview {...baseProps()} />);
     for (const label of ['Adjust corners', 'Re-detect', 'Use original', 'Discard']) {
       const btn = screen.getByRole('button', { name: label });
       expect(btn.tagName).toBe('BUTTON');
       expect(btn.textContent).toBe(label);
-      const sr = btn.querySelector('span.sr-only');
-      expect(sr).not.toBeNull();
-      expect(sr?.textContent).toBe(label);
+      const labelSpan = btn.querySelector('span');
+      expect(labelSpan?.className).not.toContain('sr-only');
+      expect(labelSpan?.textContent).toBe(label);
       expect(btn.querySelector('svg')).not.toBeNull();
       expect(btn.getAttribute('aria-label')).toBe(label);
     }

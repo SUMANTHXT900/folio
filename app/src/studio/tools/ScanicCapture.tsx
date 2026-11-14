@@ -75,15 +75,15 @@
  *   `[data-review-progress]` (aria-label `i of N viewed`, visited
  *   count — INTENTIONAL contract change from `reviewed`), pager
  *   `[data-page-prev]` / `[data-page-next]` (44px, disabled at ends) +
- *   `[data-page-dot]` (44px page dots, `aria-current` on current), finder
+ *   `[data-page-dot]` (the visible 44px filmstrip buttons, `aria-current` on current), finder
  *   `[data-finder-frame]` + `[data-finder-status]` (rendered ONLY when
  *   actionable: starting / paused / captured-flash / Auto hold-steady /
  *   denied-retry help — quiet Manual idle renders NO pill), mirror
  *   `[data-mirror-toggle]` (aria-pressed, lives in the overflow sheet),
  *   filmstrip `[data-scan-filmstrip]` + `[data-film-thumb]` (numbered, tap
  *   jumps) + `[data-scan-add]` (back to camera), batch bar
- *   `[data-batch-bar]` (`Discard scans` ghost / `Next` primary, gated on
- *   >=1 page), overflow `[data-scan-more]` (trigger, `aria-expanded`) +
+ *   `[data-batch-bar]` (`Discard scans` / `Build PDF`, gated on readiness),
+ *   overflow `[data-scan-more]` (trigger, `aria-expanded`) +
  *   `[data-scan-sheet]` (always mounted in the camera phase, hidden when
  *   closed — flash, flip, mirror, camera select, mode, import rows).
  * - Additive (VF-BUILD, E2E-safe): gallery `[data-gallery-count]` visible
@@ -91,7 +91,7 @@
  *   non-blocking `[data-review-preparing]` slim banner (same text + role —
  *   pager/filmstrip/Add/Next stay enabled while it shows).
  * - Queue button labels are EXACT: "Adjust corners", "Apply",
- *   "Use original" (toggle warped <-> original), "Discard", "Reset to auto",
+ *   "Use original" / "Use auto-crop" (toggle warped <-> original), "Discard", "Reset to auto",
  *   "Build PDF", "Back to camera", "Re-detect", "Previous page",
  *   "Next page", "Next", "Discard scans". No "Looks good" exists anywhere —
  *   seeing a fine page is enough to move on (implicit accept).
@@ -99,7 +99,7 @@
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
- * JPEG q0.95 renders of the worker's warp output via `imageDataToJpeg()` —
+ * JPEG q0.97 renders of the worker's warp output via `imageDataToJpeg()` —
  * warped pages are NEW renders (never original bytes; originals still pass
  * through byte-identical when inside the import pixel budget). Commits hand candidate Files to ImagesTool's
  * normalization (same pixel budget as gallery imports) so 48MP sensor photos
@@ -863,7 +863,7 @@ async function decodeFileForDetection(file: File): Promise<{
 
 /**
  * Warped-page encoder: worker warp ImageData → full-res `image/jpeg` at
- * quality 0.95 (null when the platform cannot encode).
+ * quality 0.97 (null when the platform cannot encode).
  *
  * Rationale: warped pages are NEW renders (never original bytes — originals
  * still pass through byte-identical when inside the import pixel budget),
@@ -871,7 +871,7 @@ async function decodeFileForDetection(file: File): Promise<{
  * keep `scan-NNN.jpg` names with `image/jpeg` type. Full-res means the warp
  * output pixels as-is (no downscale); only the container changes.
  */
-function imageDataToJpeg(image: ImageData, quality = 0.95): Promise<Blob | null> {
+function imageDataToJpeg(image: ImageData, quality = 0.97): Promise<Blob | null> {
   return new Promise((resolve) => {
     try {
       const canvas = makeCanvas(image.width, image.height);
@@ -1040,6 +1040,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [entries, setEntries] = useState<QueueEntry[]>([]);
   const [phase, setPhase] = useState<Phase>('camera');
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewAdjusting, setReviewAdjusting] = useState(false);
+  const reviewFilmstripRef = useRef<HTMLDivElement>(null);
   const [building, setBuilding] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
   const buildingRef = useRef(false);
@@ -1403,6 +1405,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const accepted = queue;
   const safeIndex = queue.length === 0 ? 0 : Math.min(reviewIndex, queue.length - 1);
   const current = queue[safeIndex] ?? null;
+  useEffect(() => {
+    const strip = reviewFilmstripRef.current;
+    const selected = strip?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!strip || !selected) return;
+    const left = selected.offsetLeft - strip.offsetLeft;
+    if (left < strip.scrollLeft) strip.scrollLeft = left;
+    else if (left + selected.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = left + selected.offsetWidth - strip.clientWidth;
+    }
+  }, [safeIndex, phase]);
   const visitedCount = queue.filter((e) => visitedIdsRef.current.has(e.id)).length;
   // Front-camera preview is mirrored by default (industry standard); the back
   // camera is never mirrored. Captured frames ignore this entirely (see
@@ -2228,6 +2240,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (phase === 'review' && reviewAdjusting) return;
         if (sheetOpen) {
           e.preventDefault();
           setSheetOpen(false);
@@ -2251,7 +2264,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, sheetOpen, camState, captureFrame, onExit]);
+  }, [phase, sheetOpen, camState, captureFrame, onExit, reviewAdjusting]);
 
   // The sheet belongs to the camera phase: leaving it parks the sheet
   // closed so returning to the camera always reopens on a clean finder.
@@ -3299,206 +3312,191 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       {phase === 'review' && current !== null && (
         <div
           data-scan-queue
-          className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))]"
+          className="relative min-h-0 flex-1 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))]"
         >
-          {preparing && (
-            <div
-              data-review-preparing
-              role="status"
-              className="sticky top-0 z-10 flex items-center justify-center gap-3 rounded-xl border border-brass-400/40 bg-paper-100 px-4 py-2.5 text-center dark:border-brass-400/30 dark:bg-ink-800"
-            >
-              <span
-                aria-hidden
-                className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-brass-400 motion-reduce:animate-none"
-              />
-              <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
-                {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
+          <div data-review-workspace className="mx-auto w-full max-w-4xl space-y-3">
+            {preparing && (
+              <div
+                data-review-preparing
+                role="status"
+                className="sticky top-0 z-10 flex items-center justify-center gap-3 rounded-xl border border-brass-400/40 bg-paper-100 px-4 py-2.5 text-center dark:border-brass-400/30 dark:bg-ink-800"
+              >
+                <span
+                  aria-hidden
+                  className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-brass-400 motion-reduce:animate-none"
+                />
+                <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
+                  {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
+                </p>
+                <button
+                  type="button"
+                  data-review-preparing-cancel
+                  onClick={cancelPreparing}
+                  className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {cardError !== null && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {cardError}
               </p>
+            )}
+            {/* Previous/next controls supplement the numbered filmstrip. */}
+            <div className="flex items-center justify-center gap-2">
               <button
                 type="button"
-                data-review-preparing-cancel
-                onClick={cancelPreparing}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                data-page-prev
+                aria-label="Go to previous page"
+                disabled={safeIndex <= 0 || reviewAdjusting}
+                onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
               >
-                Cancel
+                <span aria-hidden>‹</span>
+                <span className="sr-only">Previous page</span>
+              </button>
+              <span className="text-sm font-medium tabular-nums">Pages</span>
+              <button
+                type="button"
+                data-page-next
+                aria-label="Go to next page"
+                disabled={safeIndex >= queue.length - 1 || reviewAdjusting}
+                onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
+              >
+                <span aria-hidden>›</span>
+                <span className="sr-only">Next page</span>
               </button>
             </div>
-          )}
-          {cardError !== null && (
-            <p role="alert" className="text-xs text-red-600 dark:text-red-400">
-              {cardError}
-            </p>
-          )}
-          {/* Pager: minimal prev/next + dots. Labels stay pinned (‹/› glyphs
-              with EXACT sr-only labels, same pattern as the review card's
-              icon row); dots are additive 44px navigation. No accept click
-              anywhere. */}
-          <div className="flex items-center justify-center gap-1">
-            <button
-              type="button"
-              data-page-prev
-              aria-label="Go to previous page"
-              disabled={safeIndex <= 0}
-              onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              <span aria-hidden>‹</span>
-              <span className="sr-only">Previous page</span>
-            </button>
+            <ScanicReview
+              key={current.id}
+              photoUrl={current.photoUrl}
+              imageWidth={current.imageWidth}
+              imageHeight={current.imageHeight}
+              corners={current.corners}
+              warpedUrl={current.warpedUrl}
+              warpFailed={current.warpFailed}
+              detecting={current.status !== 'ready'}
+              note={current.note}
+              pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
+              progressLabel={`${visitedCount} of ${queue.length} viewed`}
+              onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
+              onUseOriginal={() => toggleVerdict(current.id)}
+              onDiscard={() => discardEntry(current.id)}
+              onRedetect={() => void redetectEntry(current)}
+              // Disabled until this page settles `ready`: the review drain owns
+              // detecting pages, and Re-detect shares its lane-0 client — an
+              // early tap would only duplicate the drain's detect.
+              redetecting={redetecting || current.status !== 'ready'}
+              verdict={current.decision}
+              // Adjust-next keeps a dirty draft before advancing; clean drafts
+              // navigate without a warp. Visited marking follows reviewIndex.
+              onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
+              onAdjustingChange={setReviewAdjusting}
+            />
+            {reviewAdjusting && (
+              <p role="status" className="text-sm text-ink-500 dark:text-ink-300">
+                Apply or cancel the crop before switching pages or building.
+              </p>
+            )}
+            {/* Review filmstrip (owned here — ScanicReview renders the single
+              card only): numbered thumbs jump to a page, + returns to camera.
+              Slim (h-12) with 44px targets kept. */}
             <div
-              role="group"
-              aria-label="Pages"
-              className="flex min-w-0 flex-1 items-center justify-center gap-0 overflow-x-auto"
+              data-scan-filmstrip
+              ref={reviewFilmstripRef}
+              aria-label="Scanned pages"
+              className="flex items-center gap-2 overflow-x-auto py-1"
             >
               {queue.map((entry, i) => (
                 <button
                   key={entry.id}
                   type="button"
+                  data-film-thumb
                   data-page-dot={i}
                   aria-label={`Go to page ${i + 1}`}
                   aria-current={i === safeIndex}
+                  disabled={reviewAdjusting}
                   onClick={() => setReviewIndex(i)}
-                  className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
+                  className={`relative h-12 w-11 min-h-[44px] min-w-[44px] shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
+                    i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
+                  }`}
                 >
-                  <span
-                    aria-hidden
-                    className={`rounded-full transition-colors ${
-                      i === safeIndex
-                        ? 'h-2.5 w-2.5 bg-brass-400'
-                        : 'h-1.5 w-1.5 bg-ink-300 dark:bg-ink-600'
-                    }`}
-                  />
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              data-page-next
-              aria-label="Go to next page"
-              disabled={safeIndex >= queue.length - 1}
-              onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              <span aria-hidden>›</span>
-              <span className="sr-only">Next page</span>
-            </button>
-          </div>
-          <ScanicReview
-            key={current.id}
-            photoUrl={current.photoUrl}
-            imageWidth={current.imageWidth}
-            imageHeight={current.imageHeight}
-            corners={current.corners}
-            warpedUrl={current.warpedUrl}
-            warpFailed={current.warpFailed}
-            detecting={current.status !== 'ready'}
-            note={current.note}
-            pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
-            progressLabel={`${visitedCount} of ${queue.length} viewed`}
-            onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
-            onUseOriginal={() => toggleVerdict(current.id)}
-            onDiscard={() => discardEntry(current.id)}
-            onRedetect={() => void redetectEntry(current)}
-            // Disabled until this page settles `ready`: the review drain owns
-            // detecting pages, and Re-detect shares its lane-0 client — an
-            // early tap would only duplicate the drain's detect.
-            redetecting={redetecting || current.status !== 'ready'}
-            verdict={current.decision}
-            // Pure navigation beside Apply: advance reviewIndex only — no
-            // warp, no decision change, no verdict touch. Visited marking
-            // flows through the reviewIndex change like filmstrip/pager taps.
-            onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
-          />
-          {/* Review filmstrip (owned here — ScanicReview renders the single
-              card only): numbered thumbs jump to a page, + returns to camera.
-              Slim (h-12) with 44px targets kept. */}
-          <div
-            data-scan-filmstrip
-            aria-label="Scanned pages"
-            className="flex items-center gap-2 overflow-x-auto py-1"
-          >
-            {queue.map((entry, i) => (
-              <button
-                key={entry.id}
-                type="button"
-                data-film-thumb
-                aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
-                aria-current={i === safeIndex}
-                onClick={() => setReviewIndex(i)}
-                className={`relative h-12 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
-                  i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
-                }`}
-              >
-                {entry.photoUrl ? (
-                  <img
-                    src={entry.photoUrl}
-                    alt=""
-                    decoding="async"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700 dark:text-ink-300">
+                  {entry.photoUrl ? (
+                    <img
+                      src={entry.photoUrl}
+                      alt=""
+                      decoding="async"
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700 dark:text-ink-300">
+                      {i + 1}
+                    </span>
+                  )}
+                  {entry.status !== 'ready' && (
+                    <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
+                      …
+                    </span>
+                  )}
+                  <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
                     {i + 1}
                   </span>
-                )}
-                {entry.status !== 'ready' && (
-                  <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
-                    …
-                  </span>
-                )}
-                <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
-                  {i + 1}
-                </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                data-scan-add
+                aria-label="Back to camera"
+                disabled={reviewAdjusting}
+                onClick={() => setPhase('camera')}
+                className="inline-flex h-12 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+              >
+                + Add pages
               </button>
-            ))}
-            <button
-              type="button"
-              data-scan-add
-              aria-label="Back to camera"
-              onClick={() => setPhase('camera')}
-              className="inline-flex h-12 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
-            >
-              + Add
-            </button>
-          </div>
-          {/* Batch bar: discard-all vs the single real build action. Build is
+            </div>
+            {/* Batch bar: discard-all vs the single real build action. Build is
               gated on every page settling `ready` AND its crop render
               settling — otherwise a tap would silently commit full-frame
               originals for pages whose crop was still being computed. */}
-          <div
-            data-batch-bar
-            data-build-state={buildState}
-            className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
-          >
-            <button
-              type="button"
-              disabled={building}
-              onClick={discardAll}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-ink-300 dark:hover:bg-ink-700"
+            <div
+              data-batch-bar
+              data-build-state={buildState}
+              className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
             >
-              Discard scans
-            </button>
-            <button
-              type="button"
-              data-build-pdf
-              disabled={queue.length === 0 || preparing || cropsPending || building}
-              onClick={() => void buildPdf()}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-            >
-              {building
-                ? 'Building PDF…'
-                : preparing
-                  ? `Preparing pages… ${preparingDone} of ${preparingTotal}`
-                  : cropsPending
-                    ? 'Finishing crops…'
-                    : `Build PDF · ${accepted.length} page${accepted.length === 1 ? '' : 's'}`}
-            </button>
+              <button
+                type="button"
+                disabled={building || reviewAdjusting}
+                onClick={discardAll}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-ink-300 dark:hover:bg-ink-700"
+              >
+                Discard scans
+              </button>
+              <button
+                type="button"
+                data-build-pdf
+                disabled={
+                  queue.length === 0 || preparing || cropsPending || building || reviewAdjusting
+                }
+                onClick={() => void buildPdf()}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+              >
+                {building
+                  ? 'Building PDF…'
+                  : preparing
+                    ? `Preparing pages… ${preparingDone} of ${preparingTotal}`
+                    : cropsPending
+                      ? 'Finishing crops…'
+                      : `Build PDF · ${accepted.length} page${accepted.length === 1 ? '' : 's'}`}
+              </button>
+            </div>
+            {buildError !== null && (
+              <p data-build-error role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {buildError}
+              </p>
+            )}
           </div>
-          {buildError !== null && (
-            <p data-build-error role="alert" className="text-xs text-red-600 dark:text-red-400">
-              {buildError}
-            </p>
-          )}
         </div>
       )}
 

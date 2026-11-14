@@ -4,9 +4,17 @@ IDs are stable (`F-<n>`). "Resolved" entries stay recorded — they explain why 
 
 ## Active
 
+### F-28 — Post-capture review feels over-cropped despite matching output
+
+- **Status.** User-reported on phone 2026-11-14; redesign implemented and desktop-browser verified in the working tree. Frontend 802/57, review smoke 22/22, canonical E2E 104/104 + four optional-corpus skips pass. No release/deployment or phone acceptance yet. **Area.** Scanner review after `View pages`.
+- **Symptoms.** The auto-cropped preview appears too tightly fitted and visually different from the exported page; surrounding mat/borders and rounded page edges are suspected by the user. Actual crop/output mismatch is not established.
+- **Acceptance direction.** Present the complete processed page with clear surrounding space and honest page edges; simplify navigation, crop adjustment and build actions for a 50–60-page session. Preserve fast capture, asynchronous ML, recoverable commit and one-action Build PDF. Root cause and implementation must be verified, not inferred from the report.
+- **Source findings and repair.** The old width-filling image met a rounded, overflow-clipped container without mat padding; dot navigation duplicated the filmstrip. New review uses square page edges, a padded dark mat, labeled actions, a single functional filmstrip and an explicit Apply/Cancel guard before navigation/build. Actual crop correctness remains a separate phone check.
+
 ### F-27 — Scanner viewport crop discarded detail and looked zoomed in
 
 - **Status.** Shipped as v1.12.8 on `dev` (code `5c43307`, Cloudflare `6dd0a849`); physical-phone validation pending. **Area.** `ScanicCapture.tsx`, camera controls (D56).
+- **Field follow-up 2026-11-14.** User confirms excellent capture speed and practical 50–60-page book capture. Detail still needs a modest improvement; no quality acceptance or unchanged-performance claim for future changes follows from this verdict. Review presentation reported separately as F-28.
 - **Evidence.** Reproduction test: a 1280×720 video displayed in a 360×800 viewport saved only 324×720. The old `object-cover` preview and matching center crop silently discarded most horizontal pixels. Zoom was initialized toward 1 but had no user control; the focus marker did not send a sensor point.
 - **Fix.** Full-frame capture/contain preview, hardware-minimum zoom + Wide/slider, JPEG q0.95 for capture and crop, supported-only exposure/AF controls, serialized constraint preservation, refreshable all-exposed-ID camera list, native camera file alternative. No physical-lens access claim.
 - **Verification.** Regression fails before fix; full frontend 800/57 and canonical E2E 103/103 + 4 optional-corpus skips pass. Chromium synthetic-camera comparison retained 1280×720 instead of 333×720 at 390×844; output pixels match live video exactly. Not a phone readability or latency guarantee.

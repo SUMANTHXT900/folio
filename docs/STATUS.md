@@ -1,11 +1,11 @@
 # Folio — Status
 
-> Current development: v1.12.8 on `dev` (2026-11-13, scanner framing/quality/controls repair D56/F-27), code commit `5c43307`, Cloudflare deployment `6dd0a849`. Dev alias verified serving `index-L5cxRNMs.js`, build `2026-11-13T12:33:27.635Z`, About v1.12.8. Production/main is unchanged at the v1.12.4 scanner-flow line; no promotion is authorized by this task.
+> Current development: v1.12.9 on `dev` (2026-11-14, D57 scanner review/crop detail); deployment verification pending. Previous deployment v1.12.8 was `6dd0a849`. Production/main remains unchanged at the v1.12.4 scanner-flow line.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
 
-**v1.12.8 scanner repair (`dev`).** Full-frame live-video shutter + q0.95 capture/crop, contain preview with content-aligned thin marks, hardware-minimum zoom with Wide/slider, supported-only exposure/autofocus controls, per-track serialized/preserved settings, camera refresh, and explicit native-camera file input. No sensor still/ML work added to the fast shutter. Browser-hidden physical lenses and real-phone AF/AE/detail/performance remain platform/field gates, not solved by desktop emulation. Frontend 800/57 and canonical E2E 103/103 + 4 optional-corpus skips verified; see WORKLOG for build/deploy evidence.
+**v1.12.9 scanner review follow-up (`dev`, deployment verification pending).** Full-frame live-video shutter remains JPEG q0.95; cropped output uses q0.97. Review uses centered full-page mat framing, one filmstrip and explicit edit controls. Real-phone visual/detail/performance and browser-hidden physical lenses remain platform/field gates. Local frontend 802/57, review smoke 22/22 and canonical E2E 104/104 + 4 optional-corpus skips; see WORKLOG.
 
 ### Historical phase narrative (v1.9.5; superseded by current summary above)
 
@@ -43,6 +43,8 @@
 - Miss-proof wave (D32, commit `52b8fa2`, 2026-10-04): SUPERSEDED by D33 (deleted; history preserved) — was: motion-gated auto-capture default ON (SAD ≤ 2 × 3 ticks, 1.5 s cooldown, SAD-0 counts as stable), 3600px capture/output caps (preview 1600px/q0.9), 8-handle crop editor (corners + whole-edge midpoints), detect recall round 3 (auto Canny + tiered denoised-gray rung; composite previous-MISS `real-world-stack` FOUND conf 0.942 err 2.2px); E2E drag-measure rewritten async-aware (LESSONS L-12).
 
 ## Current work
+
+- **D57/F-28 scanner review follow-up (v1.12.9, 2026-11-14; dev deploy verification pending).** User confirms excellent 50–60-page phone capture speed. Changes add centered square-edged full-page mat framing, one filmstrip, labeled actions and explicit crop Apply/Cancel guarding. Crop JPEG q0.97 follows a bounded synthetic comparison; shutter remains q0.95. Frontend 802/57, typecheck/lint/format/build pass; review smoke 22/22 and canonical Chromium 104/104 + four optional-corpus skips pass. Sixty small synthetic inputs verify navigation, not phone high-resolution performance. Build precache 53 entries / 7935.56 KiB. Phone visual/detail/latency acceptance remains pending.
 
 - **D56/F-27 scanner repair, v1.12.8 (`dev`, 2026-11-13).** Current acceptance: saved live image dimensions equal the video frame at mismatched viewport ratios; zoom exposes full hardware bounds without claiming optical `×`; exposure does not reset zoom/torch/AF; unsupported controls do not render; all enumerated camera IDs remain selectable/refreshed. Desktop tests pass; phone field acceptance pending.
 

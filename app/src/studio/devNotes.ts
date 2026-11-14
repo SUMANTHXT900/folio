@@ -17,6 +17,14 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.12.9 scanner review and detail',
+    date: '2026-11-14',
+    notes: [
+      'Review shows the complete page on a centered dark mat, with one numbered filmstrip and clear crop actions.',
+      'Crop edits require Apply or Cancel before switching pages or building. Cropped output uses JPEG quality 0.97; the fast live-frame shutter remains unchanged.',
+    ],
+  },
+  {
     build: 'v1.12.8 full-frame scanner',
     date: '2026-11-13',
     notes: [

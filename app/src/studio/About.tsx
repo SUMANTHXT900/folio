@@ -50,7 +50,7 @@ const ENTRIES: Entry[] = [
     changes: [
       'On-device scanner with ML-only crop detection and fast full-frame video capture; supported zoom, brightness and autofocus controls, plus a native phone-camera alternative.',
       'Auto-accept review with thin-handle adjust, a calm loupe, and a fullscreen finder.',
-      'Captured and cropped pages use JPEG quality 0.95; original files stay byte-identical inside the import pixel budget.',
+      'Fast capture uses JPEG quality 0.95 and cropped pages use 0.97; original files stay byte-identical inside the import pixel budget.',
       'Every tool still runs on the local Rust/WASM engine — Compress stays reserved.',
     ],
   },

@@ -513,8 +513,14 @@ describe('result-FIRST queue', () => {
     await screen.findByText('Page 2 of 2');
     await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
     const build = q('[data-build-pdf]') as HTMLButtonElement;
-    expect(build.disabled).toBe(false);
-    expect(build.textContent).toContain('Build PDF');
+    // extract() being called only proves the eager warp started. Its async
+    // result may still be resolving (especially under suite load), so wait for
+    // the rendered build gate to settle before sending the user interaction.
+    await waitFor(() => {
+      expect(q('[data-batch-bar]').getAttribute('data-build-state')).toBe('ready');
+      expect(build.disabled).toBe(false);
+      expect(build.textContent).toContain('Build PDF');
+    });
     fireEvent.click(build);
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     expect(onExit).toHaveBeenCalledTimes(1);
@@ -524,11 +530,11 @@ describe('result-FIRST queue', () => {
     expect(await pages[0].file.text()).toBe('jpeg-bytes');
     expect(pages[1].file.type).toBe('image/jpeg');
     expect(await pages[1].file.text()).toBe('jpeg-bytes');
-    // Warped output encodes full-res JPEG q0.9 (never PNG).
+    // Warped output encodes full-res JPEG q0.97 (never PNG).
     expect(seen.length).toBeGreaterThan(0);
     for (const s of seen) {
       expect(s.type).toBe('image/jpeg');
-      expect(s.quality).toBe(0.95);
+      expect(s.quality).toBe(0.97);
     }
   });
 
@@ -558,7 +564,7 @@ describe('result-FIRST queue', () => {
     await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     // Warped -> original -> warped: two toggles land back on the crop.
     fireEvent.click(screen.getByText('Use original', { exact: true }));
-    fireEvent.click(screen.getByText('Use original', { exact: true }));
+    fireEvent.click(screen.getByText('Use auto-crop', { exact: true }));
     expect(screen.getByText('Page 1 of 1')).toBeTruthy();
     fireEvent.click(q('[data-build-pdf]'));
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
@@ -1296,12 +1302,28 @@ describe('deferred review drain', () => {
 });
 
 describe('review filmstrip + batch bar', () => {
+  it('requires Apply or Cancel before leaving an active crop, then restores Build', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust corners' }));
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
+    expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(true);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Apply or cancel the crop/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
+  });
   it('renders numbered thumbs, pager, add-back, and an enabled Build PDF', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    const workspace = q('[data-review-workspace]') as HTMLElement;
+    expect(workspace.className).toContain('max-w-4xl');
+    expect(workspace.className).toContain('mx-auto');
+    expect(workspace.className).toContain('w-full');
     expect(q('[data-scan-filmstrip]')).toBeTruthy();
     expect(document.body.querySelectorAll('[data-film-thumb]').length).toBe(2);
     expect(q('[data-scan-add]').getAttribute('aria-label')).toBe('Back to camera');
@@ -2755,6 +2777,7 @@ describe('review pager dots', () => {
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
     const dots = Array.from(document.querySelectorAll('[data-page-dot]'));
     expect(dots.length).toBe(2);
+    expect(dots[0].hasAttribute('data-film-thumb')).toBe(true);
     for (const [i, dot] of dots.entries()) {
       expect((dot as HTMLElement).getAttribute('aria-label')).toBe(`Go to page ${i + 1}`);
       expect((dot as HTMLElement).className).toMatch('min-h-[44px]');

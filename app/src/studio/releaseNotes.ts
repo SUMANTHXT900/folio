@@ -18,6 +18,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.9 scanner review',
+    date: '2026-11-14',
+    notes: [
+      'The scanner review now shows the whole page with more breathing room, clearer crop controls, and simpler page navigation.',
+      'Cropped pages retain a little more detail, while the fast capture flow stays the same.',
+    ],
+  },
+  {
     build: 'v1.12.8 scanner repair',
     date: '2026-11-13',
     notes: [

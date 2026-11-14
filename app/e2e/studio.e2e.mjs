@@ -2576,6 +2576,39 @@ async function main() {
           singleCanvas.overlayPresent === false,
         JSON.stringify(singleCanvas),
       );
+      const reviewMat = await page.evaluate(() => {
+        const mat = document.querySelector('[data-crop-result]');
+        const img = document.querySelector('[data-crop-result-img]');
+        const workspace = document.querySelector('[data-review-workspace]');
+        const queue = document.querySelector('[data-scan-queue]');
+        if (!mat || !img || !workspace || !queue || !img.naturalWidth) return null;
+        const m = mat.getBoundingClientRect();
+        const r = img.getBoundingClientRect();
+        const w = workspace.getBoundingClientRect();
+        const q = queue.getBoundingClientRect();
+        const style = getComputedStyle(mat);
+        return {
+          padding: parseFloat(style.paddingTop),
+          radius: parseFloat(style.borderTopLeftRadius),
+          fit: getComputedStyle(img).objectFit,
+          inset: Math.min(r.left - m.left, r.top - m.top, m.right - r.right, m.bottom - r.bottom),
+          workspaceWidth: w.width,
+          matWidth: m.width,
+          centerOffset: Math.abs((w.left + w.right - q.left - q.right) / 2),
+        };
+      });
+      check(
+        'scanner review shows contained square-edged page on a padded mat',
+        reviewMat !== null &&
+          reviewMat.padding >= 8 &&
+          reviewMat.radius === 0 &&
+          reviewMat.fit === 'contain' &&
+          reviewMat.inset >= 8 &&
+          Math.abs(reviewMat.matWidth - reviewMat.workspaceWidth) <= 1 &&
+          reviewMat.workspaceWidth <= 897 &&
+          reviewMat.centerOffset <= 2,
+        JSON.stringify(reviewMat),
+      );
       // Single-canvas contract: the result view carries no overlay, so
       // Re-detect is a no-hang round-trip on the hero (dispatch → wait →
       // measure): click, then the single decoded img must settle again.
@@ -4104,32 +4137,33 @@ async function main() {
       // swaps warped→photo and back, with no navigation and no commit.
       // Click in one evaluate, waitForFunction the post-condition, measure
       // in a LATER evaluate (L-12 — React-flush timing).
-      const clickUseOriginal = () =>
-        page.evaluate(() => {
+      const clickVerdict = (label) =>
+        page.evaluate((expected) => {
           try {
             [...document.querySelectorAll('button')]
-              .find((b) => (b.textContent ?? '').includes('Use original'))
+              .find((b) => b.textContent === expected)
               ?.click();
           } catch {
             /* noop */
           }
-        });
+        }, label);
       const readHero = () =>
         page.evaluate(() => {
           try {
             const img = document.querySelector('[data-crop-result-img]');
-            const result = document.querySelector('[data-crop-result]');
             return {
               src: img?.getAttribute('src') ?? null,
               alt: img?.getAttribute('alt') ?? null,
-              chip: result?.textContent ?? null,
+              chip: document.querySelector('[data-crop-status]')?.textContent ?? null,
+              action:
+                document.querySelector('button[aria-label="Use auto-crop"]')?.textContent ?? null,
             };
           } catch {
             return null;
           }
         });
       const toggleBase = await readHero();
-      await clickUseOriginal();
+      await clickVerdict('Use original');
       let toggledToPhoto = false;
       try {
         await waitTotal(
@@ -4140,7 +4174,7 @@ async function main() {
               if (!img) return false;
               const src = img.getAttribute('src');
               const alt = img.getAttribute('alt') ?? '';
-              const chip = document.querySelector('[data-crop-result]')?.textContent ?? '';
+              const chip = document.querySelector('[data-crop-status]')?.textContent ?? '';
               return (
                 typeof src === 'string' &&
                 src.length > 0 &&
@@ -4160,7 +4194,7 @@ async function main() {
       }
       const togglePhoto = await readHero();
       const photoSrc = togglePhoto?.src ?? null;
-      await clickUseOriginal();
+      await clickVerdict('Use auto-crop');
       let toggledBack = false;
       try {
         await waitTotal(
@@ -4192,6 +4226,7 @@ async function main() {
           toggledBack &&
           toggleBase !== null &&
           togglePhoto !== null &&
+          togglePhoto.action === 'Use auto-crop' &&
           toggleRestored !== null &&
           typeof toggleBase.src === 'string' &&
           toggleBase.src.length > 0 &&
