@@ -54,6 +54,7 @@ export function usePdfFiles() {
    */
   const [errorDetail, setErrorDetail] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const openingRef = useRef(false);
   // Ref mirror (no side effects inside state updaters; StrictMode-safe).
   const filesRef = useRef<StudioDoc[]>([]);
   const sync = useCallback((next: StudioDoc[]) => {
@@ -78,6 +79,8 @@ export function usePdfFiles() {
 
   const addFiles = useCallback(
     async (f: File[]) => {
+      if (openingRef.current) return;
+      openingRef.current = true;
       setBusy(true);
       setErrorState(null);
       setErrorDetail(null);
@@ -109,6 +112,7 @@ export function usePdfFiles() {
         setErrorState(e instanceof Error ? e.message : 'Could not read those files.');
         setErrorDetail(e instanceof Error ? e : null);
       } finally {
+        openingRef.current = false;
         setBusy(false);
       }
     },

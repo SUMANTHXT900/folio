@@ -181,6 +181,17 @@ let urlCounter = 0;
 
 beforeEach(() => {
   urlCounter = 0;
+  Object.defineProperty(HTMLVideoElement.prototype, 'videoWidth', {
+    configurable: true,
+    get: () => 1280,
+  });
+  Object.defineProperty(HTMLVideoElement.prototype, 'videoHeight', {
+    configurable: true,
+    get: () => 720,
+  });
+  HTMLCanvasElement.prototype.toBlob = function (cb) {
+    cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
+  };
   __resetCameraChoiceForTests();
   try {
     window.localStorage.clear();
@@ -308,7 +319,7 @@ describe('ScanicCapture shell', () => {
 });
 
 describe('viewfinder', () => {
-  it('fills the viewport edge-to-edge with cover and floating scrims when live', async () => {
+  it('shows the full frame with contain and floating scrims when live', async () => {
     mockLiveCamera();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
@@ -319,7 +330,7 @@ describe('viewfinder', () => {
       'video[aria-label="Camera preview"]',
     ) as HTMLVideoElement | null;
     expect(video).not.toBeNull();
-    expect(video?.className).toContain('object-cover');
+    expect(video?.className).toContain('object-contain');
     expect(video?.className).toContain('inset-0');
     expect(video?.className).toContain('h-full');
     expect(video?.className).toContain('w-full');
@@ -343,6 +354,7 @@ describe('viewfinder', () => {
 
   it('requests high-res constraints with a continuous-focus effort', async () => {
     const { track } = mockLiveCamera();
+    track.getCapabilities = () => ({ focusMode: ['continuous'] });
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await findQ('[data-scan-capture]');
     const getUserMedia = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
@@ -501,8 +513,14 @@ describe('result-FIRST queue', () => {
     await screen.findByText('Page 2 of 2');
     await waitFor(() => expect(mockWarpExtract.mock.calls.length).toBeGreaterThanOrEqual(2));
     const build = q('[data-build-pdf]') as HTMLButtonElement;
-    expect(build.disabled).toBe(false);
-    expect(build.textContent).toContain('Build PDF');
+    // extract() being called only proves the eager warp started. Its async
+    // result may still be resolving (especially under suite load), so wait for
+    // the rendered build gate to settle before sending the user interaction.
+    await waitFor(() => {
+      expect(q('[data-batch-bar]').getAttribute('data-build-state')).toBe('ready');
+      expect(build.disabled).toBe(false);
+      expect(build.textContent).toContain('Build PDF');
+    });
     fireEvent.click(build);
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
     expect(onExit).toHaveBeenCalledTimes(1);
@@ -512,11 +530,11 @@ describe('result-FIRST queue', () => {
     expect(await pages[0].file.text()).toBe('jpeg-bytes');
     expect(pages[1].file.type).toBe('image/jpeg');
     expect(await pages[1].file.text()).toBe('jpeg-bytes');
-    // Warped output encodes full-res JPEG q0.9 (never PNG).
+    // Warped output encodes full-res JPEG q0.97 (never PNG).
     expect(seen.length).toBeGreaterThan(0);
     for (const s of seen) {
       expect(s.type).toBe('image/jpeg');
-      expect(s.quality).toBe(0.9);
+      expect(s.quality).toBe(0.97);
     }
   });
 
@@ -546,7 +564,7 @@ describe('result-FIRST queue', () => {
     await waitFor(() => expect(mockWarpExtract).toHaveBeenCalled());
     // Warped -> original -> warped: two toggles land back on the crop.
     fireEvent.click(screen.getByText('Use original', { exact: true }));
-    fireEvent.click(screen.getByText('Use original', { exact: true }));
+    fireEvent.click(screen.getByText('Use auto-crop', { exact: true }));
     expect(screen.getByText('Page 1 of 1')).toBeTruthy();
     fireEvent.click(q('[data-build-pdf]'));
     await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
@@ -1284,12 +1302,28 @@ describe('deferred review drain', () => {
 });
 
 describe('review filmstrip + batch bar', () => {
+  it('requires Apply or Cancel before leaving an active crop, then restores Build', async () => {
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust corners' }));
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(true);
+    expect((q('[data-scan-add]') as HTMLButtonElement).disabled).toBe(true);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Apply or cancel the crop/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect((q('[data-page-next]') as HTMLButtonElement).disabled).toBe(false);
+    expect((q('[data-build-pdf]') as HTMLButtonElement).disabled).toBe(false);
+  });
   it('renders numbered thumbs, pager, add-back, and an enabled Build PDF', async () => {
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void) {
       cb(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     };
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
+    const workspace = q('[data-review-workspace]') as HTMLElement;
+    expect(workspace.className).toContain('max-w-4xl');
+    expect(workspace.className).toContain('mx-auto');
+    expect(workspace.className).toContain('w-full');
     expect(q('[data-scan-filmstrip]')).toBeTruthy();
     expect(document.body.querySelectorAll('[data-film-thumb]').length).toBe(2);
     expect(q('[data-scan-add]').getAttribute('aria-label')).toBe('Back to camera');
@@ -1477,7 +1511,7 @@ describe('original-blob capture (ImageCapture)', () => {
     return { stop };
   }
 
-  it('takePhoto resolves the sensor-native blob with photoCapabilities max (no canvas re-encode)', async () => {
+  it('captures a video JPEG without requesting a sensor photo', async () => {
     const toBlobTypes: Array<string | undefined> = [];
     HTMLCanvasElement.prototype.toBlob = function (cb: (b: Blob | null) => void, type?: string) {
       toBlobTypes.push(type);
@@ -1493,11 +1527,10 @@ describe('original-blob capture (ImageCapture)', () => {
     const cta = await findQ('[data-review-cta]');
     expect(cta.textContent).toBe('View 1 pages');
     // Best original: the capabilities max was requested.
-    await waitFor(() => expect(probe.calls()).toBe(1));
-    expect(probe.seen()).toEqual({ imageWidth: 4000, imageHeight: 3000 });
+    expect(probe.calls()).toBe(0);
     // Capture never re-encoded: no canvas export during the shutter itself
     // (warped JPEG q0.9 runs later, in review, via canvasToJpeg only).
-    expect(toBlobTypes.includes('image/jpeg')).toBe(false);
+    expect(toBlobTypes.includes('image/jpeg')).toBe(true);
 
     // Original bytes flow downstream byte-identical.
     fireEvent.click(cta);
@@ -1509,10 +1542,10 @@ describe('original-blob capture (ImageCapture)', () => {
     const pages = onCommit.mock.calls[0][0] as Array<{ file: File; name: string }>;
     expect(pages).toHaveLength(1);
     expect(pages[0].file.type).toBe('image/jpeg');
-    expect(await pages[0].file.text()).toBe('sensor-bytes');
+    expect(await pages[0].file.text()).toBe('jpeg-bytes');
   });
 
-  it('takePhoto without exposed capabilities uses the native default', async () => {
+  it('video capture does not require photo capabilities', async () => {
     let seen: unknown = 'unset';
     vi.stubGlobal(
       'ImageCapture',
@@ -1531,7 +1564,7 @@ describe('original-blob capture (ImageCapture)', () => {
     await findQ('[data-scan-capture]');
     fireEvent.click(q('[data-scan-capture]'));
     await findQ('[data-review-cta]');
-    expect(seen === undefined || seen === null).toBe(true);
+    expect(seen).toBe('unset');
   });
 
   it('canvas-draw fallback runs only when ImageCapture is unavailable', async () => {
@@ -1555,10 +1588,23 @@ describe('original-blob capture (ImageCapture)', () => {
       ) as HTMLVideoElement;
       Object.defineProperty(video, 'videoWidth', { value: 1280, configurable: true });
       Object.defineProperty(video, 'videoHeight', { value: 720, configurable: true });
+      vi.spyOn(video, 'getBoundingClientRect').mockReturnValue({
+        width: 360,
+        height: 800,
+        left: 0,
+        top: 0,
+        right: 360,
+        bottom: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
 
       fireEvent.click(q('[data-scan-capture]'));
       await findQ('[data-review-cta]');
-      expect(drawImage).toHaveBeenCalled();
+      // A tall phone viewport must never destroy a landscape sensor's pixels.
+      expect(drawImage).toHaveBeenCalledWith(video, 0, 0);
+      expect(video.className).toContain('object-contain');
       expect(toBlobTypes.includes('image/jpeg')).toBe(true);
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetContext;
@@ -1567,6 +1613,86 @@ describe('original-blob capture (ImageCapture)', () => {
 });
 
 describe('camera picker', () => {
+  it('refreshes the complete camera list without collapsing shared labels or groups', async () => {
+    const { track } = mockLiveCamera();
+    const enumerateDevices = vi.fn(async () => [
+      { kind: 'videoinput', deviceId: 'main', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'wide', label: 'Back camera', groupId: 'back' },
+    ]);
+    Object.assign(navigator.mediaDevices, { enumerateDevices });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(q('[data-camera-select]').querySelectorAll('option')).toHaveLength(3);
+    enumerateDevices.mockResolvedValueOnce([
+      { kind: 'videoinput', deviceId: 'main', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'wide', label: 'Back camera', groupId: 'back' },
+      { kind: 'videoinput', deviceId: 'tele', label: 'Back camera', groupId: 'back' },
+    ]);
+    fireEvent.click(screen.getByText('Refresh cameras'));
+    await waitFor(() =>
+      expect(q('[data-camera-select]').querySelectorAll('option')).toHaveLength(4),
+    );
+    expect(track.applyConstraints).not.toHaveBeenCalled();
+  });
+
+  it('starts at the widest zoom, applies real controls, and preserves autofocus and zoom', async () => {
+    const settings: Record<string, unknown> = { zoom: 2, exposureCompensation: 0 };
+    let constraints: MediaTrackConstraints = {};
+    const track = {
+      stop: vi.fn(),
+      getCapabilities: () => ({
+        zoom: { min: 0.5, max: 4, step: 0.1 },
+        exposureCompensation: { min: -2, max: 2, step: 0.5 },
+        focusMode: ['continuous'],
+      }),
+      getConstraints: () => constraints,
+      getSettings: () => settings,
+      applyConstraints: vi.fn(async (next: MediaTrackConstraints) => {
+        constraints = next;
+        Object.assign(settings, ...(next.advanced ?? []));
+      }),
+    };
+    const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(async () => stream) },
+    });
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(settings.zoom).toBe(0.5);
+    expect(settings.focusMode).toBe('continuous');
+    fireEvent.click(screen.getByLabelText('Adjust camera zoom'));
+    fireEvent.change(screen.getByLabelText('Camera zoom'), { target: { value: '1.5' } });
+    await waitFor(() => expect(settings.zoom).toBe(1.5));
+    fireEvent.click(screen.getByLabelText('Adjust camera brightness'));
+    fireEvent.change(screen.getByLabelText('Camera brightness'), { target: { value: '-1' } });
+    await waitFor(() => expect(settings.exposureCompensation).toBe(-1));
+    expect(settings.zoom).toBe(1.5);
+    expect(settings.focusMode).toBe('continuous');
+    fireEvent.click(screen.getByLabelText('Widest camera view'));
+    await waitFor(() => expect(settings.zoom).toBe(0.5));
+  });
+
+  it('does not render nonfunctional zoom, brightness or focus controls', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    expect(document.querySelector('[data-camera-controls]')).toBeNull();
+    expect(screen.queryByLabelText('Camera brightness')).toBeNull();
+    expect(screen.queryByLabelText('Refocus camera')).toBeNull();
+  });
+
+  it('offers native phone-camera input without slowing the live shutter', async () => {
+    mockLiveCamera();
+    render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
+    await findQ('[data-scan-capture]');
+    const input = screen.getByLabelText('Take a native camera photo');
+    expect(input.getAttribute('capture')).toBe('environment');
+    fireEvent.change(input, { target: { files: [photo('native.jpg', [1, 2, 3])] } });
+    await findQ('[data-review-cta]');
+    expect(mockDetect).not.toHaveBeenCalled();
+  });
+
   function mockTwoCameras() {
     const stop1 = vi.fn();
     const track1 = {
@@ -1716,11 +1842,13 @@ describe('orientation-honest constraints', () => {
     try {
       expect(isLandscapeScreen()).toBe(false);
       expect(buildVideoConstraints('environment')).toEqual({
+        resizeMode: 'none',
         facingMode: { ideal: 'environment' },
         width: { ideal: 1080 },
         height: { ideal: 1920 },
       });
       expect(buildVideoConstraints('user')).toEqual({
+        resizeMode: 'none',
         facingMode: { ideal: 'user' },
         width: { ideal: 720 },
         height: { ideal: 1280 },
@@ -1749,7 +1877,7 @@ describe('orientation-honest constraints', () => {
     }
   });
 
-  it('never styles the preview with a forced ratio (full-bleed cover only)', async () => {
+  it('never styles the preview with a forced ratio (full-frame contain only)', async () => {
     const restore = setOrientation('landscape-primary');
     try {
       const stop = vi.fn();
@@ -1783,7 +1911,7 @@ describe('orientation-honest constraints', () => {
       // No ratio styling on the cover video: the full-bleed object-cover
       // layer crops, never stretches (the aspectRatio style is deleted).
       expect(video.style.aspectRatio).toBe('');
-      expect(video.className).toContain('object-cover');
+      expect(video.className).toContain('object-contain');
       expect(video.className).toContain('inset-0');
       // Full-bleed layer keeps no hardcoded aspect/max-w box.
       expect(q('[data-viewfinder]').className).not.toMatch('aspect-');
@@ -2599,26 +2727,13 @@ describe('shutter inflight guard (D53)', () => {
     });
   }
 
-  it('overlapping taps no-op: second tap never re-enters takePhoto, Capturing… shows, then releases', async () => {
+  it('overlapping taps encode one video frame, then release the shutter guard', async () => {
     let takeCalls = 0;
     let resolveTake: ((blob: Blob) => void) | null = null;
-    vi.stubGlobal(
-      'ImageCapture',
-      class {
-        constructor(_track: unknown) {
-          void _track;
-        }
-        async getPhotoCapabilities() {
-          return { imageWidth: { max: 4000 }, imageHeight: { max: 3000 } };
-        }
-        takePhoto() {
-          takeCalls += 1;
-          return new Promise<Blob>((resolve) => {
-            resolveTake = resolve;
-          });
-        }
-      },
-    );
+    HTMLCanvasElement.prototype.toBlob = function (callback) {
+      takeCalls += 1;
+      resolveTake = callback;
+    };
     mockCameraForGuard();
     render(<ScanicCapture onCommit={() => undefined} onExit={() => undefined} />);
     const shutter = (await findQ('[data-scan-capture]')) as HTMLButtonElement;
@@ -2662,6 +2777,7 @@ describe('review pager dots', () => {
     await injectAndReview(photo('a.jpg', [1]), photo('b.jpg', [2]));
     const dots = Array.from(document.querySelectorAll('[data-page-dot]'));
     expect(dots.length).toBe(2);
+    expect(dots[0].hasAttribute('data-film-thumb')).toBe(true);
     for (const [i, dot] of dots.entries()) {
       expect((dot as HTMLElement).getAttribute('aria-label')).toBe(`Go to page ${i + 1}`);
       expect((dot as HTMLElement).className).toMatch('min-h-[44px]');

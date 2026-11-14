@@ -1543,7 +1543,7 @@ async function main() {
           const mirror = document.querySelector('[data-mirror-toggle]');
           return {
             video: v !== null,
-            objectCover: v !== null && getComputedStyle(v).objectFit === 'cover',
+            objectContain: v !== null && getComputedStyle(v).objectFit === 'contain',
             frame: document.querySelector('[data-finder-frame]') !== null,
             status: document.querySelector('[data-finder-status]')?.textContent?.trim() ?? null,
             mirror: mirror !== null,
@@ -1565,7 +1565,7 @@ async function main() {
       );
       // Viewfinder geometry contract (full-bleed overlay): `[data-viewfinder]`
       // is a FULL-BLEED layer — its rect covers the scanner surface (parent
-      // stage) rect ±2px per edge (no bars), the video is object-cover, and
+      // stage) rect ±2px per edge, the video is object-contain (no crop), and
       // the video rect covers the viewfinder rect ±2px per edge. Missing
       // `[data-viewfinder]` fails honestly (no fallback — the hook is the
       // contract). All total (try/catch).
@@ -1600,20 +1600,20 @@ async function main() {
             surfaceH: Math.round(s.height),
             videoW: Math.round(v.width),
             videoH: Math.round(v.height),
-            objectCover: getComputedStyle(video).objectFit === 'cover',
+            objectContain: getComputedStyle(video).objectFit === 'contain',
           };
         } catch {
           return null;
         }
       });
       check(
-        'scanner viewfinder is full-bleed with object-cover video (no bars)',
+        'scanner surface is fullscreen with uncropped object-contain video',
         viewfinderBefore !== null &&
           Math.abs(viewfinderBefore.edge.left) <= 2 &&
           Math.abs(viewfinderBefore.edge.top) <= 2 &&
           Math.abs(viewfinderBefore.edge.right) <= 2 &&
           Math.abs(viewfinderBefore.edge.bottom) <= 2 &&
-          viewfinderBefore.objectCover === true &&
+          viewfinderBefore.objectContain === true &&
           Math.abs(viewfinderBefore.videoEdge.left) <= 2 &&
           Math.abs(viewfinderBefore.videoEdge.top) <= 2 &&
           Math.abs(viewfinderBefore.videoEdge.right) <= 2 &&
@@ -2231,6 +2231,24 @@ async function main() {
       );
       await scanCaptureOnce(page);
       await waitForStripCount(page, 2);
+      const capturePixels = await page.evaluate(async () => {
+        const video = document.querySelector('[data-scanner-root] video');
+        const image = document.querySelector('[data-scan-gallery] img');
+        if (!video || !image) return null;
+        await image.decode();
+        return {
+          frame: [video.videoWidth, video.videoHeight],
+          saved: [image.naturalWidth, image.naturalHeight],
+        };
+      });
+      check(
+        'scanner live capture preserves every sensor-frame pixel (no viewport crop)',
+        capturePixels !== null &&
+          capturePixels.frame[0] > 0 &&
+          capturePixels.frame[0] === capturePixels.saved[0] &&
+          capturePixels.frame[1] === capturePixels.saved[1],
+        JSON.stringify(capturePixels),
+      );
       const queueState = await page.evaluate(() => {
         try {
           const cta = document.querySelector('[data-scan-strip] [data-review-cta]');
@@ -2557,6 +2575,39 @@ async function main() {
           singleCanvas.imgSrcLen > 0 &&
           singleCanvas.overlayPresent === false,
         JSON.stringify(singleCanvas),
+      );
+      const reviewMat = await page.evaluate(() => {
+        const mat = document.querySelector('[data-crop-result]');
+        const img = document.querySelector('[data-crop-result-img]');
+        const workspace = document.querySelector('[data-review-workspace]');
+        const queue = document.querySelector('[data-scan-queue]');
+        if (!mat || !img || !workspace || !queue || !img.naturalWidth) return null;
+        const m = mat.getBoundingClientRect();
+        const r = img.getBoundingClientRect();
+        const w = workspace.getBoundingClientRect();
+        const q = queue.getBoundingClientRect();
+        const style = getComputedStyle(mat);
+        return {
+          padding: parseFloat(style.paddingTop),
+          radius: parseFloat(style.borderTopLeftRadius),
+          fit: getComputedStyle(img).objectFit,
+          inset: Math.min(r.left - m.left, r.top - m.top, m.right - r.right, m.bottom - r.bottom),
+          workspaceWidth: w.width,
+          matWidth: m.width,
+          centerOffset: Math.abs((w.left + w.right - q.left - q.right) / 2),
+        };
+      });
+      check(
+        'scanner review shows contained square-edged page on a padded mat',
+        reviewMat !== null &&
+          reviewMat.padding >= 8 &&
+          reviewMat.radius === 0 &&
+          reviewMat.fit === 'contain' &&
+          reviewMat.inset >= 8 &&
+          Math.abs(reviewMat.matWidth - reviewMat.workspaceWidth) <= 1 &&
+          reviewMat.workspaceWidth <= 897 &&
+          reviewMat.centerOffset <= 2,
+        JSON.stringify(reviewMat),
       );
       // Single-canvas contract: the result view carries no overlay, so
       // Re-detect is a no-hang round-trip on the hero (dispatch → wait →
@@ -4086,32 +4137,33 @@ async function main() {
       // swaps warped→photo and back, with no navigation and no commit.
       // Click in one evaluate, waitForFunction the post-condition, measure
       // in a LATER evaluate (L-12 — React-flush timing).
-      const clickUseOriginal = () =>
-        page.evaluate(() => {
+      const clickVerdict = (label) =>
+        page.evaluate((expected) => {
           try {
             [...document.querySelectorAll('button')]
-              .find((b) => (b.textContent ?? '').includes('Use original'))
+              .find((b) => b.textContent === expected)
               ?.click();
           } catch {
             /* noop */
           }
-        });
+        }, label);
       const readHero = () =>
         page.evaluate(() => {
           try {
             const img = document.querySelector('[data-crop-result-img]');
-            const result = document.querySelector('[data-crop-result]');
             return {
               src: img?.getAttribute('src') ?? null,
               alt: img?.getAttribute('alt') ?? null,
-              chip: result?.textContent ?? null,
+              chip: document.querySelector('[data-crop-status]')?.textContent ?? null,
+              action:
+                document.querySelector('button[aria-label="Use auto-crop"]')?.textContent ?? null,
             };
           } catch {
             return null;
           }
         });
       const toggleBase = await readHero();
-      await clickUseOriginal();
+      await clickVerdict('Use original');
       let toggledToPhoto = false;
       try {
         await waitTotal(
@@ -4122,7 +4174,7 @@ async function main() {
               if (!img) return false;
               const src = img.getAttribute('src');
               const alt = img.getAttribute('alt') ?? '';
-              const chip = document.querySelector('[data-crop-result]')?.textContent ?? '';
+              const chip = document.querySelector('[data-crop-status]')?.textContent ?? '';
               return (
                 typeof src === 'string' &&
                 src.length > 0 &&
@@ -4142,7 +4194,7 @@ async function main() {
       }
       const togglePhoto = await readHero();
       const photoSrc = togglePhoto?.src ?? null;
-      await clickUseOriginal();
+      await clickVerdict('Use auto-crop');
       let toggledBack = false;
       try {
         await waitTotal(
@@ -4174,6 +4226,7 @@ async function main() {
           toggledBack &&
           toggleBase !== null &&
           togglePhoto !== null &&
+          togglePhoto.action === 'Use auto-crop' &&
           toggleRestored !== null &&
           typeof toggleBase.src === 'string' &&
           toggleBase.src.length > 0 &&

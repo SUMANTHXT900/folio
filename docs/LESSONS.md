@@ -181,3 +181,9 @@ Each lesson states the observation, why it matters, and the resulting rule. All 
 - **Observation.** Entering scanner review decoded full-resolution photos on the main thread (`createImageBitmap` + `getImageData`) in the same commit that swapped the camera surface for the review surface; the first review frame was delayed and the parent Images page showed through. The same commit also ran `prepareImportFile` twice — once in the scanner, once in `ImagesTool.importFiles`.
 - **Why it matters.** The user reads the transition as a freeze/crash; duplicate normalization makes the build feel slow and wastes the largest CPU/memory step twice.
 - **Rule.** Paint the destination shell before heavy work (yield a frame), decode at the smallest size the consumer actually needs (scanic detects at ≤800px, so a ≤1600px readback is plenty; scale results back to full-res coordinates), give the expensive step exactly one owner, and keep the parent mounted until the async commit resolves. Evidence: `docs/BUGS.md` F-24; `docs/DECISIONS.md` D55.
+
+## Camera framing and constraint replacement (D56, 2026-11-13)
+
+- A full-screen `object-cover` camera can look zoomed even at the hardware minimum. Matching its crop in the saved image compounds the problem by destroying real image pixels. Preview content geometry and captured dimensions need explicit tests at mismatched sensor/viewport ratios.
+- `applyConstraints` replaces the previous constraint set; independent torch/exposure/zoom actions must preserve existing constraints and serialize per track. Check settings readback where available; a resolved advanced constraint does not guarantee it was applied.
+- A zoom range is not proof of optical magnification or access to every physical lens. List all exposed IDs without grouping by label/groupId, and provide an honest native-camera alternative rather than invented camera entries.

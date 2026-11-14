@@ -17,6 +17,44 @@ export interface DevNote {
 
 export const DEV_NOTES: DevNote[] = [
   {
+    build: 'v1.12.9 scanner review and detail',
+    date: '2026-11-14',
+    notes: [
+      'Review shows the complete page on a centered dark mat, with one numbered filmstrip and clear crop actions.',
+      'Crop edits require Apply or Cancel before switching pages or building. Cropped output uses JPEG quality 0.97; the fast live-frame shutter remains unchanged.',
+    ],
+  },
+  {
+    build: 'v1.12.8 full-frame scanner',
+    date: '2026-11-13',
+    notes: [
+      'Full-frame live capture replaces the destructive portrait crop. Capture and auto-crop use JPEG quality 0.95 without bringing sensor-photo or ML work back to the shutter.',
+      'Supported hardware zoom starts at its widest setting with Wide reset; brightness and autofocus use compact real-camera controls. Settings preserve each other and read back applied values where available.',
+      'Camera discovery refreshes without merging shared labels. Use phone camera offers a native-photo alternative for finer detail or browser-hidden lenses.',
+    ],
+  },
+  {
+    build: 'v1.12.7 portrait camera experience',
+    date: '2026-11-12',
+    notes: [
+      'Portrait viewfinder fills the screen and captures the same visible framing. Double-tap refocus and sun brightness controls are accessible directly over the preview where supported.',
+    ],
+  },
+  {
+    build: 'v1.12.6 camera framing and controls',
+    date: '2026-11-12',
+    notes: [
+      'Scanner preview shows the full camera frame without cropping. Camera zoom resets to its supported 1 setting on startup. Brightness adjustment and refocus are available when supported by the selected camera.',
+    ],
+  },
+  {
+    build: 'v1.12.5 development update',
+    date: '2026-11-12',
+    notes: [
+      'Camera capture now uses the live video frame. PDF intake errors are visible in Merge, Rotate and Metadata; image previews support Escape and keyboard focus.',
+    ],
+  },
+  {
     build: 'Scanner review/build flow (F-24/D55)',
     date: '2026-10-20',
     notes: [

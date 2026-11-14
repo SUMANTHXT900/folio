@@ -25,8 +25,7 @@
  * the read-only EXIF probe and per-item queue spans (measure-only, no
  * behavior).
  *
- * Viewfinder modules (surgical refactor, pipeline untouched —
- * takePhoto→queue→drain→warp→commit is byte-identical in behavior):
+ * Viewfinder modules (frame→queue→drain→warp→commit):
  * `FinderChrome` (ONE overlay top bar: close + title + More; a single
  * overflow sheet owns every secondary control), `Finder` (video + ticks +
  * one ACTIONABLE status pill, quiet otherwise), shutter cluster (shutter +
@@ -34,26 +33,19 @@
  * `ReviewShell` (non-blocking preparing banner; ready pages stay
  * interactive — viewing-is-verdict).
  *
- * Preview vs detection: the <video> preview pixels are NEVER the detection
- * input — detection runs on the captured still through scanic's own internal
- * downscale (the worker scales to detection size itself). Preview
- * resolution (up to 1080p) only affects what the user sees.
+ * Live shutter saves the FULL video frame at JPEG q0.95. No screen-shaped
+ * crop, upscale, sensor-photo stall, or ML work at shutter time. The queued
+ * frame is detection's original; detection readback remains capped at 1600px.
+ * Native phone-camera input is an explicit higher-detail alternative.
  *
  * Mirror invariant: the front-camera preview is CSS-mirrored (`scaleX(-1)`,
  * industry standard) for a natural selfie feel, but captured frames are
- * ALWAYS unmirrored — `ImageCapture.takePhoto()` returns the sensor-native
- * Blob (never the CSS transform), and the canvas-draw fallback reads raw
- * camera pixels via `drawImage(video)` (likewise never the CSS transform).
+ * ALWAYS unmirrored — canvas draw reads raw camera pixels, never CSS.
  * The back camera is never mirrored.
  *
- * Original-blob capture: the shutter uses the ImageCapture API
- * (`new ImageCapture(track).takePhoto()`) so the queued File is the
- * sensor's native encoding — no canvas, no toBlob, no quality param, zero
- * encode/decode. Canvas-draw is a fallback ONLY when ImageCapture is
- * unavailable or throws (older browsers, Firefox without ImageCapture,
- * virtual cameras that reject takePhoto). takePhoto resolution requests the
- * `getPhotoCapabilities()` max when exposed (best original), else the
- * native default (bare `takePhoto()`).
+ * ImageCapture is used only for the existing camera capability probe,
+ * never by the fast live shutter. Native camera Files remain untouched
+ * until the existing import budget requires normalization.
  *
  * Camera choice: after permission, `enumerateDevices()` lists video inputs;
  * the `[data-camera-select]` native select (alongside the facing quick-flip)
@@ -66,10 +58,8 @@
  * session start — portrait screens keep portrait ideals (1080x1920 back /
  * 720x1280 front); landscape screens request landscape max (1920x1080 with
  * a `width: { min: 1280 }` floor). No portrait crop is ever forced on a
- * landscape sensor. The preview is full-bleed `object-cover` (no forced
- * ratio anywhere, no `aspectRatio` styling on the video — the cover layer
- * crops, never stretches, so a 1440p landscape webcam never renders as a
- * blurry zoomed crop).
+ * landscape sensor. resizeMode:none asks for an uncropped hardware mode;
+ * object-contain shows its full frame. Unsupported resizeMode is ignored.
  *
  * E2E DATA CONTRACT (do not rename):
  * - root `[data-scanner-root]` (+ `data-detector="ml"`), shutter
@@ -85,15 +75,15 @@
  *   `[data-review-progress]` (aria-label `i of N viewed`, visited
  *   count — INTENTIONAL contract change from `reviewed`), pager
  *   `[data-page-prev]` / `[data-page-next]` (44px, disabled at ends) +
- *   `[data-page-dot]` (44px page dots, `aria-current` on current), finder
+ *   `[data-page-dot]` (the visible 44px filmstrip buttons, `aria-current` on current), finder
  *   `[data-finder-frame]` + `[data-finder-status]` (rendered ONLY when
  *   actionable: starting / paused / captured-flash / Auto hold-steady /
  *   denied-retry help — quiet Manual idle renders NO pill), mirror
  *   `[data-mirror-toggle]` (aria-pressed, lives in the overflow sheet),
  *   filmstrip `[data-scan-filmstrip]` + `[data-film-thumb]` (numbered, tap
  *   jumps) + `[data-scan-add]` (back to camera), batch bar
- *   `[data-batch-bar]` (`Discard scans` ghost / `Next` primary, gated on
- *   >=1 page), overflow `[data-scan-more]` (trigger, `aria-expanded`) +
+ *   `[data-batch-bar]` (`Discard scans` / `Build PDF`, gated on readiness),
+ *   overflow `[data-scan-more]` (trigger, `aria-expanded`) +
  *   `[data-scan-sheet]` (always mounted in the camera phase, hidden when
  *   closed — flash, flip, mirror, camera select, mode, import rows).
  * - Additive (VF-BUILD, E2E-safe): gallery `[data-gallery-count]` visible
@@ -101,7 +91,7 @@
  *   non-blocking `[data-review-preparing]` slim banner (same text + role —
  *   pager/filmstrip/Add/Next stay enabled while it shows).
  * - Queue button labels are EXACT: "Adjust corners", "Apply",
- *   "Use original" (toggle warped <-> original), "Discard", "Reset to auto",
+ *   "Use original" / "Use auto-crop" (toggle warped <-> original), "Discard", "Reset to auto",
  *   "Build PDF", "Back to camera", "Re-detect", "Previous page",
  *   "Next page", "Next", "Discard scans". No "Looks good" exists anywhere —
  *   seeing a fine page is enough to move on (implicit accept).
@@ -109,11 +99,9 @@
  * Binary ownership: originals live as File handles in refs/state (never
  * re-encoded, never base64); only object-URL strings enter React state, and
  * every URL is revoked on discard/commit/unmount. Warped commits are full-res
- * JPEG q0.9 renders of the worker's warp output via `imageDataToJpeg(0.9)` —
+ * JPEG q0.97 renders of the worker's warp output via `imageDataToJpeg()` —
  * warped pages are NEW renders (never original bytes; originals still pass
- * through byte-identical when inside the import pixel budget), and JPEG q0.9
- * full-res cuts multi-MB PNG bloat to a fraction with no readable-text loss
- * (4-page 22MB class problem). Commits hand candidate Files to ImagesTool's
+ * through byte-identical when inside the import pixel budget). Commits hand candidate Files to ImagesTool's
  * normalization (same pixel budget as gallery imports) so 48MP sensor photos
  * can't bypass it; a failed import keeps the review queue recoverable instead
  * of dropping the captures. Committed warped files keep
@@ -147,6 +135,13 @@ import {
 import { probeExifOrientation, type ExifProbeResult } from './scan/exifProbe';
 import type { ScanicDetectInstrumentation } from './scan/scanicProtocol';
 import ScanicReview from './ScanicReview';
+import FinderControls from './scan/FinderControls';
+import {
+  applyTrackControl,
+  cameraRange,
+  clampCameraValue,
+  type CameraRange,
+} from './scan/cameraControls';
 
 /** Self-hosted (same-origin) ML detector assets — ML is the default (re-exported policy value; kept here for test compat). */
 export const SCANIC_ML_ASSET_BASE_URL = POLICY_ML_ASSET_BASE_URL;
@@ -435,18 +430,23 @@ export function isLandscapeScreen(): boolean {
 export function buildVideoConstraints(
   facing: 'environment' | 'user',
   deviceId?: string | null,
-): MediaTrackConstraints {
+): MediaTrackConstraints & { resizeMode: 'none' } {
   const base: MediaTrackConstraints =
     deviceId !== null && deviceId !== undefined && deviceId !== ''
       ? { deviceId: { exact: deviceId } }
       : { facingMode: { ideal: facing } };
   if (isLandscapeScreen()) {
-    return { ...base, width: { ideal: 1920, min: 1280 }, height: { ideal: 1080 } };
+    return {
+      ...base,
+      resizeMode: 'none',
+      width: { ideal: 1920, min: 1280 },
+      height: { ideal: 1080 },
+    };
   }
   if (facing === 'user') {
-    return { ...base, width: { ideal: 720 }, height: { ideal: 1280 } };
+    return { ...base, resizeMode: 'none', width: { ideal: 720 }, height: { ideal: 1280 } };
   }
-  return { ...base, width: { ideal: 1080 }, height: { ideal: 1920 } };
+  return { ...base, resizeMode: 'none', width: { ideal: 1080 }, height: { ideal: 1920 } };
 }
 
 /**
@@ -863,16 +863,15 @@ async function decodeFileForDetection(file: File): Promise<{
 
 /**
  * Warped-page encoder: worker warp ImageData → full-res `image/jpeg` at
- * quality 0.9 (null when the platform cannot encode).
+ * quality 0.97 (null when the platform cannot encode).
  *
  * Rationale: warped pages are NEW renders (never original bytes — originals
  * still pass through byte-identical when inside the import pixel budget),
- * and JPEG q0.9 full-res cuts multi-MB PNG bloat to a fraction with no
- * readable-text loss (4-page 22MB class problem). Committed warped files
+ * and JPEG avoids the old multi-MB PNG bloat. Committed warped files
  * keep `scan-NNN.jpg` names with `image/jpeg` type. Full-res means the warp
  * output pixels as-is (no downscale); only the container changes.
  */
-function imageDataToJpeg(image: ImageData, quality = 0.9): Promise<Blob | null> {
+function imageDataToJpeg(image: ImageData, quality = 0.97): Promise<Blob | null> {
   return new Promise((resolve) => {
     try {
       const canvas = makeCanvas(image.width, image.height);
@@ -963,7 +962,7 @@ function FinderChrome({ onExit, sheetOpen, onToggleSheet, sheet }: FinderChromeP
           id="scan-sheet"
           className={
             sheetOpen
-              ? 'pointer-events-auto relative w-full rounded-2xl bg-paper-50 shadow-soft dark:bg-ink-900'
+              ? 'pointer-events-auto relative w-full max-w-sm self-end rounded-xl bg-paper-50 shadow-soft dark:bg-ink-900'
               : 'hidden'
           }
         >
@@ -1041,6 +1040,8 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const [entries, setEntries] = useState<QueueEntry[]>([]);
   const [phase, setPhase] = useState<Phase>('camera');
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewAdjusting, setReviewAdjusting] = useState(false);
+  const reviewFilmstripRef = useRef<HTMLDivElement>(null);
   const [building, setBuilding] = useState(false);
   const [buildError, setBuildError] = useState<string | null>(null);
   const buildingRef = useRef(false);
@@ -1129,6 +1130,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const probeFiredRef = useRef(false);
   const probeGenRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   /**
    * Scan worker clients: detection runs on the mount-lifetime retained client
@@ -1187,14 +1189,122 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
    * shutter paint before the first await yields) and drops in `finally`,
    * so overlapping taps no-op instead of serializing on the sensor.
    */
+  const [cameraControls, setCameraControls] = useState<{
+    exposure?: CameraRange;
+    zoom?: CameraRange;
+    focusModes: string[];
+  }>({ focusModes: [] });
+  const [zoom, setZoom] = useState(1);
+  const [previewBox, setPreviewBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [frameSize, setFrameSize] = useState<{ width: number; height: number } | null>(null);
+  const [exposure, setExposure] = useState(0);
+  const [cameraControlNote, setCameraControlNote] = useState<string | null>(null);
+  const applyCameraControl = async (constraint: Record<string, unknown>) => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    // Serialize hardware changes; late results from an old camera never repaint.
+    try {
+      await applyTrackControl(track, constraint);
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
+      const settings = track.getSettings?.() as Record<string, unknown> | undefined;
+      for (const [key, value] of Object.entries(constraint)) {
+        if (
+          typeof value === 'number' &&
+          typeof settings?.[key] === 'number' &&
+          Math.abs(settings[key] - value) > 0.01
+        ) {
+          throw new Error('Camera ignored the requested value');
+        }
+      }
+      if ('zoom' in constraint && typeof settings?.zoom === 'number') setZoom(settings.zoom);
+      if (
+        'exposureCompensation' in constraint &&
+        typeof settings?.exposureCompensation === 'number'
+      )
+        setExposure(settings.exposureCompensation);
+      setCameraControlNote(
+        'focusMode' in constraint ? 'Autofocus requested — hold the page steady.' : null,
+      );
+    } catch {
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
+      const settings = track.getSettings?.() as Record<string, unknown> | undefined;
+      if (typeof settings?.zoom === 'number') setZoom(settings.zoom);
+      if (typeof settings?.exposureCompensation === 'number')
+        setExposure(settings.exposureCompensation);
+      setCameraControlNote('This camera could not apply that setting. Try another camera.');
+    }
+  };
+  const requestFocus = () => {
+    const mode = cameraControls.focusModes.includes('continuous')
+      ? 'continuous'
+      : cameraControls.focusModes.includes('single-shot')
+        ? 'single-shot'
+        : null;
+    if (mode) void applyCameraControl({ focusMode: mode });
+  };
+  const refreshCameras = useCallback(async () => {
+    const stream = streamRef.current;
+    try {
+      const devices = await navigator.mediaDevices?.enumerateDevices?.();
+      if (!mountedRef.current || streamRef.current !== stream || !devices) return;
+      // Do not group by label or groupId: several lenses may share either.
+      setCameras(
+        devices
+          .filter((d) => d.kind === 'videoinput' && d.deviceId !== '')
+          .map((d) => ({ deviceId: d.deviceId, label: d.label.trim() })),
+      );
+    } catch {
+      if (mountedRef.current)
+        setCameraControlNote('Could not refresh cameras. Check camera permission and try again.');
+    }
+  }, []);
+  useEffect(() => {
+    const media = navigator.mediaDevices;
+    if (phase !== 'camera' || camState !== 'live') return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void refreshCameras();
+    };
+    media?.addEventListener?.('devicechange', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      media?.removeEventListener?.('devicechange', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [phase, camState, refreshCameras]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (phase !== 'camera' || !video) return;
+    const measure = () => {
+      if (!video.videoWidth || !video.videoHeight) return;
+      const rect = video.getBoundingClientRect();
+      const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+      const width = video.videoWidth * scale;
+      const height = video.videoHeight * scale;
+      setFrameSize({ width: video.videoWidth, height: video.videoHeight });
+      setPreviewBox({
+        left: (rect.width - width) / 2,
+        top: (rect.height - height) / 2,
+        width,
+        height,
+      });
+    };
+    measure();
+    video.addEventListener('loadedmetadata', measure);
+    video.addEventListener('resize', measure);
+    window.addEventListener('resize', measure);
+    return () => {
+      video.removeEventListener('loadedmetadata', measure);
+      video.removeEventListener('resize', measure);
+      window.removeEventListener('resize', measure);
+    };
+  }, [phase, camState]);
   const [capturing, setCapturing] = useState(false);
   const capturingRef = useRef(false);
-  /**
-   * Per-track photo-capability cache: `getPhotoCapabilities()` is an async
-   * round-trip that never changes for a live track, so pay it once per
-   * track instead of once per tap.
-   */
-  const photoCapsRef = useRef(new Map<string, { imageWidth?: number; imageHeight?: number }>());
   /**
    * Captured-flash: the quiet finder pill flashes `Captured — keep shooting`
    * for CAPTURE_FLASH_MS after each queue-only shutter park, then returns to
@@ -1295,6 +1405,16 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const accepted = queue;
   const safeIndex = queue.length === 0 ? 0 : Math.min(reviewIndex, queue.length - 1);
   const current = queue[safeIndex] ?? null;
+  useEffect(() => {
+    const strip = reviewFilmstripRef.current;
+    const selected = strip?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (!strip || !selected) return;
+    const left = selected.offsetLeft - strip.offsetLeft;
+    if (left < strip.scrollLeft) strip.scrollLeft = left;
+    else if (left + selected.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = left + selected.offsetWidth - strip.clientWidth;
+    }
+  }, [safeIndex, phase]);
   const visitedCount = queue.filter((e) => visitedIdsRef.current.has(e.id)).length;
   // Front-camera preview is mirrored by default (industry standard); the back
   // camera is never mirrored. Captured frames ignore this entirely (see
@@ -1558,6 +1678,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   const chooseCamera = useCallback(
     (deviceId: string | null) => {
       const next = deviceId === '' ? null : deviceId;
+      if (next === chosenDeviceIdRef.current && streamRef.current !== null) return;
       persistedCameraDeviceId = next;
       chosenDeviceIdRef.current = next;
       setSelectedDeviceId(next);
@@ -1667,22 +1788,58 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             // Autoplay policy: the user taps the shutter; play resumes then.
           }
         }
+        if (cancelled) return;
         const track = stream.getVideoTracks()[0];
-        // Continuous focus effort where available — silent no-op otherwise.
+        setCameraControls({ focusModes: [] });
+        setCameraControlNote(null);
         try {
-          await track?.applyConstraints({
-            advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
-          });
+          const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
+            zoom?: { min: number; max: number };
+            exposureCompensation?: { min: number; max: number; step?: number };
+            focusMode?: string[];
+            exposureMode?: string[];
+          };
+          const focusModes = caps?.focusMode ?? [];
+          const range = cameraRange(caps?.exposureCompensation);
+          const zoomRange = cameraRange(caps?.zoom);
+          if (!cancelled) {
+            setCameraControls({
+              focusModes,
+              exposure: range,
+              zoom: zoomRange,
+            });
+            setExposure(range ? Math.max(range.min, Math.min(0, range.max)) : 0);
+          }
+          const initial: Record<string, unknown> = {};
+          // Start at the widest exposed view, including values below 1.
+          if (zoomRange) initial.zoom = zoomRange.min;
+          if (focusModes.includes('continuous')) initial.focusMode = 'continuous';
+          if (caps?.exposureMode?.includes('continuous')) initial.exposureMode = 'continuous';
+          if (Object.keys(initial).length) {
+            // Isolate failures: unsupported zoom must not prevent autofocus.
+            for (const [key, value] of Object.entries(initial)) {
+              if (cancelled) return;
+              try {
+                await applyTrackControl(track, { [key]: value });
+              } catch {
+                /* Keep other controls working. */
+              }
+            }
+          }
+          if (cancelled) return;
+          const settings = track?.getSettings?.() as Record<string, unknown> | undefined;
+          if (typeof settings?.zoom === 'number') setZoom(settings.zoom);
+          else if (zoomRange) setZoom(zoomRange.min);
+          if (typeof settings?.exposureCompensation === 'number')
+            setExposure(settings.exposureCompensation);
         } catch {
-          // Unsupported on this browser/device — fixed focus still scans.
+          // Hardware controls vary across browsers; the preview remains usable.
         }
         // Facing reconcile: read the LIVE stream settings (actual sensor
         // mode) for `facingMode` when exposed (labelless OEM ids defeat
         // label-sniffing on pick); the label regex on pick stays as the
         // fallback when facingMode is unexposed. The preview itself is
-        // full-bleed `object-cover` with no ratio styling anywhere — the
-        // layer crops, never stretches, so a landscape webcam renders
-        // landscape instead of a blurry zoomed portrait crop.
+        // object-contain shows the complete raw frame regardless of screen shape.
         try {
           const settings = track?.getSettings?.() as
             { width?: number; height?: number; facingMode?: string } | undefined;
@@ -1958,28 +2115,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     if (!track) return;
     const next = !torchOn;
     try {
-      await track.applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] });
+      await applyTrackControl(track, { torch: next });
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       setTorchOn(next);
       setTorchNote(null);
     } catch {
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       // Transient failure: NEVER unmount the toggle — keep it visible with an
       // honest note. Only `torch: false` capabilities (above) may hide it.
       setTorchNote("Flash isn't available on this camera");
     }
   }, [torchOn]);
 
-  /**
-   * Original-blob shutter: the ImageCapture API returns the sensor's native
-   * Blob (`takePhoto()`) — zero canvas, zero toBlob, zero re-encode, no
-   * quality param. takePhoto output is sensor-native and therefore
-   * UNMIRRORED by construction (the front-preview `scaleX(-1)` is CSS-only
-   * and never reaches the sensor path), preserving the mirror invariant.
-   * Resolution requests the `getPhotoCapabilities()` max when the browser
-   * exposes it (best original); otherwise the bare native default.
-   * Canvas-draw is a fallback ONLY when ImageCapture is unavailable or
-   * `takePhoto()` throws (older browsers, virtual cameras) — commented at
-   * the branch, same unmirrored `drawImage` semantics as before.
-   */
+  /** Capture the live, unmirrored video frame as a JPEG. */
   const captureFrame = useCallback(async () => {
     if (capturingRef.current) return;
     capturingRef.current = true;
@@ -1992,54 +2140,6 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
         return;
       }
-      const ImageCaptureCtor = getImageCaptureCtor();
-      if (ImageCaptureCtor) {
-        try {
-          const capture = new ImageCaptureCtor(track);
-          const trackKey =
-            typeof (track as { id?: unknown }).id === 'string'
-              ? (track as { id: string }).id
-              : 'default';
-          let photoSettings: { imageWidth?: number; imageHeight?: number } | undefined =
-            photoCapsRef.current.get(trackKey);
-          if (photoSettings === undefined) {
-            try {
-              if (typeof capture.getPhotoCapabilities === 'function') {
-                const caps = await capture.getPhotoCapabilities();
-                const maxW = caps.imageWidth?.max;
-                const maxH = caps.imageHeight?.max;
-                if (typeof maxW === 'number' && typeof maxH === 'number') {
-                  photoSettings = { imageWidth: maxW, imageHeight: maxH };
-                  photoCapsRef.current.set(trackKey, photoSettings);
-                }
-              }
-            } catch {
-              // Capabilities unreadable — fall through to the native default.
-              photoSettings = undefined;
-            }
-          }
-          const blob =
-            photoSettings !== undefined
-              ? await capture.takePhoto(photoSettings)
-              : await capture.takePhoto();
-          if (!mountedRef.current) return;
-          if (!blob || blob.size === 0) throw new Error('empty photo');
-          // Untouched original from here on: the queue never re-encodes it.
-          const file = new File([blob], `capture-${idRef.current + 1}.jpg`, {
-            type: blob.type || 'image/jpeg',
-          });
-          enqueueCapture(file);
-          return;
-        } catch {
-          // takePhoto rejected (virtual camera, insecure pipe, in-use track) —
-          // fall through to the canvas-draw fallback below, which reads the
-          // live <video> frame instead of the sensor still.
-        }
-      }
-      // Fallback ONLY: ImageCapture unavailable or takePhoto threw on this
-      // browser/device. Reads raw camera pixels (never the CSS mirror), at the
-      // preview's native frame size — no upscale, no quality param beyond the
-      // legacy JPEG container this path historically produced.
       if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
         setCaptureError('Camera is not ready yet — wait for the preview, then try again.');
         return;
@@ -2068,12 +2168,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             resolve(null);
             return;
           }
-          canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92);
+          canvas.toBlob(
+            (b) => {
+              canvas.width = canvas.height = 1;
+              resolve(b);
+            },
+            'image/jpeg',
+            0.95,
+          );
         } catch {
           resolve(null);
         }
       });
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || streamRef.current?.getVideoTracks()[0] !== track) return;
       if (!blob) {
         setCaptureError('Could not capture a frame — try again or add an image file instead.');
         return;
@@ -2133,6 +2240,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (phase === 'review' && reviewAdjusting) return;
         if (sheetOpen) {
           e.preventDefault();
           setSheetOpen(false);
@@ -2156,7 +2264,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, sheetOpen, camState, captureFrame, onExit]);
+  }, [phase, sheetOpen, camState, captureFrame, onExit, reviewAdjusting]);
 
   // The sheet belongs to the camera phase: leaving it parks the sheet
   // closed so returning to the camera always reopens on a clean finder.
@@ -2470,7 +2578,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
         if (!entriesRef.current.some((e) => e.id === id)) return;
-        const blob = await withTimeout(imageDataToJpeg(warped, 0.9), WARP_TIMEOUT_MS);
+        const blob = await withTimeout(imageDataToJpeg(warped), WARP_TIMEOUT_MS);
         if (!blob) throw new Error('no jpeg');
         if (!mountedRef.current) return;
         if (warpSeqRef.current.get(id) !== seq) return;
@@ -2780,7 +2888,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
     <div className="flex max-h-[60dvh] flex-col gap-0.5 overflow-y-auto p-1.5">
       {torchSupported && (
         <SheetRowButton
-          icon={torchOn ? '🔦' : '💡'}
+          icon="↯"
           label="Flash"
           state={torchOn ? 'On' : 'Off'}
           ariaLabel="Toggle torch"
@@ -2839,6 +2947,20 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
             </option>
           ))}
         </select>
+        <div className="flex items-center justify-between gap-2 px-2">
+          <p className="text-xs text-ink-500 dark:text-ink-300">{cameras.length} browser cameras</p>
+          <button
+            type="button"
+            onClick={() => void refreshCameras()}
+            className="min-h-[44px] px-3 text-xs font-medium text-ink-900 dark:text-paper-50"
+          >
+            Refresh cameras
+          </button>
+        </div>
+        <p className={sheetNote}>
+          All cameras shared by your browser are listed. Some phone lenses are only available in the
+          phone camera app. Zoom values are camera units, not optical magnification.
+        </p>
         {deviceFallbackNote !== null && (
           <p data-camera-fallback-note role="status" className={sheetNote}>
             {deviceFallbackNote}
@@ -2904,6 +3026,24 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
         </div>
       </div>
       <SheetRowButton
+        icon="◎"
+        label="Use phone camera"
+        state="Native photo"
+        onClick={() => nativeCameraInputRef.current?.click()}
+      />
+      <p className={sheetNote}>
+        For finer text or lenses the browser cannot access, use your phone camera. Live capture
+        stays fast.
+      </p>
+      {frameSize && (
+        <p className={sheetNote}>
+          Live frame: {frameSize.width} × {frameSize.height} · JPEG quality 95%
+          {frameSize.width * frameSize.height < 1_000_000
+            ? ' · Limited live detail; use phone camera for small text.'
+            : ''}
+        </p>
+      )}
+      <SheetRowButton
         icon="▦"
         label="Add image files instead"
         onClick={() => fileInputRef.current?.click()}
@@ -2926,9 +3066,7 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       />
 
       {isCamera && (
-        // Full-bleed camera: the viewfinder is an absolute inset-0 layer of
-        // the fixed surface with video object-cover filling it EXACTLY — no
-        // aspect/max-w box, so black bars are impossible by construction.
+        // Full-screen camera surface, complete uncropped frame inside it.
         // All chrome (top bar, filmstrip, controls) floats over the video,
         // so captures can never shift layout by construction. dvh-safe: the
         // fixed root already tracks the dynamic viewport; bottom chrome pads
@@ -2943,8 +3081,12 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   playsInline
                   autoPlay
                   aria-label="Camera preview"
-                  style={previewMirrored ? { transform: 'scaleX(-1)' } : undefined}
-                  className="absolute inset-0 h-full w-full object-cover"
+                  style={{
+                    touchAction: 'manipulation',
+                    ...(previewMirrored ? { transform: 'scaleX(-1)' } : {}),
+                  }}
+                  onClick={requestFocus}
+                  className="absolute inset-0 h-full w-full object-contain"
                 />
                 {/* Finder guidance frame: rounded-rect overlay with corner
                     ticks. Top clearance comes from `--finder-clear` (set on
@@ -2958,11 +3100,11 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
                   aria-hidden
                   className="pointer-events-none absolute inset-0 flex items-center justify-center p-6 pt-[var(--finder-clear)] sm:p-10 sm:pt-[var(--finder-clear)]"
                 >
-                  <div className="relative h-full w-full rounded-2xl">
-                    <span className="absolute left-0 top-0 h-9 w-9 rounded-tl-2xl border-l-4 border-t-4 border-paper-50/90" />
-                    <span className="absolute right-0 top-0 h-9 w-9 rounded-tr-2xl border-r-4 border-t-4 border-paper-50/90" />
-                    <span className="absolute bottom-0 left-0 h-9 w-9 rounded-bl-2xl border-b-4 border-l-4 border-paper-50/90" />
-                    <span className="absolute bottom-0 right-0 h-9 w-9 rounded-br-2xl border-b-4 border-r-4 border-paper-50/90" />
+                  <div className="absolute" style={previewBox ?? { inset: '6rem 1.5rem 12rem' }}>
+                    <span className="absolute left-1 top-1 h-5 w-5 border-l border-t border-paper-50/70" />
+                    <span className="absolute right-1 top-1 h-5 w-5 border-r border-t border-paper-50/70" />
+                    <span className="absolute bottom-1 left-1 h-5 w-5 border-b border-l border-paper-50/70" />
+                    <span className="absolute bottom-1 right-1 h-5 w-5 border-b border-r border-paper-50/70" />
                   </div>
                 </div>
                 {/* Status pill rides top-center below the slim top bar
@@ -3031,6 +3173,38 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink-950/70 via-ink-950/30 to-transparent"
             />
             <div className="pointer-events-auto relative flex flex-col gap-2 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-10">
+              {camState === 'live' && (
+                <FinderControls
+                  key={selectedDeviceId ?? facing}
+                  zoomRange={cameraControls.zoom}
+                  exposureRange={cameraControls.exposure}
+                  zoom={zoom}
+                  exposure={exposure}
+                  focus={cameraControls.focusModes.some(
+                    (mode) => mode === 'continuous' || mode === 'single-shot',
+                  )}
+                  disabled={capturing || sheetOpen}
+                  onZoom={(value) => {
+                    if (!cameraControls.zoom) return;
+                    void applyCameraControl({ zoom: clampCameraValue(value, cameraControls.zoom) });
+                  }}
+                  onExposure={(value) => {
+                    if (!cameraControls.exposure) return;
+                    void applyCameraControl({
+                      exposureCompensation: clampCameraValue(value, cameraControls.exposure),
+                    });
+                  }}
+                  onFocus={requestFocus}
+                />
+              )}
+              {cameraControlNote && (
+                <p
+                  role="status"
+                  className="mx-auto max-w-sm rounded-lg bg-ink-950/90 px-3 py-2 text-center text-xs text-paper-50"
+                >
+                  {cameraControlNote}
+                </p>
+              )}
               <div data-scan-strip className="flex h-12 shrink-0 items-center justify-center">
                 {queue.length === 0 ? (
                   <span aria-hidden="true" className="block h-full w-full" />
@@ -3106,6 +3280,19 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
               {/* Hidden file input: the sheet's Import row + the fallback
                   card share it (files stay on-device). Always mounted. */}
               <input
+                ref={nativeCameraInputRef}
+                type="file"
+                accept="image/jpeg,image/png"
+                capture="environment"
+                className="hidden"
+                aria-label="Take a native camera photo"
+                onChange={(e) => {
+                  addFilesInstead(Array.from(e.target.files ?? []));
+                  e.target.value = '';
+                  setSheetOpen(false);
+                }}
+              />
+              <input
                 ref={fileInputRef}
                 type="file"
                 accept="image/jpeg,image/png,.jpg,.jpeg,.png"
@@ -3125,206 +3312,191 @@ export default function ScanicCapture({ onCommit, onExit, startIndex = 0 }: Scan
       {phase === 'review' && current !== null && (
         <div
           data-scan-queue
-          className="relative min-h-0 flex-1 space-y-3 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))]"
+          className="relative min-h-0 flex-1 overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(4rem,calc(env(safe-area-inset-top)_+_3rem))]"
         >
-          {preparing && (
-            <div
-              data-review-preparing
-              role="status"
-              className="sticky top-0 z-10 flex items-center justify-center gap-3 rounded-xl border border-brass-400/40 bg-paper-100 px-4 py-2.5 text-center dark:border-brass-400/30 dark:bg-ink-800"
-            >
-              <span
-                aria-hidden
-                className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-brass-400 motion-reduce:animate-none"
-              />
-              <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
-                {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
+          <div data-review-workspace className="mx-auto w-full max-w-4xl space-y-3">
+            {preparing && (
+              <div
+                data-review-preparing
+                role="status"
+                className="sticky top-0 z-10 flex items-center justify-center gap-3 rounded-xl border border-brass-400/40 bg-paper-100 px-4 py-2.5 text-center dark:border-brass-400/30 dark:bg-ink-800"
+              >
+                <span
+                  aria-hidden
+                  className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-brass-400 motion-reduce:animate-none"
+                />
+                <p className="min-w-0 flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">
+                  {`Preparing pages… ${preparingDone} of ${preparingTotal}`}
+                </p>
+                <button
+                  type="button"
+                  data-review-preparing-cancel
+                  onClick={cancelPreparing}
+                  className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {cardError !== null && (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {cardError}
               </p>
+            )}
+            {/* Previous/next controls supplement the numbered filmstrip. */}
+            <div className="flex items-center justify-center gap-2">
               <button
                 type="button"
-                data-review-preparing-cancel
-                onClick={cancelPreparing}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-xl border border-paper-300 px-5 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
+                data-page-prev
+                aria-label="Go to previous page"
+                disabled={safeIndex <= 0 || reviewAdjusting}
+                onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
               >
-                Cancel
+                <span aria-hidden>‹</span>
+                <span className="sr-only">Previous page</span>
+              </button>
+              <span className="text-sm font-medium tabular-nums">Pages</span>
+              <button
+                type="button"
+                data-page-next
+                aria-label="Go to next page"
+                disabled={safeIndex >= queue.length - 1 || reviewAdjusting}
+                onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
+              >
+                <span aria-hidden>›</span>
+                <span className="sr-only">Next page</span>
               </button>
             </div>
-          )}
-          {cardError !== null && (
-            <p role="alert" className="text-xs text-red-600 dark:text-red-400">
-              {cardError}
-            </p>
-          )}
-          {/* Pager: minimal prev/next + dots. Labels stay pinned (‹/› glyphs
-              with EXACT sr-only labels, same pattern as the review card's
-              icon row); dots are additive 44px navigation. No accept click
-              anywhere. */}
-          <div className="flex items-center justify-center gap-1">
-            <button
-              type="button"
-              data-page-prev
-              aria-label="Go to previous page"
-              disabled={safeIndex <= 0}
-              onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              <span aria-hidden>‹</span>
-              <span className="sr-only">Previous page</span>
-            </button>
+            <ScanicReview
+              key={current.id}
+              photoUrl={current.photoUrl}
+              imageWidth={current.imageWidth}
+              imageHeight={current.imageHeight}
+              corners={current.corners}
+              warpedUrl={current.warpedUrl}
+              warpFailed={current.warpFailed}
+              detecting={current.status !== 'ready'}
+              note={current.note}
+              pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
+              progressLabel={`${visitedCount} of ${queue.length} viewed`}
+              onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
+              onUseOriginal={() => toggleVerdict(current.id)}
+              onDiscard={() => discardEntry(current.id)}
+              onRedetect={() => void redetectEntry(current)}
+              // Disabled until this page settles `ready`: the review drain owns
+              // detecting pages, and Re-detect shares its lane-0 client — an
+              // early tap would only duplicate the drain's detect.
+              redetecting={redetecting || current.status !== 'ready'}
+              verdict={current.decision}
+              // Adjust-next keeps a dirty draft before advancing; clean drafts
+              // navigate without a warp. Visited marking follows reviewIndex.
+              onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
+              onAdjustingChange={setReviewAdjusting}
+            />
+            {reviewAdjusting && (
+              <p role="status" className="text-sm text-ink-500 dark:text-ink-300">
+                Apply or cancel the crop before switching pages or building.
+              </p>
+            )}
+            {/* Review filmstrip (owned here — ScanicReview renders the single
+              card only): numbered thumbs jump to a page, + returns to camera.
+              Slim (h-12) with 44px targets kept. */}
             <div
-              role="group"
-              aria-label="Pages"
-              className="flex min-w-0 flex-1 items-center justify-center gap-0 overflow-x-auto"
+              data-scan-filmstrip
+              ref={reviewFilmstripRef}
+              aria-label="Scanned pages"
+              className="flex items-center gap-2 overflow-x-auto py-1"
             >
               {queue.map((entry, i) => (
                 <button
                   key={entry.id}
                   type="button"
+                  data-film-thumb
                   data-page-dot={i}
                   aria-label={`Go to page ${i + 1}`}
                   aria-current={i === safeIndex}
+                  disabled={reviewAdjusting}
                   onClick={() => setReviewIndex(i)}
-                  className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
+                  className={`relative h-12 w-11 min-h-[44px] min-w-[44px] shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
+                    i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
+                  }`}
                 >
-                  <span
-                    aria-hidden
-                    className={`rounded-full transition-colors ${
-                      i === safeIndex
-                        ? 'h-2.5 w-2.5 bg-brass-400'
-                        : 'h-1.5 w-1.5 bg-ink-300 dark:bg-ink-600'
-                    }`}
-                  />
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              data-page-next
-              aria-label="Go to next page"
-              disabled={safeIndex >= queue.length - 1}
-              onClick={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
-              className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl px-2 text-lg font-medium text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-paper-100 dark:hover:bg-ink-700"
-            >
-              <span aria-hidden>›</span>
-              <span className="sr-only">Next page</span>
-            </button>
-          </div>
-          <ScanicReview
-            key={current.id}
-            photoUrl={current.photoUrl}
-            imageWidth={current.imageWidth}
-            imageHeight={current.imageHeight}
-            corners={current.corners}
-            warpedUrl={current.warpedUrl}
-            warpFailed={current.warpFailed}
-            detecting={current.status !== 'ready'}
-            note={current.note}
-            pageLabel={`Page ${safeIndex + 1} of ${queue.length}`}
-            progressLabel={`${visitedCount} of ${queue.length} viewed`}
-            onAdjustApply={(corners) => void rewrapEntry(current.id, corners)}
-            onUseOriginal={() => toggleVerdict(current.id)}
-            onDiscard={() => discardEntry(current.id)}
-            onRedetect={() => void redetectEntry(current)}
-            // Disabled until this page settles `ready`: the review drain owns
-            // detecting pages, and Re-detect shares its lane-0 client — an
-            // early tap would only duplicate the drain's detect.
-            redetecting={redetecting || current.status !== 'ready'}
-            verdict={current.decision}
-            // Pure navigation beside Apply: advance reviewIndex only — no
-            // warp, no decision change, no verdict touch. Visited marking
-            // flows through the reviewIndex change like filmstrip/pager taps.
-            onNextPage={() => setReviewIndex((i) => Math.min(queue.length - 1, i + 1))}
-          />
-          {/* Review filmstrip (owned here — ScanicReview renders the single
-              card only): numbered thumbs jump to a page, + returns to camera.
-              Slim (h-12) with 44px targets kept. */}
-          <div
-            data-scan-filmstrip
-            aria-label="Scanned pages"
-            className="flex items-center gap-2 overflow-x-auto py-1"
-          >
-            {queue.map((entry, i) => (
-              <button
-                key={entry.id}
-                type="button"
-                data-film-thumb
-                aria-label={`Go to page ${i + 1} (${entry.decision === 'warped' ? 'auto-crop kept' : 'original kept'})`}
-                aria-current={i === safeIndex}
-                onClick={() => setReviewIndex(i)}
-                className={`relative h-12 w-11 shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
-                  i === safeIndex ? 'border-brass-400' : 'border-paper-200 dark:border-ink-700'
-                }`}
-              >
-                {entry.photoUrl ? (
-                  <img
-                    src={entry.photoUrl}
-                    alt=""
-                    decoding="async"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700 dark:text-ink-300">
+                  {entry.photoUrl ? (
+                    <img
+                      src={entry.photoUrl}
+                      alt=""
+                      decoding="async"
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <span className="flex h-full w-full items-center justify-center bg-paper-200 text-[10px] text-ink-400 dark:bg-ink-700 dark:text-ink-300">
+                      {i + 1}
+                    </span>
+                  )}
+                  {entry.status !== 'ready' && (
+                    <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
+                      …
+                    </span>
+                  )}
+                  <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
                     {i + 1}
                   </span>
-                )}
-                {entry.status !== 'ready' && (
-                  <span className="absolute inset-0 flex items-center justify-center bg-ink-950/50 text-[9px] font-medium text-paper-50">
-                    …
-                  </span>
-                )}
-                <span className="absolute left-1 top-1 rounded-full bg-ink-950/70 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-paper-50">
-                  {i + 1}
-                </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                data-scan-add
+                aria-label="Back to camera"
+                disabled={reviewAdjusting}
+                onClick={() => setPhase('camera')}
+                className="inline-flex h-12 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
+              >
+                + Add pages
               </button>
-            ))}
-            <button
-              type="button"
-              data-scan-add
-              aria-label="Back to camera"
-              onClick={() => setPhase('camera')}
-              className="inline-flex h-12 min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-dashed border-paper-300 px-3 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-ink-300 dark:hover:bg-ink-700"
-            >
-              + Add
-            </button>
-          </div>
-          {/* Batch bar: discard-all vs the single real build action. Build is
+            </div>
+            {/* Batch bar: discard-all vs the single real build action. Build is
               gated on every page settling `ready` AND its crop render
               settling — otherwise a tap would silently commit full-frame
               originals for pages whose crop was still being computed. */}
-          <div
-            data-batch-bar
-            data-build-state={buildState}
-            className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
-          >
-            <button
-              type="button"
-              disabled={building}
-              onClick={discardAll}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-ink-300 dark:hover:bg-ink-700"
+            <div
+              data-batch-bar
+              data-build-state={buildState}
+              className="flex items-center justify-between gap-2 border-t border-paper-200/70 pt-3 dark:border-ink-700/70"
             >
-              Discard scans
-            </button>
-            <button
-              type="button"
-              data-build-pdf
-              disabled={queue.length === 0 || preparing || cropsPending || building}
-              onClick={() => void buildPdf()}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
-            >
-              {building
-                ? 'Building PDF…'
-                : preparing
-                  ? `Preparing pages… ${preparingDone} of ${preparingTotal}`
-                  : cropsPending
-                    ? 'Finishing crops…'
-                    : `Build PDF · ${accepted.length} page${accepted.length === 1 ? '' : 's'}`}
-            </button>
+              <button
+                type="button"
+                disabled={building || reviewAdjusting}
+                onClick={discardAll}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl px-5 py-2.5 text-sm font-medium text-ink-500 transition-colors hover:bg-paper-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-ink-300 dark:hover:bg-ink-700"
+              >
+                Discard scans
+              </button>
+              <button
+                type="button"
+                data-build-pdf
+                disabled={
+                  queue.length === 0 || preparing || cropsPending || building || reviewAdjusting
+                }
+                onClick={() => void buildPdf()}
+                className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-ink-900 px-5 py-2.5 text-sm font-medium text-paper-50 transition-colors hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-paper-50 dark:text-ink-900 dark:hover:bg-paper-200"
+              >
+                {building
+                  ? 'Building PDF…'
+                  : preparing
+                    ? `Preparing pages… ${preparingDone} of ${preparingTotal}`
+                    : cropsPending
+                      ? 'Finishing crops…'
+                      : `Build PDF · ${accepted.length} page${accepted.length === 1 ? '' : 's'}`}
+              </button>
+            </div>
+            {buildError !== null && (
+              <p data-build-error role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {buildError}
+              </p>
+            )}
           </div>
-          {buildError !== null && (
-            <p data-build-error role="alert" className="text-xs text-red-600 dark:text-red-400">
-              {buildError}
-            </p>
-          )}
         </div>
       )}
 

@@ -4,9 +4,9 @@
  * Single-canvas contract: the result view (`[data-crop-result]`) shows ONLY
  * the ML auto-crop result (`warpedUrl`) as exactly one
  * `img[data-crop-result-img]` — never the bare photo beside it. While
- * `warpedUrl` is null the result view shows a `Processing auto-crop…`
- * skeleton (no photo canvas). "Use original" swaps that single canvas to the
- * photo behind an explicit "Original photo — unprocessed" chip (verdict
+ * detection or warp runs, the queued photo paints immediately with a
+ * separate status label. "Use original" swaps that single canvas to the
+ * photo with an explicit "Original photo — unprocessed" label (verdict
  * state, not a second canvas). There is no `[data-detect-overlay]` in the
  * result view and no enhance/filter pipeline, so no such buttons exist.
  *
@@ -30,12 +30,9 @@
  * 44px (a11y) while the visual dot scales with display size. The quad maps
  * 1:1 to displayed pixels.
  *
- * Compact action bar: primary `Apply` (adjust mode only) plus ONE
- * icon-button row (Adjust / Reset, Re-detect, Use original, Discard). Icons
- * are visible SVGs; each icon button keeps its EXACT text label inside a
- * `<span className="sr-only">` so `textContent` matching (unit + E2E) is
- * byte-identical. All stay real `<button>`s with aria-labels, 44px targets,
- * and unchanged disabled states (`[data-redetect]` kept).
+ * Compact action bar: Apply and Cancel in adjust mode, plus labeled buttons
+ * for Adjust / Reset, Re-detect, Use original / Use auto-crop, and Discard.
+ * Controls remain real buttons with 44px targets (`[data-redetect]` kept).
  *
  * Runtime-dependency-free: no scanic worker/client import (type-only
  * `ScanicCorners` from `./scan/index`), pointer drag on the overlay
@@ -88,6 +85,7 @@ export interface ScanicReviewProps {
    * skip the keep (Apply itself is disabled there).
    */
   onNextPage?(): void;
+  onAdjustingChange?(adjusting: boolean): void;
 }
 
 type HandleKey = 'tl' | 'tr' | 'br' | 'bl';
@@ -270,6 +268,7 @@ export default function ScanicReview({
   onDiscard,
   onRedetect,
   redetecting,
+  onAdjustingChange,
   verdict,
   onNextPage,
 }: ScanicReviewProps) {
@@ -398,11 +397,13 @@ export default function ScanicReview({
   const enterAdjust = () => {
     setDraft(cloneCorners(corners ?? fullFrameCorners(safeW, safeH)));
     setAdjusting(true);
+    onAdjustingChange?.(true);
     setGrabbed(null);
     setFocusedHandle(null);
   };
   const cancelAdjust = () => {
     setAdjusting(false);
+    onAdjustingChange?.(false);
     setDraft(null);
     setGrabbed(null);
     setFocusedHandle(null);
@@ -573,6 +574,7 @@ export default function ScanicReview({
   const applyDraft = () => {
     if (draft !== null) onAdjustApply(cloneCorners(draft));
     setAdjusting(false);
+    onAdjustingChange?.(false);
     setDraft(null);
     setGrabbed(null);
     setFocusedHandle(null);
@@ -583,6 +585,7 @@ export default function ScanicReview({
 
   const chooseOriginal = () => {
     setAdjusting(false);
+    onAdjustingChange?.(false);
     setDraft(null);
     onUseOriginal();
   };
@@ -754,7 +757,16 @@ export default function ScanicReview({
   // only scroll container — this card never nests its own (no max-h, no
   // overflow, no padding of its own; the queue's padding + safe-area apply).
   return (
-    <div className="space-y-3">
+    <div
+      className="space-y-3"
+      onKeyDown={(event) => {
+        if (adjusting && event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          cancelAdjust();
+        }
+      }}
+    >
       <div className="flex items-center gap-2">
         <p className="flex-1 text-sm font-medium text-ink-700 dark:text-paper-100">{pageLabel}</p>
         <p
@@ -1034,7 +1046,11 @@ export default function ScanicReview({
           )}
         </div>
       ) : (
-        <div data-crop-result className="relative overflow-hidden rounded-xl bg-ink-950">
+        <div
+          data-crop-result
+          className="relative w-full max-h-[45dvh] bg-ink-950 p-4"
+          style={{ aspectRatio: `${safeW} / ${safeH}` }}
+        >
           {detecting ? (
             <>
               {/* Paint the queued photo immediately; detection then swaps to
@@ -1045,15 +1061,9 @@ export default function ScanicReview({
                 data-crop-result-img
                 src={photoUrl}
                 alt="Photo being processed"
-                className="block max-h-[50dvh] w-full object-contain opacity-70"
+                className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)] object-contain opacity-70"
                 draggable={false}
               />
-              <p
-                role="status"
-                className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50"
-              >
-                Detecting crop…
-              </p>
             </>
           ) : verdict === 'original' ? (
             <>
@@ -1062,12 +1072,9 @@ export default function ScanicReview({
                 data-crop-result-img
                 src={photoUrl}
                 alt="Original photo — unprocessed"
-                className="block max-h-[50dvh] w-full object-contain"
+                className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)] object-contain"
                 draggable={false}
               />
-              <p className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50">
-                Original photo — unprocessed
-              </p>
             </>
           ) : warpedUrl !== null ? (
             <>
@@ -1076,14 +1083,9 @@ export default function ScanicReview({
                 data-crop-result-img
                 src={warpedUrl}
                 alt="Auto-crop result preview"
-                className="block max-h-[50dvh] w-full object-contain"
+                className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)] object-contain"
                 draggable={false}
               />
-              {corners === null && (
-                <p className="px-4 py-2 text-center text-xs text-paper-100/90">
-                  Auto-detect found no page — adjust to crop manually.
-                </p>
-              )}
             </>
           ) : corners === null ? (
             // No detection and no warp yet: show the ORIGINAL photo as the
@@ -1097,12 +1099,9 @@ export default function ScanicReview({
                 data-crop-result-img
                 src={photoUrl}
                 alt="Original photo — no auto-crop found"
-                className="block max-h-[50dvh] w-full object-contain"
+                className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)] object-contain"
                 draggable={false}
               />
-              <p className="px-4 py-2 text-center text-xs text-paper-100/90">
-                Auto-detect found no page — adjust to crop manually.
-              </p>
             </>
           ) : (
             <>
@@ -1113,19 +1112,35 @@ export default function ScanicReview({
                 data-crop-result-img
                 src={photoUrl}
                 alt="Photo being processed"
-                className="block max-h-[50dvh] w-full object-contain opacity-70"
+                className="absolute inset-4 h-[calc(100%-2rem)] w-[calc(100%-2rem)] object-contain opacity-70"
                 draggable={false}
               />
-              <p
-                role="status"
-                className="absolute left-3 top-3 rounded-full bg-ink-950/80 px-3 py-1 text-xs font-medium text-paper-50"
-              >
-                {warpFailed ? 'Auto-crop failed — use original' : 'Processing auto-crop…'}
-              </p>
             </>
           )}
         </div>
       )}
+      {!adjusting &&
+        (detecting || verdict === 'original' || corners === null || warpedUrl === null) && (
+          <p
+            data-crop-status
+            role={
+              detecting || (verdict !== 'original' && corners !== null && warpedUrl === null)
+                ? 'status'
+                : undefined
+            }
+            className="text-xs font-medium text-ink-500 dark:text-ink-300"
+          >
+            {detecting
+              ? 'Detecting crop…'
+              : verdict === 'original'
+                ? 'Original photo — unprocessed'
+                : corners === null
+                  ? 'Auto-detect found no page — adjust to crop manually.'
+                  : warpFailed
+                    ? 'Auto-crop failed — use original'
+                    : 'Processing auto-crop…'}
+          </p>
+        )}
       {note !== null && <p className="text-xs text-ink-400 dark:text-ink-300">{note}</p>}
 
       {adjusting && (
@@ -1171,6 +1186,7 @@ export default function ScanicReview({
                     onAdjustApply(cloneCorners(draft));
                   }
                 }
+                cancelAdjust();
                 onNextPage?.();
               }}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl border border-paper-300 px-4 py-2.5 text-sm font-medium text-ink-700 transition-colors hover:bg-paper-200 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
@@ -1179,7 +1195,20 @@ export default function ScanicReview({
             </button>
           </div>
         )}
-        <div className="grid grid-cols-4 gap-2" role="group" aria-label="Review actions">
+        {adjusting && (
+          <button
+            type="button"
+            onClick={cancelAdjust}
+            className="min-h-[44px] w-full text-sm font-medium text-ink-700 dark:text-paper-100"
+          >
+            Cancel
+          </button>
+        )}
+        <div
+          className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+          role="group"
+          aria-label="Review actions"
+        >
           {!adjusting ? (
             <button
               type="button"
@@ -1201,7 +1230,7 @@ export default function ScanicReview({
                 <path d="M6 2v14a2 2 0 0 0 2 2h14" />
                 <path d="M2 6h14a2 2 0 0 1 2 2v14" />
               </svg>
-              <span className="sr-only">Adjust corners</span>
+              <span className="ml-2 text-xs">Adjust corners</span>
             </button>
           ) : (
             <button
@@ -1229,14 +1258,14 @@ export default function ScanicReview({
                 <path d="M3 12a9 9 0 1 0 2.64-6.36" />
                 <path d="M3 3v6h6" />
               </svg>
-              <span className="sr-only">Reset to auto</span>
+              <span className="ml-2 text-xs">Reset to auto</span>
             </button>
           )}
           <button
             type="button"
             aria-label="Re-detect"
             data-redetect
-            disabled={redetecting}
+            disabled={redetecting || adjusting}
             onClick={redetect}
             className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:cursor-wait disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
           >
@@ -1253,12 +1282,12 @@ export default function ScanicReview({
               <path d="M21 12a9 9 0 1 1-2.64-6.36" />
               <path d="M21 3v6h-6" />
             </svg>
-            <span className="sr-only">Re-detect</span>
+            <span className="ml-2 text-xs">Re-detect</span>
           </button>
           <button
             type="button"
-            aria-label="Use original"
-            disabled={verdictDisabled}
+            aria-label={verdict === 'original' ? 'Use auto-crop' : 'Use original'}
+            disabled={verdictDisabled || adjusting}
             onClick={chooseOriginal}
             className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-paper-300 text-ink-700 transition-colors hover:bg-paper-200 disabled:opacity-40 dark:border-ink-700 dark:text-paper-100 dark:hover:bg-ink-700"
           >
@@ -1276,11 +1305,14 @@ export default function ScanicReview({
               <circle cx="9" cy="9" r="2" />
               <path d="m21 15-4.5-4.5L6 21" />
             </svg>
-            <span className="sr-only">Use original</span>
+            <span className="ml-2 text-xs">
+              {verdict === 'original' ? 'Use auto-crop' : 'Use original'}
+            </span>
           </button>
           <button
             type="button"
             aria-label="Discard"
+            disabled={adjusting}
             onClick={onDiscard}
             className="inline-flex h-11 min-h-[44px] w-full min-w-[44px] items-center justify-center rounded-xl border border-red-600/30 text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:hover:bg-red-950/30"
           >
@@ -1298,7 +1330,7 @@ export default function ScanicReview({
               <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
             </svg>
-            <span className="sr-only">Discard</span>
+            <span className="ml-2 text-xs">Discard</span>
           </button>
         </div>
       </div>

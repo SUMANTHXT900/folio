@@ -96,6 +96,17 @@ under `app/public/assets/scanic-ml/`, precached at install, ML opt-in — see
 local-only, optional benchmark corpus — never required for canonical testing,
 see `docs/DEVELOPMENT.md`) stays at the repo root when a developer creates it.
 
+## User-requested delegation preference (2026-11-14)
+
+For scanner follow-up work, prefer cost-aware orchestration rather than having
+the lead model implement everything: bounded evidence/test execution can use
+GPT-6 Luna; scoped UI implementation can use GPT-6.1 Terra; GPT-6.1 Sol owns
+planning, contracts, integration and review. These are user preferences, not
+benchmarked capability or pricing claims. Resolve exact available model IDs
+before launching, give each lane explicit files/acceptance criteria, and avoid
+concurrent edits to a shared file. Delegate only useful bounded work; don't
+multiply agents or rerun green suites without a relevant change.
+
 ## Documentation update rule
 
 Every meaningful engineering task must update the relevant documentation before the task is considered complete. Do not log trivial actions (files opened, lines changed). Record meaningful project knowledge: decisions, bugs, lessons, detours, state changes, releases.

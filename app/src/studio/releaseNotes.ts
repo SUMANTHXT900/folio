@@ -18,6 +18,44 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    build: 'v1.12.9 scanner review',
+    date: '2026-11-14',
+    notes: [
+      'The scanner review now shows the whole page with more breathing room, clearer crop controls, and simpler page navigation.',
+      'Cropped pages retain a little more detail, while the fast capture flow stays the same.',
+    ],
+  },
+  {
+    build: 'v1.12.8 scanner repair',
+    date: '2026-11-13',
+    notes: [
+      'The scanner saves the full camera frame instead of cutting it to your screen shape, with less JPEG compression for captured and cropped pages.',
+      'Zoom out to Wide, adjust supported zoom and brightness, or request autofocus from compact camera controls.',
+      'Refresh the camera list, or choose Use phone camera for a native photo. Some phone lenses cannot be accessed directly by browsers.',
+    ],
+  },
+  {
+    build: 'v1.12.7 portrait camera experience',
+    date: '2026-11-12',
+    notes: [
+      'Portrait viewfinder fills the screen and captures the same visible framing. Double-tap refocus and sun brightness controls are accessible directly over the preview where supported.',
+    ],
+  },
+  {
+    build: 'v1.12.6 camera framing and controls',
+    date: '2026-11-12',
+    notes: [
+      'Scanner preview shows the full camera frame without cropping. Camera zoom resets to its supported 1 setting on startup. Brightness adjustment and refocus are available when supported by the selected camera.',
+    ],
+  },
+  {
+    build: 'v1.12.5 development update',
+    date: '2026-11-12',
+    notes: [
+      'Camera capture now uses the live video frame. PDF intake errors are visible in Merge, Rotate and Metadata; image previews support Escape and keyboard focus.',
+    ],
+  },
+  {
     build: 'v1.12.4 release',
     date: '2026-10-20',
     notes: [

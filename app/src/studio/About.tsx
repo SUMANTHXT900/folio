@@ -48,9 +48,9 @@ const ENTRIES: Entry[] = [
     title: 'Scanner + real engine underneath',
     status: 'latest',
     changes: [
-      'On-device document scanner on scanic — ML-only detection (a miss keeps the full frame, never a guessed crop); original-feed capture with main-lens default and a persisted camera pick.',
+      'On-device scanner with ML-only crop detection and fast full-frame video capture; supported zoom, brightness and autofocus controls, plus a native phone-camera alternative.',
       'Auto-accept review with thin-handle adjust, a calm loupe, and a fullscreen finder.',
-      'Warped pages commit as full-res JPEG; originals stay byte-identical.',
+      'Fast capture uses JPEG quality 0.95 and cropped pages use 0.97; original files stay byte-identical inside the import pixel budget.',
       'Every tool still runs on the local Rust/WASM engine — Compress stays reserved.',
     ],
   },

@@ -2,6 +2,32 @@
 
 Versions and dates below are verified against git history (`git log --format='%h %ad %s'`) and the About-page version tree. Where the About page and git disagree, both are noted honestly. The v1.2.x–v1.6.0 commits share one squash date (2026-08-23); that is how the history is recorded, not an error.
 
+## v1.12.9 — Scanner review and crop detail (`dev`, 2026-11-14)
+
+- Review presents the complete page on a centered, square-edged mat, with clearer crop actions and one numbered filmstrip.
+- Cropped-page JPEG quality moves to q0.97; the fast live-frame shutter remains q0.95.
+- Deployed to Cloudflare Pages `dev` (`e022d786`). Verified: frontend 802/57, review smoke 22/22, canonical Chromium E2E 104/104 with four optional-corpus skips, type/lint/format/build. Physical-phone quality, latency and UX acceptance remain pending.
+
+## v1.12.8 — Full-frame scanner and honest camera controls (`dev`, 2026-11-13)
+
+- Live capture preserves the complete video frame instead of destructively center-cropping to the phone viewport. Preview and thin frame marks match those pixels; browser-side crop/scale is discouraged with `resizeMode: none`.
+- Capability-backed zoom starts at the hardware minimum (including below 1), with Wide reset and a range slider. Values are camera units, not optical multipliers. Compact brightness/autofocus controls replace the permanent sun rail and unverified tap-location marker. Hardware changes are serialized and preserve other settings.
+- Camera list refreshes on device/visibility changes and on demand without collapsing shared labels/groups. Hidden physical lenses cannot be exposed by application code; an explicit native phone-camera input offers an alternative.
+- Capture JPEG q0.92 → q0.95 and crop output q0.90 → q0.95; no upscaling, sensor still request, extra encode, ML-at-shutter, or change to the existing import pixel budget. Fine-text readability and phone performance still require device validation.
+- Deployed `dev` only: code `5c43307`, Cloudflare `6dd0a849`, entry `index-L5cxRNMs.js`, build `2026-11-13T12:33:27.635Z`. Live About confirms v1.12.8; remote synthetic-camera smoke passes with source/saved dimensions equal and zero page errors. Main/production untouched.
+
+## v1.12.7 — Portrait camera experience (`dev`, 2026-11-12)
+
+Portrait cover preview replaces landscape letterboxing; frame capture matches the visible center crop. Double-tap requests supported refocus, with a visible focus marker. Exposure compensation and refocus controls move from More to the viewfinder. Brightness remains disabled where unsupported. This does not guarantee focus at the tapped point or optical 1x on hardware lacking those APIs.
+
+## v1.12.6 — Scanner framing and camera controls (`dev`, 2026-11-12)
+
+Full-frame preview removes cover cropping. Supported camera zoom requests 1 clamped to device bounds; continuous autofocus/autoexposure are requested when supported. More sheet gains capability-gated refocus and brightness controls with an unsupported explanation. Hardware lens magnification remains platform-dependent.
+
+## v1.12.5 — Video-frame capture and intake fixes (`dev`, 2026-11-12)
+
+Camera shutter captures the live unmirrored video frame as JPEG. Image preview gains modal focus handling and Escape; PDF intake errors are visible in Merge/Rotate/Metadata, overlapping intake is guarded, and oversized merge requests fail before engine staging. Physical-phone image quality remains unverified.
+
 ## v1.12.4 - Scanner review/build flow repair (`dev` -> `main`, 2026-10-20; prod 2026-10-21)
 
 Review entry now paints the queued photo immediately instead of decoding full-resolution pixels on the main thread first. ML detection decodes at <=1600px on the long edge and scales the detected quad back to original pixels, so warp still uses full resolution; detection and warp are time-bounded. The separate "All pages ready" screen is gone: review `Build PDF` hands candidates to one `importFiles` pass and auto-starts one `buildPages` run, with no duplicate `prepareImportFile`. Build is gated on detection plus crop settle (`data-build-state="ready"`), the scanner stays mounted until the commit resolves, and failed/partial imports keep or roll back the queue instead of losing or duplicating captures. Full gate: frontend 792/792 across 56 files, production build 53 entries / 7903.47 KiB, canonical E2E 102/102 + 4 SKIP. Cloudflare Pages `dev` deployment `c50ee343`; alias serves `/assets/index-DjH0_YOG.js` (v1.12.4, build time `2026-10-20T17:13:37.475Z`). Promoted to `main` + Cloudflare production on 2026-10-21 (deployment `5d48a7cd`, same bundle; both apex and direct URL verified).

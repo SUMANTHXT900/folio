@@ -175,7 +175,7 @@ const MergeRow = memo(function MergeRow({
 /* ------------------------------------------------------------------ */
 
 export default function MergeTool() {
-  const { files, setFiles, addFiles, remove, clear, notice } = usePdfFiles();
+  const { files, setFiles, addFiles, remove, clear, notice, error: filesError } = usePdfFiles();
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState<{
     outputs: StudioOutput[];
@@ -234,6 +234,14 @@ export default function MergeTool() {
 
   const onMerge = async () => {
     if (files.length < 2) return;
+    if (files.reduce((sum, file) => sum + file.sizeBytes, 0) > 100 * 1024 * 1024) {
+      setError(
+        new Error(
+          'These PDFs exceed the 100 MB total merge limit. Remove a file or use smaller PDFs.',
+        ),
+      );
+      return;
+    }
     ranRef.current = true;
     setWorking(true);
     setDone(null);
@@ -306,6 +314,12 @@ export default function MergeTool() {
         name="Merge PDFs"
         desc="Combine two or more PDF files into a single document. Drag rows to set the order before merging."
       />
+
+      {filesError && (
+        <p role="alert" className="mt-4 text-sm text-red-500">
+          {filesError}
+        </p>
+      )}
 
       {files.length === 0 ? (
         <DropZone
