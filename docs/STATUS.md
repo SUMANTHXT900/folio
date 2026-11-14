@@ -1,11 +1,11 @@
 # Folio — Status
 
-> Current development: v1.12.9 on `dev` (2026-11-14, D57 scanner review/crop detail), commit `ddec2dd`, Cloudflare deployment `e022d786`. Alias serves `index-BpwNKFNw.js` / `index-CHQ_oaww.css`; About version tree shows v1.12.9 and build metadata. Production/main remains unchanged at the v1.12.4 scanner-flow line.
+> Current development: v1.12.9 on `dev` (2026-11-14, D57 scanner review/crop detail), commit `ddec2dd`, Cloudflare deployment `e022d786`. Production v1.12.9 is on `main` at merge commit `2320629`, Cloudflare deployment `381a9cc6`. Post-production browser testing intentionally omitted per user instruction.
 > After any verification run, update the baseline table below — never leave stale numbers here.
 
 ## Current phase
 
-**v1.12.9 scanner review follow-up (`dev`, deployment `e022d786`).** Full-frame live-video shutter remains JPEG q0.95; cropped output uses q0.97. Review uses centered full-page mat framing, one filmstrip and explicit edit controls. Real-phone visual/detail/performance and browser-hidden physical lenses remain platform/field gates. Local frontend 802/57, review smoke 22/22 and canonical E2E 104/104 + 4 optional-corpus skips; see WORKLOG.
+**v1.12.9 scanner review follow-up (`dev` deployment `e022d786`; production deployment `381a9cc6`).** Full-frame live-video shutter remains JPEG q0.95; cropped output uses q0.97. Review uses centered full-page mat framing, one filmstrip and explicit edit controls. Real-phone visual/detail/performance and browser-hidden physical lenses remain platform/field gates. Local frontend 802/57, review smoke 22/22 and canonical E2E 104/104 + 4 optional-corpus skips were run before promotion. Per user instruction, no post-production browser testing was run.
 
 ### Historical phase narrative (v1.9.5; superseded by current summary above)
 
@@ -44,7 +44,7 @@
 
 ## Current work
 
-- **D57/F-28 scanner review follow-up (v1.12.9, 2026-11-14; dev deploy `e022d786`).** User confirms excellent 50–60-page phone capture speed. Changes add centered square-edged full-page mat framing, one filmstrip, labeled actions and explicit crop Apply/Cancel guarding. Crop JPEG q0.97 follows a bounded synthetic comparison; shutter remains q0.95. Frontend 802/57, typecheck/lint/format/build pass; review smoke 22/22 and canonical Chromium 104/104 + four optional-corpus skips pass. Sixty small synthetic inputs verify navigation, not phone high-resolution performance. Build precache 53 entries / 7935.56 KiB. Alias and About version tree/build metadata verified. Cloudflare Insights beacon was blocked by CSP; no page runtime errors. Phone visual/detail/latency acceptance remains pending.
+- **D57/F-28 scanner review follow-up (v1.12.9, 2026-11-14; dev `e022d786`, production `381a9cc6`).** User confirms excellent 50–60-page phone capture speed. Changes add centered square-edged full-page mat framing, one filmstrip, labeled actions and explicit crop Apply/Cancel guarding. Crop JPEG q0.97 follows a bounded synthetic comparison; shutter remains q0.95. Frontend 802/57, typecheck/lint/format/build pass; review smoke 22/22 and canonical Chromium 104/104 + four optional-corpus skips pass before promotion. Sixty small synthetic inputs verify navigation, not phone high-resolution performance. Build precache 53 entries / 7935.56 KiB. Dev alias and About version/build metadata verified. Production deployed without post-deploy browser checks, per user instruction. Phone visual/detail/latency acceptance remains pending.
 
 - **D56/F-27 scanner repair, v1.12.8 (`dev`, 2026-11-13).** Current acceptance: saved live image dimensions equal the video frame at mismatched viewport ratios; zoom exposes full hardware bounds without claiming optical `×`; exposure does not reset zoom/torch/AF; unsupported controls do not render; all enumerated camera IDs remain selectable/refreshed. Desktop tests pass; phone field acceptance pending.
 
